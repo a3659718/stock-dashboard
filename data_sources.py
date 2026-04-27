@@ -119,21 +119,60 @@ def list_universe(market: str = "all") -> List[str]:
 
 
 # ---------------------------------------------------------------------------
-# 台股日線 / 量價
+# 通用：per-stock 平行抓取
+# ---------------------------------------------------------------------------
+def _finmind_get_one(dataset: str, stock_id: str, start_date: str, end_date: str) -> pd.DataFrame:
+    """單檔抓取，失敗時靜默回空 DataFrame (避免少數股票拖累整批)."""
+    try:
+        return _finmind_get(
+            dataset, data_id=stock_id, start_date=start_date, end_date=end_date
+        )
+    except Exception:
+        return pd.DataFrame()
+
+
+def _fetch_universe(
+    dataset: str, stock_ids: List[str], start_date: str, end_date: str,
+    max_workers: int = 5, progress_cb=None,
+) -> pd.DataFrame:
+    """對一組 stock_ids 平行抓 dataset，回傳合併後的 DataFrame。
+    progress_cb(done, total) 可選的進度回呼 (給 streamlit 用)。
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    rows: List[pd.DataFrame] = []
+    total = len(stock_ids)
+    done = 0
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        futs = {ex.submit(_finmind_get_one, dataset, sid, start_date, end_date): sid
+                for sid in stock_ids}
+        for fut in as_completed(futs):
+            df = fut.result()
+            if df is not None and not df.empty:
+                rows.append(df)
+            done += 1
+            if progress_cb:
+                try:
+                    progress_cb(done, total)
+                except Exception:
+                    pass
+    if not rows:
+        return pd.DataFrame()
+    out = pd.concat(rows, ignore_index=True)
+    if "date" in out.columns:
+        out["date"] = pd.to_datetime(out["date"])
+    return out
+
+
+# ---------------------------------------------------------------------------
+# 台股日線 (universe 版)
 # ---------------------------------------------------------------------------
 @st.cache_data(ttl=900, show_spinner=False)
-def fetch_tw_market_daily(start_date: str, end_date: str) -> pd.DataFrame:
-    """
-    用 FinMind 一次撈全市場日線。
-    注意 FinMind v4 dataset 名稱:
-      TaiwanStockPrice (全市場日線)
-    回傳欄位: date, stock_id, open, max, min, close, Trading_Volume, ...
-    """
-    df = _finmind_get("TaiwanStockPrice", start_date=start_date, end_date=end_date)
-    if df is None or df.empty:
-        return pd.DataFrame()
-    df["date"] = pd.to_datetime(df["date"])
-    # 對齊舊欄位名稱
+def fetch_tw_universe_daily(stock_ids_tuple: tuple, start_date: str, end_date: str) -> pd.DataFrame:
+    """注意 cache 不接受 list，所以參數用 tuple。回傳全部已合併的日線。"""
+    df = _fetch_universe("TaiwanStockPrice", list(stock_ids_tuple), start_date, end_date)
+    if df.empty:
+        return df
     if "max" in df.columns and "high" not in df.columns:
         df = df.rename(columns={"max": "high", "min": "low"})
     df = df.sort_values(["stock_id", "date"]).reset_index(drop=True)
@@ -144,7 +183,7 @@ def fetch_tw_market_daily(start_date: str, end_date: str) -> pd.DataFrame:
 def fetch_tw_stock_daily_one(stock_id: str, days: int = 120) -> pd.DataFrame:
     end_date = dt.date.today().strftime("%Y-%m-%d")
     start_date = (dt.date.today() - dt.timedelta(days=days)).strftime("%Y-%m-%d")
-    df = _finmind_get("TaiwanStockPrice", data_id=stock_id, start_date=start_date, end_date=end_date)
+    df = _finmind_get_one("TaiwanStockPrice", stock_id, start_date, end_date)
     if df is None or df.empty:
         return pd.DataFrame()
     df["date"] = pd.to_datetime(df["date"])
@@ -152,29 +191,31 @@ def fetch_tw_stock_daily_one(stock_id: str, days: int = 120) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
-# 法人 (投信買賣超)
+# 投信法人 (universe 版)
 # ---------------------------------------------------------------------------
 @st.cache_data(ttl=900, show_spinner=False)
-def fetch_institutional_market(start_date: str, end_date: str) -> pd.DataFrame:
-    df = _finmind_get("TaiwanStockInstitutionalInvestorsBuySell",
-                      start_date=start_date, end_date=end_date)
-    if df is None or df.empty:
-        return pd.DataFrame()
-    df["date"] = pd.to_datetime(df["date"])
-    return df
+def fetch_institutional_universe(stock_ids_tuple: tuple, start_date: str, end_date: str) -> pd.DataFrame:
+    df = _fetch_universe(
+        "TaiwanStockInstitutionalInvestorsBuySell",
+        list(stock_ids_tuple), start_date, end_date,
+    )
+    if df.empty:
+        return df
+    return df.sort_values(["stock_id", "date"]).reset_index(drop=True)
 
 
 # ---------------------------------------------------------------------------
-# 融資融券
+# 融資融券 (universe 版)
 # ---------------------------------------------------------------------------
 @st.cache_data(ttl=900, show_spinner=False)
-def fetch_margin_short_market(start_date: str, end_date: str) -> pd.DataFrame:
-    df = _finmind_get("TaiwanStockMarginPurchaseShortSale",
-                      start_date=start_date, end_date=end_date)
-    if df is None or df.empty:
-        return pd.DataFrame()
-    df["date"] = pd.to_datetime(df["date"])
-    return df
+def fetch_margin_universe(stock_ids_tuple: tuple, start_date: str, end_date: str) -> pd.DataFrame:
+    df = _fetch_universe(
+        "TaiwanStockMarginPurchaseShortSale",
+        list(stock_ids_tuple), start_date, end_date,
+    )
+    if df.empty:
+        return df
+    return df.sort_values(["stock_id", "date"]).reset_index(drop=True)
 
 
 # ---------------------------------------------------------------------------

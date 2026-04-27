@@ -100,6 +100,10 @@ with st.sidebar:
     vol_min = st.slider("量比下限 (倍)", 3, 10, 5)
     vol_max = st.slider("量比上限 (倍)", vol_min, 20, max(vol_min, 10))
     short_inc = st.number_input("融券增加門檻 (張)", min_value=10, value=50, step=10)
+    max_stocks = st.slider(
+        "掃描檔數 (FinMind 免費版上限 ~200)", 50, 500, 200, step=50,
+        help="超過 200 檔可能會撞到每小時 API 配額"
+    )
 
     st.divider()
     st.subheader("自動 Telegram 通知")
@@ -111,6 +115,7 @@ tw_params = tw_screener.TWParams(
     vol_min_ratio=float(vol_min),
     vol_max_ratio=float(vol_max),
     short_inc_lots=int(short_inc),
+    max_stocks=int(max_stocks),
 )
 
 # ---------------------------------------------------------------------------
