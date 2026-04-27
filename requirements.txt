@@ -1,0 +1,11 @@
+streamlit==1.36.0
+pandas==2.2.2
+numpy==1.26.4
+requests==2.32.3
+FinMind==1.7.10
+yfinance==0.2.40
+python-telegram-bot==21.4
+plotly==5.22.0
+beautifulsoup4==4.12.3
+lxml==5.2.2
+pytz==2024.1
