@@ -59,11 +59,32 @@ with st.sidebar:
 
     fm_ok = bool(ds.get_finmind_token())
     tg_ok = notifier.is_configured()
+    fm_pkg = ds.finmind_available()
     st.markdown(
+        f"- FinMind 套件: {'✅' if fm_pkg else '❌ (未安裝/Python 版本不相容)'}  \n"
         f"- FinMind Token: {'✅' if fm_ok else '❌'}  \n"
         f"- Telegram: {'✅' if tg_ok else '❌'}"
     )
-    if not (fm_ok and tg_ok):
+
+    with st.expander("🔧 Secrets 偵錯"):
+        keys = ds.list_secret_keys()
+        st.caption("st.secrets 偵測到的 key：")
+        if keys:
+            st.code(", ".join(keys))
+        else:
+            st.code("(空)")
+        st.caption(
+            "若顯示空，代表 Streamlit Cloud Settings > Secrets 還沒儲存成功。"
+            "格式必須是 TOML，例如：\n"
+            "FINMIND_TOKEN = \"eyJ0eXAi...\""
+        )
+
+    if not fm_pkg:
+        st.error(
+            "❗ FinMind 套件沒裝起來，最常見原因是 Python 版本是 3.14（套件還沒支援）。"
+            "請到 App ⋮ → Settings → 把 Python version 改成 3.11 後 Save。"
+        )
+    elif not (fm_ok and tg_ok):
         st.info(
             "尚未設定 secrets？請參考 README，到 Streamlit Cloud > App > Settings > Secrets 貼上："
             "`FINMIND_TOKEN`、`TELEGRAM_BOT_TOKEN`、`TELEGRAM_CHAT_ID` (可選 `FINNHUB_TOKEN`、`US_WATCHLIST`)"
@@ -121,11 +142,16 @@ with tab_tw:
             index=0,
         )
 
-    if run_btn or st.session_state.get("_tw_first_run") is None:
-        st.session_state["_tw_first_run"] = True
-        with st.spinner("掃描全市場中…(首次約 30~60 秒)"):
-            res = tw_screener.run_all_screens(market=market_choice, params=tw_params)
-        st.session_state["tw_result"] = res
+    if run_btn:
+        if not ds.finmind_available():
+            st.error("FinMind 套件未安裝，無法掃描。請先把 Python version 改成 3.11。")
+        else:
+            try:
+                with st.spinner("掃描全市場中…(首次約 30~60 秒)"):
+                    res = tw_screener.run_all_screens(market=market_choice, params=tw_params)
+                st.session_state["tw_result"] = res
+            except Exception as e:
+                st.error(f"掃描失敗：{e}")
 
     res = st.session_state.get("tw_result")
     if not res:
@@ -227,9 +253,15 @@ with tab_pulse:
         send_pulse_tg = st.button("✈️ 把族群熱度送到 Telegram", use_container_width=True,
                                   disabled=not notifier.is_configured())
 
-    if pulse_btn or "pulse" not in st.session_state:
-        with st.spinner("計算族群熱度中…"):
-            st.session_state["pulse"] = sector_pulse.compute_strong_sectors(top_n=200)
+    if pulse_btn:
+        if not ds.finmind_available():
+            st.error("FinMind 套件未安裝，無法掃描。請先把 Python version 改成 3.11。")
+        else:
+            try:
+                with st.spinner("計算族群熱度中…"):
+                    st.session_state["pulse"] = sector_pulse.compute_strong_sectors(top_n=200)
+            except Exception as e:
+                st.error(f"族群分析失敗：{e}")
 
     pulse = st.session_state.get("pulse", {})
     sectors = pulse.get("sectors")
@@ -284,9 +316,12 @@ with tab_us:
         send_us_tg = st.button("✈️ 把 Top 5 送到 Telegram", use_container_width=True,
                                disabled=not notifier.is_configured())
 
-    if us_btn or "us_result" not in st.session_state:
-        with st.spinner("掃描美股候選池中…(約 30~90 秒)"):
-            st.session_state["us_result"] = us_screener.run_us_recommendation(top_n=5)
+    if us_btn:
+        try:
+            with st.spinner("掃描美股候選池中…(約 30~90 秒)"):
+                st.session_state["us_result"] = us_screener.run_us_recommendation(top_n=5)
+        except Exception as e:
+            st.error(f"美股掃描失敗：{e}")
 
     us = st.session_state.get("us_result", {})
     top_picks = us.get("top_picks")
@@ -330,9 +365,14 @@ with tab_us:
 # =============================================================================
 with tab_mood:
     st.subheader("Fear & Greed + 板塊輪動 + 市場新聞題材")
-    if "us_result" not in st.session_state:
-        with st.spinner("抓取市場情緒資料…"):
-            st.session_state["us_result"] = us_screener.run_us_recommendation(top_n=5)
+    mood_btn = st.button("🔄 抓取市場情緒", use_container_width=True, type="primary",
+                         key="mood_btn_main")
+    if mood_btn:
+        try:
+            with st.spinner("抓取市場情緒資料…"):
+                st.session_state["us_result"] = us_screener.run_us_recommendation(top_n=5)
+        except Exception as e:
+            st.error(f"抓取失敗：{e}")
     us = st.session_state.get("us_result", {})
     fg = us.get("fear_greed", {})
     sectors_us = us.get("sectors")
@@ -340,7 +380,6 @@ with tab_mood:
 
     if fg and fg.get("score") is not None:
         st.metric("CNN Fear & Greed Index", round(float(fg["score"]), 1), fg.get("rating", ""))
-        # 異常觸發推播
         alert_msg = notifier.fmt_fear_greed_alert(fg)
         if alert_msg:
             st.warning(alert_msg, icon="⚠️")
@@ -363,12 +402,11 @@ with tab_mood:
             pub = n.get("publisher", "")
             if title and link:
                 st.markdown(f"- [{title}]({link}) · _{pub}_")
-    else:
+    elif "us_result" in st.session_state:
         st.info("目前抓不到 24h 內的市場新聞。")
+    else:
+        st.info("按上方「抓取市場情緒」開始。")
 
-# ---------------------------------------------------------------------------
-# Footer
-# ---------------------------------------------------------------------------
 st.markdown(
     "<div style='text-align:center;color:#888;font-size:12px;margin-top:24px'>"
     "本網站由 Streamlit + FinMind + yfinance 建構，僅供研究參考，非投資建議。"

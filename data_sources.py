@@ -1,7 +1,7 @@
 """
 data_sources.py
 整合所有資料來源：
-  - FinMind  : 台股日線、法人、融資融券
+  - FinMind  : 台股日線、法人、融資融券 (直接呼叫 REST v4 API，不依賴 SDK)
   - yfinance : 美股、台股即時 quote
   - CNN F&G  : Fear & Greed Index
   - Yahoo News / Finnhub : 美股新聞題材
@@ -20,11 +20,6 @@ import requests
 import streamlit as st
 
 try:
-    from FinMind.data import DataLoader
-except Exception:  # pragma: no cover
-    DataLoader = None  # type: ignore
-
-try:
     import yfinance as yf
 except Exception:  # pragma: no cover
     yf = None  # type: ignore
@@ -35,48 +30,84 @@ except Exception:  # pragma: no cover
 # ---------------------------------------------------------------------------
 def _secret(key: str, default: str = "") -> str:
     """安全的讀 Streamlit secrets / 環境變數。"""
+    # 1) Streamlit secrets (dict-like 存取)
     try:
-        return st.secrets.get(key, default)  # type: ignore[attr-defined]
+        if key in st.secrets:
+            v = st.secrets[key]
+            if v is not None:
+                return str(v)
     except Exception:
-        import os
-        return os.environ.get(key, default)
+        pass
+    # 2) Streamlit secrets .get
+    try:
+        v = st.secrets.get(key, None)  # type: ignore[attr-defined]
+        if v:
+            return str(v)
+    except Exception:
+        pass
+    # 3) 環境變數
+    import os
+    return os.environ.get(key, default) or default
+
+
+def list_secret_keys() -> list:
+    """偵錯用：列出 st.secrets 看得到哪些 key。"""
+    try:
+        return list(st.secrets.keys())  # type: ignore[attr-defined]
+    except Exception:
+        return []
 
 
 def get_finmind_token() -> str:
     return _secret("FINMIND_TOKEN")
 
 
+def finmind_available() -> bool:
+    """Token 是否有設好 (有 token 就算可用，不依賴 SDK)."""
+    return bool(get_finmind_token())
+
+
 # ---------------------------------------------------------------------------
-# FinMind helpers
+# FinMind v4 REST 客戶端 (取代 SDK)
 # ---------------------------------------------------------------------------
-@st.cache_resource(show_spinner=False)
-def get_finmind_api():
-    """建立並快取 FinMind DataLoader 實例。"""
-    if DataLoader is None:
-        raise RuntimeError("FinMind 套件未安裝")
-    api = DataLoader()
+FINMIND_API = "https://api.finmindtrade.com/api/v4/data"
+
+
+def _finmind_get(dataset: str, **params) -> pd.DataFrame:
+    """通用 FinMind v4 抓取，自動帶 token，回傳 DataFrame。"""
     token = get_finmind_token()
-    if token:
-        try:
-            api.login_by_token(api_token=token)
-        except Exception as e:
-            st.warning(f"FinMind token 登入失敗：{e}")
-    return api
+    if not token:
+        raise RuntimeError("尚未設定 FINMIND_TOKEN，請到 Streamlit Secrets 加入。")
+    q = {"dataset": dataset, "token": token}
+    q.update({k: v for k, v in params.items() if v not in (None, "")})
+    try:
+        r = requests.get(FINMIND_API, params=q, timeout=30)
+    except Exception as e:
+        raise RuntimeError(f"FinMind 連線錯誤: {e}")
+    if r.status_code != 200:
+        raise RuntimeError(f"FinMind HTTP {r.status_code}: {r.text[:200]}")
+    j = r.json()
+    if j.get("status") not in (200, "200"):
+        raise RuntimeError(f"FinMind API 回應錯誤: {j.get('msg', j)}")
+    data = j.get("data") or []
+    return pd.DataFrame(data)
 
 
+# ---------------------------------------------------------------------------
+# 台股清單
+# ---------------------------------------------------------------------------
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_taiwan_stock_info() -> pd.DataFrame:
     """全台股清單 (含 twse / tpex / 排除 ETF/權證/全額)."""
-    api = get_finmind_api()
-    df = api.taiwan_stock_info()
-    # 只保留 4 碼純數字、非 00 開頭(排除 ETF/期貨)
+    df = _finmind_get("TaiwanStockInfo")
+    if df.empty:
+        return df
     df = df[df["stock_id"].astype(str).str.fullmatch(r"\d{4}")]
     df = df[~df["stock_id"].str.startswith("00")]
     return df.reset_index(drop=True)
 
 
 def list_universe(market: str = "all") -> List[str]:
-    """回傳要掃描的股票清單。market: 'twse' | 'tpex' | 'all'."""
     info = get_taiwan_stock_info()
     if market == "twse":
         sub = info[info["type"] == "twse"]
@@ -88,30 +119,32 @@ def list_universe(market: str = "all") -> List[str]:
 
 
 # ---------------------------------------------------------------------------
-# 台股日線 / 量價 (一次抓全市場較有效率)
+# 台股日線 / 量價
 # ---------------------------------------------------------------------------
 @st.cache_data(ttl=900, show_spinner=False)
 def fetch_tw_market_daily(start_date: str, end_date: str) -> pd.DataFrame:
     """
-    用 FinMind 的 dataset 一次撈全市場日線。
-    回傳欄位: date, stock_id, open, high, low, close, Trading_Volume, ...
+    用 FinMind 一次撈全市場日線。
+    注意 FinMind v4 dataset 名稱:
+      TaiwanStockPrice (全市場日線)
+    回傳欄位: date, stock_id, open, max, min, close, Trading_Volume, ...
     """
-    api = get_finmind_api()
-    df = api.taiwan_stock_daily(stock_id="", start_date=start_date, end_date=end_date)
+    df = _finmind_get("TaiwanStockPrice", start_date=start_date, end_date=end_date)
     if df is None or df.empty:
         return pd.DataFrame()
     df["date"] = pd.to_datetime(df["date"])
+    # 對齊舊欄位名稱
+    if "max" in df.columns and "high" not in df.columns:
+        df = df.rename(columns={"max": "high", "min": "low"})
     df = df.sort_values(["stock_id", "date"]).reset_index(drop=True)
     return df
 
 
 @st.cache_data(ttl=900, show_spinner=False)
 def fetch_tw_stock_daily_one(stock_id: str, days: int = 120) -> pd.DataFrame:
-    """單檔日線。"""
-    api = get_finmind_api()
     end_date = dt.date.today().strftime("%Y-%m-%d")
     start_date = (dt.date.today() - dt.timedelta(days=days)).strftime("%Y-%m-%d")
-    df = api.taiwan_stock_daily(stock_id=stock_id, start_date=start_date, end_date=end_date)
+    df = _finmind_get("TaiwanStockPrice", data_id=stock_id, start_date=start_date, end_date=end_date)
     if df is None or df.empty:
         return pd.DataFrame()
     df["date"] = pd.to_datetime(df["date"])
@@ -123,9 +156,8 @@ def fetch_tw_stock_daily_one(stock_id: str, days: int = 120) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 @st.cache_data(ttl=900, show_spinner=False)
 def fetch_institutional_market(start_date: str, end_date: str) -> pd.DataFrame:
-    """全市場法人資料 (含投信)."""
-    api = get_finmind_api()
-    df = api.taiwan_stock_institutional_investors(stock_id="", start_date=start_date, end_date=end_date)
+    df = _finmind_get("TaiwanStockInstitutionalInvestorsBuySell",
+                      start_date=start_date, end_date=end_date)
     if df is None or df.empty:
         return pd.DataFrame()
     df["date"] = pd.to_datetime(df["date"])
@@ -137,11 +169,8 @@ def fetch_institutional_market(start_date: str, end_date: str) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 @st.cache_data(ttl=900, show_spinner=False)
 def fetch_margin_short_market(start_date: str, end_date: str) -> pd.DataFrame:
-    """全市場融資融券資料."""
-    api = get_finmind_api()
-    df = api.taiwan_stock_margin_purchase_short_sale(
-        stock_id="", start_date=start_date, end_date=end_date
-    )
+    df = _finmind_get("TaiwanStockMarginPurchaseShortSale",
+                      start_date=start_date, end_date=end_date)
     if df is None or df.empty:
         return pd.DataFrame()
     df["date"] = pd.to_datetime(df["date"])
@@ -153,13 +182,10 @@ def fetch_margin_short_market(start_date: str, end_date: str) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 @st.cache_data(ttl=120, show_spinner=False)
 def fetch_yf_quote(symbol: str) -> Dict:
-    """以 yfinance 取得即時 quote.
-    台股要加 .TW (上市) 或 .TWO (上櫃)."""
     if yf is None:
         return {}
     try:
         t = yf.Ticker(symbol)
-        info = t.fast_info if hasattr(t, "fast_info") else {}
         hist = t.history(period="2d", interval="1d")
         last_close = float(hist["Close"].iloc[-1]) if not hist.empty else None
         prev_close = float(hist["Close"].iloc[-2]) if len(hist) >= 2 else None
@@ -199,7 +225,6 @@ def fetch_yf_history(symbol: str, period: str = "6mo", interval: str = "1d") -> 
 # ---------------------------------------------------------------------------
 @st.cache_data(ttl=600, show_spinner=False)
 def fetch_fear_greed() -> Dict:
-    """抓 CNN Fear & Greed Index 公開 endpoint."""
     url = "https://production.dataviz.cnn.io/index/fearandgreed/graphdata"
     headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15) Safari/605.1.15"}
     try:
@@ -222,26 +247,17 @@ def fetch_fear_greed() -> Dict:
 
 
 # ---------------------------------------------------------------------------
-# US Sector ETFs (S&P SPDR)
+# US Sector ETFs
 # ---------------------------------------------------------------------------
 SECTOR_ETFS = {
-    "XLK": "科技",
-    "XLE": "能源",
-    "XLF": "金融",
-    "XLV": "醫療",
-    "XLY": "非必需消費",
-    "XLP": "必需消費",
-    "XLI": "工業",
-    "XLB": "原材料",
-    "XLU": "公用事業",
-    "XLRE": "房地產",
-    "XLC": "通訊服務",
+    "XLK": "科技", "XLE": "能源", "XLF": "金融", "XLV": "醫療",
+    "XLY": "非必需消費", "XLP": "必需消費", "XLI": "工業",
+    "XLB": "原材料", "XLU": "公用事業", "XLRE": "房地產", "XLC": "通訊服務",
 }
 
 
 @st.cache_data(ttl=600, show_spinner=False)
 def fetch_sector_rotation() -> pd.DataFrame:
-    """各 sector ETF 的近期表現 (1d / 5d / 20d %)."""
     if yf is None:
         return pd.DataFrame()
     rows = []
@@ -255,9 +271,8 @@ def fetch_sector_rotation() -> pd.DataFrame:
             r1 = (last / close.iloc[-2] - 1) * 100 if len(close) >= 2 else None
             r5 = (last / close.iloc[-6] - 1) * 100 if len(close) >= 6 else None
             r20 = (last / close.iloc[-21] - 1) * 100 if len(close) >= 21 else None
-            rows.append(
-                {"symbol": sym, "sector": name, "1d_%": r1, "5d_%": r5, "20d_%": r20, "last": float(last)}
-            )
+            rows.append({"symbol": sym, "sector": name, "1d_%": r1,
+                         "5d_%": r5, "20d_%": r20, "last": float(last)})
         except Exception:
             continue
     out = pd.DataFrame(rows)
@@ -267,11 +282,10 @@ def fetch_sector_rotation() -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
-# News 題材 (Yahoo Finance + 可選 Finnhub)
+# News
 # ---------------------------------------------------------------------------
 @st.cache_data(ttl=900, show_spinner=False)
 def fetch_yahoo_news(symbol: str, max_n: int = 6) -> List[Dict]:
-    """從 yfinance Ticker.news 抓近期新聞."""
     if yf is None:
         return []
     try:
@@ -280,21 +294,18 @@ def fetch_yahoo_news(symbol: str, max_n: int = 6) -> List[Dict]:
         items = []
     out = []
     for it in items[:max_n]:
-        out.append(
-            {
-                "title": it.get("title"),
-                "publisher": it.get("publisher"),
-                "link": it.get("link"),
-                "providerPublishTime": it.get("providerPublishTime"),
-                "relatedTickers": it.get("relatedTickers", []),
-            }
-        )
+        out.append({
+            "title": it.get("title"),
+            "publisher": it.get("publisher"),
+            "link": it.get("link"),
+            "providerPublishTime": it.get("providerPublishTime"),
+            "relatedTickers": it.get("relatedTickers", []),
+        })
     return out
 
 
 @st.cache_data(ttl=900, show_spinner=False)
 def fetch_market_news_themes() -> List[Dict]:
-    """抓 SPY/QQQ 近 24 小時新聞做為市場題材參考."""
     items: List[Dict] = []
     seen = set()
     for sym in ["SPY", "QQQ", "DIA", "IWM"]:
@@ -304,7 +315,6 @@ def fetch_market_news_themes() -> List[Dict]:
                 continue
             seen.add(key)
             items.append(it)
-    # 過濾近 24 小時
     cutoff = time.time() - 86400
     items = [x for x in items if (x.get("providerPublishTime") or 0) >= cutoff]
     return items
