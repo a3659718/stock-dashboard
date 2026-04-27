@@ -28,19 +28,9 @@ def universe_with_industry(top_n: int = 400) -> pd.DataFrame:
     if info.empty:
         return pd.DataFrame()
 
-    today = dt.date.today()
-    start = (today - dt.timedelta(days=10)).strftime("%Y-%m-%d")
-    end = today.strftime("%Y-%m-%d")
-    daily = ds.fetch_tw_market_daily(start, end)
-    if daily.empty:
-        return info.head(top_n).copy()
-
-    avg_vol = (
-        daily.groupby("stock_id")["Trading_Volume"].mean().rename("avg_vol").reset_index()
-    )
-    merged = info.merge(avg_vol, on="stock_id", how="inner").sort_values("avg_vol", ascending=False)
-    merged = merged.head(top_n)
-    return merged.reset_index(drop=True)
+    # 為了不燒 quota，這裡僅用 FinMind 的 stock_id 順序取前 top_n 檔
+    # (大型股股號通常較小，足以涵蓋主要流動性個股)
+    return info.head(top_n).copy().reset_index(drop=True)
 
 
 @st.cache_data(ttl=120, show_spinner=False)

@@ -31,7 +31,7 @@ class TWParams:
     vol_max_ratio: float = 10.0
     short_inc_lots: int = 50  # 融券增加 (張)
     invtrust_lookback_days: int = 30
-    use_market_data: bool = True  # 使用 FinMind 全市場 daily (省 API)
+    max_stocks: int = 200  # FinMind 免費版限制：建議 ≤ 200 (3 dataset × 200 = 600 calls)
 
 
 # ---------------------------------------------------------------------------
@@ -199,24 +199,21 @@ def run_all_screens(market: str = "all", params: TWParams | None = None) -> dict
     elif market == "tpex":
         info = info[info["type"] == "tpex"]
 
+    # 取掃描 universe (FinMind 免費版必須 per-stock 抓，限制掃描檔數)
+    universe = info["stock_id"].head(params.max_stocks).tolist()
+    universe_t = tuple(universe)
+
     today = dt.date.today()
     start = (today - dt.timedelta(days=120)).strftime("%Y-%m-%d")
     end = today.strftime("%Y-%m-%d")
 
-    daily = ds.fetch_tw_market_daily(start, end)
-    if not daily.empty:
-        daily = daily[daily["stock_id"].isin(info["stock_id"])]
+    daily = ds.fetch_tw_universe_daily(universe_t, start, end)
 
-    # 法人 / 融資融券要的時間區間比較短
     inst_start = (today - dt.timedelta(days=params.invtrust_lookback_days + 5)).strftime("%Y-%m-%d")
-    inst = ds.fetch_institutional_market(inst_start, end)
-    if not inst.empty:
-        inst = inst[inst["stock_id"].isin(info["stock_id"])]
+    inst = ds.fetch_institutional_universe(universe_t, inst_start, end)
 
     margin_start = (today - dt.timedelta(days=10)).strftime("%Y-%m-%d")
-    margin = ds.fetch_margin_short_market(margin_start, end)
-    if not margin.empty:
-        margin = margin[margin["stock_id"].isin(info["stock_id"])]
+    margin = ds.fetch_margin_universe(universe_t, margin_start, end)
 
     ready = today_data_ready(daily)
 
