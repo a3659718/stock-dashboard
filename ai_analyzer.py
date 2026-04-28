@@ -334,6 +334,52 @@ def _build_chart_prompt(extra_note: str = "", fg: dict | None = None,
 ⚠️ 注意：無法從圖讀到的資訊請誠實說「無法判讀」。結尾加註「以上分析僅供參考，不構成投資建議」。"""
 
 
+def analyze_open_picks(market: str, picks_summary: str,
+                        model: str = DEFAULT_MODEL) -> Tuple[bool, str]:
+    """對開盤分析的 picks 做 AI 觀點補強 (3-5 句)."""
+    api_key = get_gemini_key()
+    if not api_key:
+        return False, "尚未設定 GEMINI_API_KEY"
+    try:
+        import google.generativeai as genai
+    except ImportError:
+        return False, "google-generativeai 未安裝"
+
+    fg = ds.fetch_fear_greed()
+    tw_p = ds.fetch_tw_market_pulse() if market == "TW" else None
+    macro = []
+    if tw_p and tw_p.get("score") is not None:
+        macro.append(f"台股情緒指數 {tw_p['score']} ({tw_p.get('rating_zh')})")
+    if fg and fg.get("score") is not None:
+        macro.append(f"美股 F&G {fg['score']:.0f} ({fg.get('rating')})")
+    macro_line = "市場大環境: " + " / ".join(macro) if macro else ""
+
+    prompt = f"""你是專業 {('台股' if market == 'TW' else '美股')}分析師。下面是今日開盤後 30 分鐘的資金流向與動能股分析：
+
+{macro_line}
+
+{picks_summary}
+
+請用 4-6 句繁體中文總結：
+1. 今日資金主流是什麼類型？(防禦/成長/題材/輪動?)
+2. 上述族群中，哪一個有機會延續整天？哪一個可能只是早盤反彈?
+3. 給投資人 1-2 個操作節奏建議 (例如「等回測支撐」、「分批佈局 A 族群」、「規避 B 族群」)。
+
+避免空泛、不要逐檔評論。結尾加「以上分析僅供參考，不構成投資建議」。"""
+
+    try:
+        genai.configure(api_key=api_key)
+        m = genai.GenerativeModel(model)
+        resp = m.generate_content(
+            prompt,
+            generation_config={"temperature": 0.5, "max_output_tokens": 600},
+        )
+        text = (resp.text or "").strip()
+        return (bool(text), text or "Gemini 沒有回應")
+    except Exception as e:
+        return False, f"Gemini 失敗: {e}"
+
+
 def analyze_chart_image(image_bytes: bytes, extra_note: str = "",
                         fg: dict | None = None, market_news: list | None = None,
                         model: str = DEFAULT_MODEL) -> Tuple[bool, str]:

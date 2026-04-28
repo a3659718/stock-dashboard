@@ -15,11 +15,14 @@ import pandas as pd
 import streamlit as st
 
 import ai_analyzer
+import backtest
 import data_sources as ds
+import market_open_picks
 import news_picks
 import notifier
 import sector_pulse
 import stock_analyzer
+import tracker
 import tw_screener
 import us_screener
 
@@ -152,8 +155,9 @@ watchlist = parse_watchlist(watchlist_raw)
 # ---------------------------------------------------------------------------
 # Tabs
 # ---------------------------------------------------------------------------
-tab_tw, tab_pulse, tab_growth, tab_stock, tab_us, tab_mood = st.tabs(
-    ["🇹🇼 台股篩選", "🚀 強勢族群", "🌱 成長動能 Top10", "🔍 個股分析", "🇺🇸 美股 Top 5", "🧭 市場情緒"]
+tab_tw, tab_pulse, tab_growth, tab_stock, tab_us, tab_mood, tab_bt, tab_track = st.tabs(
+    ["🇹🇼 台股篩選", "🚀 強勢族群", "🌱 成長動能", "🔍 個股分析",
+     "🇺🇸 美股 Top 5", "🧭 市場情緒", "📊 回測勝率", "📈 推薦追蹤"]
 )
 
 
@@ -181,15 +185,17 @@ with tab_tw:
             f"</div>",
             unsafe_allow_html=True,
         )
-        # 異常推播
+        # 異常推播 (每天最多一次)
         if auto_send_on_alert and notifier.is_configured():
             alert = notifier.fmt_tw_pulse_alert(tw_pulse)
             if alert:
-                fp = ("tw_pulse", s)
-                if st.session_state.get("_tw_pulse_alert") != fp:
+                today_key = dt.date.today().isoformat()
+                direction = "low" if s <= 25 else "high"
+                fp = ("tw_pulse", today_key, direction)
+                if st.session_state.get("_tw_pulse_alert_key") != fp:
                     ok, _ = notifier.send_message(alert)
                     if ok:
-                        st.session_state["_tw_pulse_alert"] = fp
+                        st.session_state["_tw_pulse_alert_key"] = fp
 
     # 8 個條件 checkbox（分兩列）
     cond_keys = list(tw_screener.CONDITION_LABELS.keys())
@@ -226,6 +232,13 @@ with tab_tw:
                     market=market_choice, params=tw_params, enabled=enabled_conditions
                 )
             st.session_state["tw_result"] = res
+            # 自動存 snapshot 到追蹤庫
+            try:
+                save_res = tracker.save_snapshot(res.get("combined"))
+                if save_res.get("ok"):
+                    st.toast(f"📈 已存追蹤 ({save_res['rows']} 檔, {save_res['backend']})", icon="💾")
+            except Exception:
+                pass
         except Exception as e:
             st.error(f"掃描失敗：{e}")
 
@@ -365,6 +378,112 @@ with tab_pulse:
                 st.session_state["stealth"] = sector_pulse.find_stealth_followers(top_themes=5)
         except Exception as e:
             st.error(f"潛伏股分析失敗：{e}")
+
+    # === 開盤後 30 分鐘分析 (台股 + 美股) ===
+    st.markdown("---")
+    st.markdown("### ⏰ 開盤後 30 分鐘 · 資金流向分析")
+    st.caption(
+        "台股每天 09:30、美股每天 22:00（台灣時間）由 GitHub Actions 自動跑，"
+        "推送到 Telegram。也可以手動立刻跑：")
+    cO1, cO2 = st.columns(2)
+    with cO1:
+        tw_open_btn = st.button("🇹🇼 立即跑台股開盤分析", use_container_width=True,
+                                 key="tw_open_btn", type="primary")
+    with cO2:
+        us_open_btn = st.button("🇺🇸 立即跑美股開盤分析", use_container_width=True,
+                                 key="us_open_btn", type="primary")
+
+    if tw_open_btn:
+        try:
+            with st.spinner("計算台股開盤資金流向…"):
+                data = market_open_picks.get_tw_open_picks()
+            st.session_state["tw_open_data"] = data
+        except Exception as e:
+            st.error(f"台股分析失敗：{e}")
+
+    if us_open_btn:
+        try:
+            with st.spinner("計算美股開盤資金流向…"):
+                data = market_open_picks.get_us_open_picks()
+            st.session_state["us_open_data"] = data
+        except Exception as e:
+            st.error(f"美股分析失敗：{e}")
+
+    # 顯示台股開盤結果
+    tw_open = st.session_state.get("tw_open_data")
+    if tw_open and not tw_open.get("error"):
+        st.markdown("#### 🇹🇼 台股 — 資金主流前 3 族群")
+        themes_df = tw_open.get("themes")
+        if themes_df is not None and not themes_df.empty:
+            st.dataframe(themes_df, use_container_width=True, hide_index=True)
+        for p in tw_open.get("picks", []):
+            theme = p["theme"]
+            stocks = p["stocks"]
+            if stocks is None or stocks.empty:
+                continue
+            with st.expander(f"📌 [{theme}] 動能潛在股 (3 檔)", expanded=True):
+                show_cols = [c for c in ["stock_id", "stock_name", "現價", "今日%", "5日%", "量比", "score"]
+                              if c in stocks.columns]
+                st.dataframe(stocks[show_cols], use_container_width=True, hide_index=True)
+        # AI 觀點 + 推送
+        if ai_analyzer.gemini_available():
+            if st.button("🤖 加 Gemini 觀點", key="tw_open_ai", use_container_width=True):
+                with st.spinner("Gemini 分析中…"):
+                    from scripts.market_open_alert import _summarize_tw_for_ai
+                    ok, ai_text = ai_analyzer.analyze_open_picks("TW", _summarize_tw_for_ai(tw_open))
+                if ok:
+                    st.markdown("##### 🤖 Gemini 觀點")
+                    st.markdown(ai_text)
+                    st.session_state["tw_open_ai"] = ai_text
+                else:
+                    st.error(ai_text)
+        if st.button("✈️ Send 台股開盤分析 to TG", key="tw_open_send",
+                      disabled=not notifier.is_configured(), use_container_width=True):
+            ai_text = st.session_state.get("tw_open_ai", "")
+            ok, info = notifier.send_message(notifier.fmt_tw_open_picks(tw_open, ai_text=ai_text))
+            if ok:
+                st.success("已送出 ✅")
+            else:
+                st.error(info)
+
+    # 顯示美股開盤結果
+    us_open = st.session_state.get("us_open_data")
+    if us_open and not us_open.get("error"):
+        st.markdown("#### 🇺🇸 美股 — 板塊輪動前 3")
+        sectors_df = us_open.get("sectors")
+        if sectors_df is not None and not sectors_df.empty:
+            st.dataframe(sectors_df, use_container_width=True, hide_index=True)
+        for sp in us_open.get("sector_picks", []):
+            sec = sp["sector"]
+            stocks = sp["stocks"]
+            if stocks is None or stocks.empty:
+                continue
+            with st.expander(f"📌 [{sec}] 動能潛在股 (3 檔)", expanded=False):
+                st.dataframe(stocks, use_container_width=True, hide_index=True)
+        growth = us_open.get("growth")
+        if growth is not None and not growth.empty:
+            st.markdown("##### 🚀 成長動能極強 / 近期 IPO Top 5")
+            st.dataframe(growth, use_container_width=True, hide_index=True)
+
+        if ai_analyzer.gemini_available():
+            if st.button("🤖 加 Gemini 觀點", key="us_open_ai", use_container_width=True):
+                with st.spinner("Gemini 分析中…"):
+                    from scripts.market_open_alert import _summarize_us_for_ai
+                    ok, ai_text = ai_analyzer.analyze_open_picks("US", _summarize_us_for_ai(us_open))
+                if ok:
+                    st.markdown("##### 🤖 Gemini 觀點")
+                    st.markdown(ai_text)
+                    st.session_state["us_open_ai"] = ai_text
+                else:
+                    st.error(ai_text)
+        if st.button("✈️ Send 美股開盤分析 to TG", key="us_open_send",
+                      disabled=not notifier.is_configured(), use_container_width=True):
+            ai_text = st.session_state.get("us_open_ai", "")
+            ok, info = notifier.send_message(notifier.fmt_us_open_picks(us_open, ai_text=ai_text))
+            if ok:
+                st.success("已送出 ✅")
+            else:
+                st.error(info)
 
     # === 潛伏題材股 ===
     stealth_data = st.session_state.get("stealth", {})
@@ -807,17 +926,20 @@ with tab_mood:
         else:
             st.info("尚未取得 CNN 資料")
 
-    # 美股 F&G 異常觸發
+    # 美股 F&G 異常觸發 (每天最多一次)
     if fg and fg.get("score") is not None:
         alert_msg = notifier.fmt_fear_greed_alert(fg)
         if alert_msg:
             st.warning(alert_msg, icon="⚠️")
             if auto_send_on_alert and notifier.is_configured():
-                fp = ("fg", round(float(fg["score"]), 1))
-                if st.session_state.get("_fg_last_alert") != fp:
+                today_key = dt.date.today().isoformat()
+                s_us = float(fg["score"])
+                direction = "low" if s_us <= 25 else "high"
+                fp = ("fg", today_key, direction)
+                if st.session_state.get("_fg_last_alert_key") != fp:
                     ok, _ = notifier.send_message(alert_msg)
                     if ok:
-                        st.session_state["_fg_last_alert"] = fp
+                        st.session_state["_fg_last_alert_key"] = fp
 
     # 台股 F&G 異常觸發
     if tw_pulse and tw_pulse.get("score") is not None:
@@ -841,6 +963,139 @@ with tab_mood:
         st.info("目前抓不到 24h 內的市場新聞。")
     else:
         st.info("按上方「抓取市場情緒」開始。")
+
+# =============================================================================
+# Tab — 回測勝率
+# =============================================================================
+with tab_bt:
+    st.subheader("📊 條件回測 (過去 60 個交易日勝率)")
+    st.caption(
+        "對選中的條件，用 walk-forward 方式跑歷史：每天用截至那天為止的資料判斷命中，"
+        "再算後續 +5d / +10d / +20d 報酬。**只支援價量類條件**（法人/融資融券資料每天打 API 太貴）。"
+    )
+
+    bt_cond_keys = list(backtest.BACKTESTABLE_CONDITIONS.keys())
+    cb_cols = st.columns(3)
+    bt_enabled = []
+    for i, k in enumerate(bt_cond_keys):
+        with cb_cols[i % 3]:
+            if st.checkbox(backtest.BACKTESTABLE_CONDITIONS[k], value=True, key=f"bt_{k}"):
+                bt_enabled.append(k)
+
+    cBT1, cBT2, cBT3 = st.columns([1, 1, 1])
+    with cBT1:
+        bt_days = st.number_input("回測天數", 30, 120, 60, step=10, key="bt_days")
+    with cBT2:
+        bt_universe_n = st.number_input("回測 universe 檔數", 50, 300, 150, step=50, key="bt_universe",
+                                          help="檔數 × 條件 × 60 天。FinMind 配額會吃滿一小時")
+    with cBT3:
+        bt_combo = st.checkbox("組合回測 (同時命中所有勾選)", value=False, key="bt_combo")
+
+    bt_run = st.button("🔄 開始回測", use_container_width=True, type="primary",
+                        disabled=not bt_enabled, key="bt_run_btn")
+
+    if bt_run:
+        info = ds.get_taiwan_stock_info()
+        info = ds.filter_tradeable_stocks(info)
+        universe = info["stock_id"].head(int(bt_universe_n)).tolist()
+        try:
+            with st.spinner(f"回測中…約需 1–3 分鐘 ({int(bt_universe_n)} 檔 × {int(bt_days)} 天)"):
+                if bt_combo:
+                    bt_res = backtest.run_combo_backtest(
+                        universe, bt_enabled, days_back=int(bt_days), params=tw_params,
+                    )
+                else:
+                    bt_res = backtest.run_backtest(
+                        universe, bt_enabled, days_back=int(bt_days), params=tw_params,
+                    )
+            st.session_state["bt_result"] = bt_res
+        except Exception as e:
+            st.error(f"回測失敗：{e}")
+
+    bt_res = st.session_state.get("bt_result")
+    if bt_res:
+        if bt_res.get("error"):
+            st.warning(bt_res["error"])
+        else:
+            st.markdown("### 結果摘要")
+            st.dataframe(bt_res["summary"], use_container_width=True, hide_index=True)
+
+            with st.expander("📁 原始命中明細"):
+                st.dataframe(bt_res["raw"], use_container_width=True, hide_index=True)
+
+            st.caption(
+                "💡 解讀：勝率 > 55% 且平均報酬 > 1.5% 的條件，相對「比擲銅板好」。"
+                "命中次數太少 (<30) 的統計意義不大。"
+            )
+
+
+# =============================================================================
+# Tab — 推薦追蹤
+# =============================================================================
+with tab_track:
+    st.subheader("📈 推薦股追蹤")
+    st.caption(
+        "每次台股篩選掃描完，自動存 snapshot 到追蹤庫。"
+        "幾天/幾週後回頭看「當時推薦股」現在表現如何，淘汰沒用的條件組合。"
+    )
+
+    if tracker.has_gsheets_config():
+        st.success("✅ 已設定 Google Sheets，資料持久保存")
+    else:
+        st.info(
+            "⚠️ 目前用 Local CSV (Streamlit Cloud 重啟會清空)。"
+            "若要持久化請設定 GOOGLE_SHEETS_ID 與 GCP_SERVICE_ACCOUNT_JSON。"
+        )
+
+    cT1, cT2, cT3 = st.columns([1, 1, 1])
+    with cT1:
+        track_window = st.number_input("追蹤天數", 7, 90, 30, step=7, key="track_window")
+    with cT2:
+        track_btn = st.button("🔄 計算追蹤表現", use_container_width=True, type="primary",
+                               key="track_run_btn")
+    with cT3:
+        st.download_button(
+            "💾 下載歷史 CSV", data=tracker.csv_for_download(),
+            file_name=f"tracking_history_{dt.date.today().strftime('%Y%m%d')}.csv",
+            use_container_width=True, key="track_download",
+        )
+
+    upload = st.file_uploader("📤 還原之前下載的歷史 CSV (可選)", type=["csv"], key="track_upload")
+    if upload is not None:
+        res = tracker.import_history_from_csv(upload.getvalue())
+        if res.get("ok"):
+            st.success(f"已匯入 {res['rows']} 筆")
+        else:
+            st.error(f"匯入失敗：{res.get('msg')}")
+
+    if track_btn:
+        try:
+            with st.spinner("計算每檔現價並比對 base_price…"):
+                history = tracker.load_history()
+                perf = tracker.evaluate_history_performance(history, days_window=int(track_window))
+            st.session_state["track_perf"] = perf
+        except Exception as e:
+            st.error(f"追蹤失敗：{e}")
+
+    perf = st.session_state.get("track_perf")
+    if perf is not None and not perf.empty:
+        s = tracker.history_summary(perf)
+        if s:
+            cM1, cM2, cM3, cM4, cM5 = st.columns(5)
+            cM1.metric("追蹤筆數", s["n_picks"])
+            cM2.metric("勝率", f"{s['win_rate']}%")
+            cM3.metric("平均報酬", f"{s['avg_return']}%")
+            cM4.metric("最佳", f"{s['best']}%")
+            cM5.metric("最差", f"{s['worst']}%")
+
+        show_cols = [c for c in
+                     ["snapshot_date", "stock_id", "stock_name", "hits_label",
+                      "base_price", "current_price", "return%", "持有天"]
+                     if c in perf.columns]
+        st.dataframe(perf[show_cols], use_container_width=True, hide_index=True)
+    elif perf is not None:
+        st.info(f"近 {track_window} 天內無 snapshot 紀錄。先到台股篩選分頁跑一次掃描。")
+
 
 st.markdown(
     "<div style='text-align:center;color:#888;font-size:12px;margin-top:24px'>"

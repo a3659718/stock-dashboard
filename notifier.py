@@ -148,6 +148,121 @@ def fmt_strong_sectors(sectors_df) -> str:
     return "\n".join(lines)
 
 
+def fmt_tw_open_picks(data: dict, ai_text: str = "") -> str:
+    """台股開盤後 30 分推播."""
+    if data.get("error"):
+        return f"🇹🇼 台股開盤分析：{data['error']}"
+    lines = [f"<b>🇹🇼 台股開盤後 30 分鐘 · 資金流向</b>"]
+    themes_df = data.get("themes")
+    if themes_df is not None and not themes_df.empty:
+        lines.append("")
+        for _, row in themes_df.iterrows():
+            name = row.get("題材")
+            avg = row.get("平均%")
+            up = int(row.get("上漲家數", 0))
+            n = int(row.get("樣本數", 0))
+            lines.append(f"🔥 <b>{name}</b>  平均 {avg}% · 上漲 {up}/{n}")
+
+    picks = data.get("picks", [])
+    if picks:
+        lines.append("")
+        lines.append("<b>📌 各族群動能潛在股 (3 檔)</b>")
+        for p in picks:
+            theme = p["theme"]
+            stocks = p["stocks"]
+            if stocks is None or (hasattr(stocks, 'empty') and stocks.empty):
+                continue
+            lines.append(f"\n<b>[{theme}]</b>")
+            for _, s in stocks.iterrows():
+                sid = s.get("stock_id", "")
+                nm = s.get("stock_name", "")
+                today = s.get("今日%")
+                ratio = s.get("量比")
+                five = s.get("5日%")
+                lines.append(
+                    f"  • <code>{sid}</code> {nm}  今日 {today}% · 量比 {ratio}x · 5d {five}%"
+                )
+
+    if ai_text:
+        lines.append("")
+        lines.append("<b>🤖 AI 觀點</b>")
+        # 簡化 markdown
+        for line in ai_text.split("\n"):
+            s = line.strip()
+            if s.startswith("## "):
+                lines.append(f"<b>{s[3:]}</b>")
+            else:
+                lines.append(line)
+
+    out = "\n".join(lines)
+    if len(out) > 3900:
+        out = out[:3900] + "\n…(節錄)"
+    return out
+
+
+def fmt_us_open_picks(data: dict, ai_text: str = "") -> str:
+    """美股開盤後 30 分推播."""
+    if data.get("error"):
+        return f"🇺🇸 美股開盤分析：{data['error']}"
+    lines = [f"<b>🇺🇸 美股開盤後 30 分鐘 · 資金流向</b>"]
+    sectors = data.get("sectors")
+    if sectors is not None and not sectors.empty:
+        lines.append("")
+        for _, row in sectors.iterrows():
+            sym = row.get("symbol")
+            sname = row.get("sector", "")
+            r1 = row.get("1d_%")
+            lines.append(f"🔥 <b>{sym} {sname}</b>  1d {r1:.2f}%")
+
+    sector_picks = data.get("sector_picks", [])
+    if sector_picks:
+        lines.append("")
+        lines.append("<b>📌 各板塊動能潛在股 (3 檔)</b>")
+        for sp in sector_picks:
+            sec = sp["sector"]
+            stocks = sp["stocks"]
+            if stocks is None or stocks.empty:
+                continue
+            lines.append(f"\n<b>[{sec}]</b>")
+            for _, s in stocks.iterrows():
+                sym = s.get("symbol", "")
+                today = s.get("今日%")
+                ratio = s.get("量比")
+                twenty = s.get("20日%")
+                lines.append(
+                    f"  • <code>{sym}</code>  今日 {today}% · 量比 {ratio}x · 20d {twenty}%"
+                )
+
+    growth = data.get("growth")
+    if growth is not None and not growth.empty:
+        lines.append("")
+        lines.append("<b>🚀 成長動能極強 / 近期 IPO Top 5</b>")
+        for _, s in growth.head(5).iterrows():
+            sym = s.get("symbol", "")
+            today = s.get("今日%")
+            twenty = s.get("20日%")
+            ratio = s.get("量比")
+            score = s.get("growth_score")
+            lines.append(
+                f"  • <code>{sym}</code>  今日 {today}% · 20d {twenty}% · 量比 {ratio}x · {score}/10"
+            )
+
+    if ai_text:
+        lines.append("")
+        lines.append("<b>🤖 AI 觀點</b>")
+        for line in ai_text.split("\n"):
+            s = line.strip()
+            if s.startswith("## "):
+                lines.append(f"<b>{s[3:]}</b>")
+            else:
+                lines.append(line)
+
+    out = "\n".join(lines)
+    if len(out) > 3900:
+        out = out[:3900] + "\n…(節錄)"
+    return out
+
+
 def fmt_ai_analysis(stock_id: str, name: str, ai_text: str) -> str:
     """AI 個股分析推送格式. Telegram 訊息上限 4096 字，必要時截斷."""
     head = f"<b>🤖 AI 深度分析 — {stock_id} {name}</b>\n"
