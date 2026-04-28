@@ -131,6 +131,22 @@ with st.sidebar:
     auto_send_on_alert = st.checkbox("強勢族群 / 恐慌指數異常時推播", value=True)
 
 
+# 跨 session 共享的 alert dedup 狀態
+@st.cache_resource
+def _alert_dedup_state() -> dict:
+    """所有 session 共用的去重 dict。重啟 Streamlit 才會清。"""
+    return {}
+
+
+def _should_send_once(key: str) -> bool:
+    """同一個 key 一天最多送一次。回傳 True = 可以送、False = 跳過。"""
+    state = _alert_dedup_state()
+    if state.get(key):
+        return False
+    state[key] = True
+    return True
+
+
 tw_params = tw_screener.TWParams(
     vol_min_ratio=float(vol_min),
     vol_max_ratio=float(vol_max),
@@ -185,17 +201,15 @@ with tab_tw:
             f"</div>",
             unsafe_allow_html=True,
         )
-        # 異常推播 (每天最多一次)
+        # 異常推播 (每天最多一次，跨 session 共享)
         if auto_send_on_alert and notifier.is_configured():
             alert = notifier.fmt_tw_pulse_alert(tw_pulse)
             if alert:
                 today_key = dt.date.today().isoformat()
                 direction = "low" if s <= 25 else "high"
-                fp = ("tw_pulse", today_key, direction)
-                if st.session_state.get("_tw_pulse_alert_key") != fp:
-                    ok, _ = notifier.send_message(alert)
-                    if ok:
-                        st.session_state["_tw_pulse_alert_key"] = fp
+                dedup_key = f"tw_pulse_{today_key}_{direction}"
+                if _should_send_once(dedup_key):
+                    notifier.send_message(alert)
 
     # 8 個條件 checkbox（分兩列）
     cond_keys = list(tw_screener.CONDITION_LABELS.keys())
@@ -295,18 +309,18 @@ with tab_tw:
             # ===== Watchlist 命中即推送 =====
             if watchlist and auto_alert_watchlist and notifier.is_configured():
                 hit_in_wl = view[view["stock_id"].isin(watchlist)]
-                fp_wl = (latest_str, tuple(hit_in_wl["stock_id"].tolist()))
-                if not hit_in_wl.empty and st.session_state.get("_wl_last_alert") != fp_wl:
-                    msgs = []
-                    for _, row in hit_in_wl.iterrows():
-                        msgs.append(notifier.fmt_watchlist_alert(
-                            row["stock_id"], row.get("stock_name", ""),
-                            row.get("hit", []), latest_str,
-                            row=row.to_dict(),
-                        ))
-                    ok, info = notifier.send_message("\n\n".join(msgs))
-                    if ok:
-                        st.session_state["_wl_last_alert"] = fp_wl
+                if not hit_in_wl.empty:
+                    # 以日期+命中清單組指紋，跨 session 去重
+                    wl_fp = "wl_" + latest_str + "_" + ",".join(sorted(hit_in_wl["stock_id"].astype(str).tolist()))
+                    if _should_send_once(wl_fp):
+                        msgs = []
+                        for _, row in hit_in_wl.iterrows():
+                            msgs.append(notifier.fmt_watchlist_alert(
+                                row["stock_id"], row.get("stock_name", ""),
+                                row.get("hit", []), latest_str,
+                                row=row.to_dict(),
+                            ))
+                        notifier.send_message("\n\n".join(msgs))
                         st.toast(f"✈️ Watchlist 命中 {len(hit_in_wl)} 檔已推送", icon="🔔")
 
             with st.expander("📁 各條件原始明細"):
@@ -547,12 +561,11 @@ with tab_pulse:
             top1 = sectors.iloc[0]
             avg = float(top1["avg_change"])
             if avg >= 1.5:
-                fingerprint = ("strong_sector", top1[first_col], round(avg, 2))
-                if st.session_state.get("_pulse_last_alert") != fingerprint:
-                    ok, info = notifier.send_message(notifier.fmt_strong_sectors(sectors))
-                    if ok:
-                        st.session_state["_pulse_last_alert"] = fingerprint
-                        st.toast("已推送強勢族群通知", icon="🚀")
+                today_key = dt.date.today().isoformat()
+                pulse_fp = f"strong_sector_{today_key}_{top1[first_col]}"
+                if _should_send_once(pulse_fp):
+                    notifier.send_message(notifier.fmt_strong_sectors(sectors))
+                    st.toast("已推送強勢族群通知", icon="🚀")
 
     if (sectors is None or sectors.empty) and (themes_df is None or themes_df.empty):
         st.info("按上方按鈕開始分析 (盤前/休市時 yfinance 資料可能尚未更新)。")
@@ -926,7 +939,7 @@ with tab_mood:
         else:
             st.info("尚未取得 CNN 資料")
 
-    # 美股 F&G 異常觸發 (每天最多一次)
+    # 美股 F&G 異常觸發 (每天最多一次，跨 session 共享)
     if fg and fg.get("score") is not None:
         alert_msg = notifier.fmt_fear_greed_alert(fg)
         if alert_msg:
@@ -935,11 +948,9 @@ with tab_mood:
                 today_key = dt.date.today().isoformat()
                 s_us = float(fg["score"])
                 direction = "low" if s_us <= 25 else "high"
-                fp = ("fg", today_key, direction)
-                if st.session_state.get("_fg_last_alert_key") != fp:
-                    ok, _ = notifier.send_message(alert_msg)
-                    if ok:
-                        st.session_state["_fg_last_alert_key"] = fp
+                dedup_key = f"us_fg_{today_key}_{direction}"
+                if _should_send_once(dedup_key):
+                    notifier.send_message(alert_msg)
 
     # 台股 F&G 異常觸發
     if tw_pulse and tw_pulse.get("score") is not None:
