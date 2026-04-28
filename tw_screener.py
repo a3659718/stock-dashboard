@@ -418,12 +418,21 @@ def run_all_screens(
     market: str = "all",
     params: TWParams | None = None,
     enabled: list | None = None,
+    progress_cb=None,
 ) -> dict:
     """跑被啟用的篩選，並合併結果。
     market: 'twse' | 'tpex' | 'all'
-    enabled: ['break_ma','volume_burst','short_increase','invtrust_first_buy',
-              'invtrust_consecutive','invtrust_5d_acc','capital_ratio','above_ma_uptrend']
+    enabled: 條件 list
+    progress_cb: callable(stage:str, pct:int) — 用來顯示進度
     """
+    def _p(stage: str, pct: int):
+        if progress_cb:
+            try:
+                progress_cb(stage, pct)
+            except Exception:
+                pass
+
+    _p("準備掃描清單…", 5)
     params = params or TWParams()
     if enabled is None:
         enabled = list(CONDITION_LABELS.keys())
@@ -450,19 +459,28 @@ def run_all_screens(
     need_margin = "short_increase" in enabled
     need_shares = "capital_ratio" in enabled
 
-    daily = ds.fetch_tw_universe_daily(universe_t, start, end) if need_daily else pd.DataFrame()
+    if need_daily:
+        _p(f"抓全市場日線 ({len(universe)} 檔)…", 15)
+        daily = ds.fetch_tw_universe_daily(universe_t, start, end)
+    else:
+        daily = pd.DataFrame()
 
     inst = pd.DataFrame()
     if need_inst:
+        _p(f"抓投信法人資料 ({len(universe)} 檔)…", 35)
         inst_start = (today - dt.timedelta(days=params.invtrust_lookback_days + 5)).strftime("%Y-%m-%d")
         inst = ds.fetch_institutional_universe(universe_t, inst_start, end)
 
     margin = pd.DataFrame()
     if need_margin:
+        _p(f"抓融資融券資料 ({len(universe)} 檔)…", 55)
         margin_start = (today - dt.timedelta(days=10)).strftime("%Y-%m-%d")
         margin = ds.fetch_margin_universe(universe_t, margin_start, end)
 
-    shares_map = ds.fetch_shares_outstanding(universe_t) if need_shares else {}
+    shares_map = {}
+    if need_shares:
+        _p("抓流通股本…", 70)
+        shares_map = ds.fetch_shares_outstanding(universe_t)
 
     # 計算就緒狀態 (任一資料的最新日期)
     latest_date = None
@@ -474,6 +492,7 @@ def run_all_screens(
     ready = (latest_date is not None and pd.Timestamp(latest_date).normalize() == pd.Timestamp(today).normalize())
 
     # 跑各 screen
+    _p("計算各條件命中…", 80)
     results = {}
     if "break_ma" in enabled:
         results["break_ma"] = screen_break_ma(daily)
@@ -509,6 +528,7 @@ def run_all_screens(
         x["market"] = x["stock_id"].map(market_map).fillna("")
         return x
 
+    _p("彙整結果…", 95)
     annotated = {k: annotate(v, CONDITION_LABELS[k]) for k, v in results.items()}
 
     parts = [df for df in annotated.values() if df is not None and not df.empty]
@@ -587,6 +607,7 @@ def run_all_screens(
     else:
         combined = pd.DataFrame(columns=["stock_id", "stock_name", "market", "hit", "hit_count", "hits_label"])
 
+    _p("完成！", 100)
     return {
         "ready": ready,
         "latest_date": latest_date,
