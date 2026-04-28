@@ -50,15 +50,75 @@ def send_message(text: str, disable_preview: bool = True) -> tuple[bool, str]:
 # ---------------------------------------------------------------------------
 # 訊息模板
 # ---------------------------------------------------------------------------
-def fmt_tw_combined(combined_df, latest_date_str: str, market_label: str) -> str:
-    """台股篩選結果訊息."""
+def _fmt_num(v, suffix: str = "") -> str:
+    """安全格式化數字，None / NaN 顯示 —"""
+    try:
+        if v is None:
+            return "—"
+        import math
+        if isinstance(v, float) and math.isnan(v):
+            return "—"
+        if isinstance(v, (int, float)):
+            return f"{v:,.2f}{suffix}" if isinstance(v, float) else f"{v:,}{suffix}"
+    except Exception:
+        pass
+    return str(v) if v not in (None, "") else "—"
+
+
+def fmt_tw_combined(combined_df, latest_date_str: str, market_label: str, max_n: int = 25) -> str:
+    """台股篩選結果訊息（含現價、今日%、投信張數、投本比、量比）。"""
     if combined_df is None or combined_df.empty:
         return f"<b>📊 {market_label} 台股篩選 ({latest_date_str})</b>\n今日無符合條件的標的。"
-    lines = [f"<b>📊 {market_label} 台股篩選 ({latest_date_str})</b>", ""]
-    for i, row in combined_df.head(40).iterrows():
-        lines.append(
-            f"{i+1}. <code>{row['stock_id']}</code> {row.get('stock_name','')} ({row['hit_count']}項) — {row['hits_label']}"
-        )
+
+    # 表頭
+    n_show = min(max_n, len(combined_df))
+    lines = [
+        f"<b>📊 {market_label} 台股篩選 ({latest_date_str})</b>",
+        f"共 <b>{len(combined_df)}</b> 檔符合，顯示前 {n_show} 檔",
+        "",
+    ]
+
+    for i, row in combined_df.head(max_n).iterrows():
+        sid = row.get("stock_id", "")
+        name = row.get("stock_name", "")
+        hits = row.get("hit_count", 0)
+        labels = row.get("hits_label", "")
+
+        # 第 1 行：代號 名稱 (n項)
+        lines.append(f"{i+1}. <code>{sid}</code> {name} <b>({hits}項)</b>")
+
+        # 第 2 行：價量
+        price_part = []
+        if "現價" in combined_df.columns and row.get("現價") is not None:
+            price_part.append(f"💰{_fmt_num(row.get('現價'))}")
+        if "今日%" in combined_df.columns and row.get("今日%") is not None:
+            v = row.get("今日%")
+            arrow = "🔺" if (isinstance(v, (int, float)) and v > 0) else ("🔻" if (isinstance(v, (int, float)) and v < 0) else "▪")
+            price_part.append(f"{arrow}{_fmt_num(v, '%')}")
+        if "量比" in combined_df.columns and row.get("量比") is not None:
+            price_part.append(f"📊量比{_fmt_num(row.get('量比'), 'x')}")
+        if price_part:
+            lines.append(f"   {' · '.join(price_part)}")
+
+        # 第 3 行：法人
+        inst_part = []
+        if "投信今日(張)" in combined_df.columns and row.get("投信今日(張)") is not None:
+            v = row.get("投信今日(張)")
+            sign = "+" if isinstance(v, (int, float)) and v > 0 else ""
+            inst_part.append(f"投信今日 {sign}{_fmt_num(v)}張")
+        if "投信5日(張)" in combined_df.columns and row.get("投信5日(張)") is not None:
+            v = row.get("投信5日(張)")
+            sign = "+" if isinstance(v, (int, float)) and v > 0 else ""
+            inst_part.append(f"5日累計 {sign}{_fmt_num(v)}張")
+        if "投本比%" in combined_df.columns and row.get("投本比%") is not None:
+            inst_part.append(f"投本比 {_fmt_num(row.get('投本比%'), '%')}")
+        if inst_part:
+            lines.append(f"   🏛️ {' · '.join(inst_part)}")
+
+        # 第 4 行：命中條件
+        lines.append(f"   ✅ {labels}")
+        lines.append("")
+
     return "\n".join(lines)
 
 
@@ -138,10 +198,34 @@ def fmt_growth_picks(picks_df) -> str:
     return "\n".join(lines)
 
 
-def fmt_watchlist_alert(stock_id: str, name: str, hits: list, latest_date: str) -> str:
-    """watchlist 命中通知."""
-    line = f"<b>🔔 自選股警報 — {stock_id} {name}</b>\n資料日期: {latest_date}\n命中: {', '.join(hits)}"
-    return line
+def fmt_watchlist_alert(stock_id: str, name: str, hits: list, latest_date: str,
+                         row: dict | None = None) -> str:
+    """watchlist 命中通知，含詳細數值。"""
+    head = f"<b>🔔 自選股警報 — {stock_id} {name}</b>\n資料日期: {latest_date}"
+    body = [head]
+    if row:
+        if row.get("現價") is not None:
+            arrow = ""
+            if isinstance(row.get("今日%"), (int, float)):
+                arrow = "🔺" if row["今日%"] > 0 else ("🔻" if row["今日%"] < 0 else "")
+            body.append(f"現價 {_fmt_num(row.get('現價'))} {arrow}{_fmt_num(row.get('今日%'), '%')}")
+        if row.get("量比") is not None:
+            body.append(f"量比 {_fmt_num(row.get('量比'), 'x')}")
+        inst_parts = []
+        if row.get("投信今日(張)") is not None:
+            v = row.get("投信今日(張)")
+            sign = "+" if isinstance(v, (int, float)) and v > 0 else ""
+            inst_parts.append(f"投信今日 {sign}{_fmt_num(v)}張")
+        if row.get("投信5日(張)") is not None:
+            v = row.get("投信5日(張)")
+            sign = "+" if isinstance(v, (int, float)) and v > 0 else ""
+            inst_parts.append(f"5日累計 {sign}{_fmt_num(v)}張")
+        if row.get("投本比%") is not None:
+            inst_parts.append(f"投本比 {_fmt_num(row.get('投本比%'), '%')}")
+        if inst_parts:
+            body.append("🏛️ " + " · ".join(inst_parts))
+    body.append("✅ 命中: " + ", ".join(hits))
+    return "\n".join(body)
 
 
 def fmt_tw_pulse_alert(pulse: dict, threshold_low: int = 25, threshold_high: int = 75) -> Optional[str]:

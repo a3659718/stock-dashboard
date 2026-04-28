@@ -288,7 +288,8 @@ with tab_tw:
                     for _, row in hit_in_wl.iterrows():
                         msgs.append(notifier.fmt_watchlist_alert(
                             row["stock_id"], row.get("stock_name", ""),
-                            row.get("hit", []), latest_str
+                            row.get("hit", []), latest_str,
+                            row=row.to_dict(),
                         ))
                     ok, info = notifier.send_message("\n\n".join(msgs))
                     if ok:
