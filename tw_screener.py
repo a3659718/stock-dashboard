@@ -438,6 +438,9 @@ def run_all_screens(
         enabled = list(CONDITION_LABELS.keys())
 
     info = ds.get_taiwan_stock_info()
+    # 防禦性去重：FinMind 偶爾會回 dup rows (同檔在不同 type 各一筆)
+    if not info.empty and "stock_id" in info.columns:
+        info = info.drop_duplicates(subset=["stock_id"], keep="first").reset_index(drop=True)
     info = ds.filter_tradeable_stocks(info, exclude_etf=params.exclude_etf)
     if market == "twse":
         info = info[info["type"] == "twse"]
@@ -462,6 +465,8 @@ def run_all_screens(
     if need_daily:
         _p(f"抓全市場日線 ({len(universe)} 檔)…", 15)
         daily = ds.fetch_tw_universe_daily(universe_t, start, end)
+        if not daily.empty:
+            daily = daily.drop_duplicates(subset=["stock_id", "date"], keep="last").reset_index(drop=True)
     else:
         daily = pd.DataFrame()
 
@@ -470,12 +475,16 @@ def run_all_screens(
         _p(f"抓投信法人資料 ({len(universe)} 檔)…", 35)
         inst_start = (today - dt.timedelta(days=params.invtrust_lookback_days + 5)).strftime("%Y-%m-%d")
         inst = ds.fetch_institutional_universe(universe_t, inst_start, end)
+        if not inst.empty:
+            inst = inst.drop_duplicates(subset=["stock_id", "date", "name"], keep="last").reset_index(drop=True)
 
     margin = pd.DataFrame()
     if need_margin:
         _p(f"抓融資融券資料 ({len(universe)} 檔)…", 55)
         margin_start = (today - dt.timedelta(days=10)).strftime("%Y-%m-%d")
         margin = ds.fetch_margin_universe(universe_t, margin_start, end)
+        if not margin.empty:
+            margin = margin.drop_duplicates(subset=["stock_id", "date"], keep="last").reset_index(drop=True)
 
     shares_map = {}
     if need_shares:
@@ -615,14 +624,18 @@ def run_all_screens(
 
         # === 流動性 / 股價門檻過濾 (強勢股例外) ===
         if not daily.empty and (params.min_avg_volume > 0 or params.min_price > 0):
-            avg5_vol = daily.groupby("stock_id")["Trading_Volume"].apply(
+            d_clean = daily.drop_duplicates(subset=["stock_id", "date"], keep="last")
+            avg5_vol_map = d_clean.groupby("stock_id")["Trading_Volume"].apply(
                 lambda s: float(s.iloc[-6:-1].mean()) if len(s) >= 6 else 0.0
-            )
-            combined["_avg5_vol"] = combined["stock_id"].map(avg5_vol).fillna(0)
+            ).to_dict()
+            combined["_avg5_vol"] = combined["stock_id"].map(avg5_vol_map).fillna(0)
             today_pct = combined.get("今日%")
             cond_volume = combined["_avg5_vol"] >= params.min_avg_volume
             cond_price = combined["現價"].fillna(0) >= params.min_price if "現價" in combined else True
-            cond_strong = (today_pct.fillna(0) >= 5.0) if (params.keep_strong_anyway and today_pct is not None) else False
+            if params.keep_strong_anyway and today_pct is not None:
+                cond_strong = today_pct.fillna(0) >= 5.0
+            else:
+                cond_strong = pd.Series([False] * len(combined), index=combined.index)
             keep = (cond_volume & cond_price) | cond_strong
             combined = combined[keep].drop(columns=["_avg5_vol"]).reset_index(drop=True)
     else:
