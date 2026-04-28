@@ -543,54 +543,75 @@ def run_all_screens(
         combined["hits_label"] = combined["hit"].apply(lambda xs: "、".join(xs))
         combined = combined.sort_values(["hit_count", "stock_id"], ascending=[False, True]).reset_index(drop=True)
 
-        # === 補上實用數值欄位 ===
-        # 現價 + 今日漲跌 + 量比 (從 daily 算)
+        # === 補上實用數值欄位 (全部用 dict 查表，避免 reindex 重複錯誤) ===
         if not daily.empty:
-            last_idx = daily.groupby("stock_id").tail(1).set_index("stock_id")
-            prev_idx = daily.groupby("stock_id").nth(-2).set_index("stock_id") if len(daily) > 1 else pd.DataFrame()
-            combined["現價"] = combined["stock_id"].map(last_idx["close"].astype(float)).round(2)
-            if "Trading_Volume" in last_idx.columns:
-                combined["今日量"] = combined["stock_id"].map(last_idx["Trading_Volume"]).astype("Int64")
-            if not prev_idx.empty and "close" in prev_idx.columns:
-                last_close = combined["stock_id"].map(last_idx["close"].astype(float))
-                prev_close = combined["stock_id"].map(prev_idx["close"].astype(float))
-                combined["今日%"] = ((last_close / prev_close - 1) * 100).round(2)
-            # 量比 (今日量 / 5日均量)
-            avg5 = (
-                daily.groupby("stock_id")["Trading_Volume"]
-                .apply(lambda s: s.iloc[-6:-1].mean() if len(s) >= 6 else None)
+            d_sorted = daily.sort_values(["stock_id", "date"]).drop_duplicates(
+                subset=["stock_id", "date"], keep="last"
             )
-            ratio = (
-                last_idx["Trading_Volume"].astype(float) / avg5.astype(float)
-            ).round(2)
-            combined["量比"] = combined["stock_id"].map(ratio)
+            last_close_map = d_sorted.groupby("stock_id")["close"].last().astype(float).to_dict()
+            prev_close_map = d_sorted.groupby("stock_id")["close"].apply(
+                lambda s: float(s.iloc[-2]) if len(s) >= 2 else None
+            ).to_dict()
+            last_vol_map = d_sorted.groupby("stock_id")["Trading_Volume"].last().to_dict()
+            avg5_vol_map = d_sorted.groupby("stock_id")["Trading_Volume"].apply(
+                lambda s: float(s.iloc[-6:-1].mean()) if len(s) >= 6 else None
+            ).to_dict()
+
+            combined["現價"] = combined["stock_id"].map(last_close_map).round(2)
+            combined["今日量"] = combined["stock_id"].map(last_vol_map).astype("Int64")
+
+            def _calc_today_pct(sid):
+                lc = last_close_map.get(sid)
+                pc = prev_close_map.get(sid)
+                if lc is None or pc is None or pc == 0:
+                    return None
+                return round((lc / pc - 1) * 100, 2)
+            combined["今日%"] = combined["stock_id"].map(_calc_today_pct)
+
+            def _calc_ratio(sid):
+                lv = last_vol_map.get(sid)
+                av = avg5_vol_map.get(sid)
+                if lv is None or av is None or av == 0:
+                    return None
+                return round(float(lv) / float(av), 2)
+            combined["量比"] = combined["stock_id"].map(_calc_ratio)
 
         # 投信 5 日累計買超張數
         if not inst.empty:
             it = inst[inst["name"] == "Investment_Trust"].copy()
             if not it.empty:
+                it = it.drop_duplicates(subset=["stock_id", "date"], keep="last")
                 it["net"] = it["buy"].astype(float) - it["sell"].astype(float)
                 last_date = it["date"].max()
-                acc5 = (
+                acc5_map = (
                     it.sort_values("date")
                     .groupby("stock_id")["net"]
                     .apply(lambda s: int(s.tail(5).sum()))
+                    .to_dict()
                 )
-                today_buy = (
+                today_map = (
                     it[it["date"] == last_date]
-                    .set_index("stock_id")["net"]
+                    .groupby("stock_id")["net"]
+                    .last()
                     .apply(lambda v: int(v))
+                    .to_dict()
                 )
-                combined["投信5日(張)"] = combined["stock_id"].map(acc5)
-                combined["投信今日(張)"] = combined["stock_id"].map(today_buy)
+                combined["投信5日(張)"] = combined["stock_id"].map(acc5_map)
+                combined["投信今日(張)"] = combined["stock_id"].map(today_map)
 
         # 投本比
         if shares_map:
-            shares_s = pd.Series(shares_map)
             cum = combined.get("投信5日(張)")
             if cum is not None:
-                shares_for = combined["stock_id"].map(shares_s).astype(float)
-                combined["投本比%"] = (cum.astype(float) / shares_for * 100).round(3)
+                def _cap_ratio(sid, cum_val):
+                    s = shares_map.get(str(sid))
+                    if not s or s <= 0 or cum_val is None or pd.isna(cum_val):
+                        return None
+                    return round(float(cum_val) / float(s) * 100, 3)
+                combined["投本比%"] = [
+                    _cap_ratio(row["stock_id"], row.get("投信5日(張)"))
+                    for _, row in combined.iterrows()
+                ]
 
         # === 流動性 / 股價門檻過濾 (強勢股例外) ===
         if not daily.empty and (params.min_avg_volume > 0 or params.min_price > 0):
