@@ -47,11 +47,69 @@ st.markdown(
               background:#1f6feb22; color:#1f6feb; font-size:12px; margin:2px; }
       .pill.warn { background:#d2940022; color:#d29400; }
       .pill.bad  { background:#d3000022; color:#d30000; }
+
+      /* 分頁列 — 變得更醒目，過窄時會自動換行 */
+      .stTabs [data-baseweb="tab-list"] {
+          gap: 6px;
+          flex-wrap: wrap;
+          overflow-x: auto;
+          border-bottom: 1px solid rgba(127,127,127,0.18);
+          padding-bottom: 4px;
+      }
+      .stTabs [data-baseweb="tab"] {
+          background: rgba(127,127,127,0.10);
+          border-radius: 8px;
+          padding: 10px 14px;
+          font-size: 13px;
+          font-weight: 500;
+          white-space: nowrap;
+          margin-bottom: 4px;
+          border: 1px solid transparent;
+          transition: all 0.15s;
+      }
+      .stTabs [data-baseweb="tab"]:hover {
+          background: rgba(127,127,127,0.20);
+      }
+      .stTabs [aria-selected="true"] {
+          background: rgba(31, 111, 235, 0.22) !important;
+          border: 1px solid rgba(31, 111, 235, 0.6) !important;
+          color: #1f6feb !important;
+      }
+
       @media (max-width: 640px) {
         .block-container { padding-left: 0.6rem; padding-right: 0.6rem; }
+        .stTabs [data-baseweb="tab"] { padding: 8px 10px; font-size: 12px; }
       }
+
+      /* 日期 banner */
+      .date-banner {
+          display: flex; align-items: center; gap: 14px;
+          padding: 10px 14px;
+          background: linear-gradient(90deg, rgba(31,111,235,0.12), rgba(31,111,235,0.04));
+          border-radius: 10px;
+          border-left: 4px solid #1f6feb;
+          margin-bottom: 14px;
+          font-size: 14px;
+      }
+      .date-banner b { font-size: 16px; }
     </style>
     """,
+    unsafe_allow_html=True,
+)
+
+# 頂部日期 banner
+import pytz
+_tw_now = dt.datetime.now(pytz.timezone("Asia/Taipei"))
+_us_now = dt.datetime.now(pytz.timezone("America/New_York"))
+_weekday = ["週一","週二","週三","週四","週五","週六","週日"][_tw_now.weekday()]
+_tw_state = "✅ 開盤中" if (1 <= _tw_now.weekday() <= 5 - 1 or (_tw_now.weekday() <= 4)) and (9 <= _tw_now.hour < 14 or (_tw_now.hour == 13 and _tw_now.minute <= 30)) else "🔴 休市"
+_us_state = "✅ 開盤中" if (_us_now.weekday() <= 4) and ((_us_now.hour == 9 and _us_now.minute >= 30) or (10 <= _us_now.hour < 16)) else "🔴 休市"
+st.markdown(
+    f"<div class='date-banner'>"
+    f"📅 <b>{_tw_now.strftime('%Y-%m-%d')} {_weekday}</b>"
+    f"&nbsp;·&nbsp; 台北 {_tw_now.strftime('%H:%M')} 台股 {_tw_state}"
+    f"&nbsp;·&nbsp; 紐約 {_us_now.strftime('%H:%M')} 美股 {_us_state}"
+    f"</div>",
     unsafe_allow_html=True,
 )
 
@@ -241,12 +299,20 @@ with tab_tw:
 
     if run_btn:
         try:
-            with st.spinner(f"掃描中…(共 {params_max := int(max_stocks)} 檔 × {len(enabled_conditions)} 條件)"):
-                res = tw_screener.run_all_screens(
-                    market=market_choice, params=tw_params, enabled=enabled_conditions
-                )
+            progress_bar = st.progress(0, text="準備掃描…")
+            def _update_progress(stage: str, pct: int):
+                try:
+                    progress_bar.progress(min(100, max(0, int(pct))), text=stage)
+                except Exception:
+                    pass
+
+            res = tw_screener.run_all_screens(
+                market=market_choice, params=tw_params,
+                enabled=enabled_conditions, progress_cb=_update_progress,
+            )
+            progress_bar.empty()
             st.session_state["tw_result"] = res
-            # 自動存 snapshot 到追蹤庫
+            # 自動存 snapshot
             try:
                 save_res = tracker.save_snapshot(res.get("combined"))
                 if save_res.get("ok"):
