@@ -210,7 +210,8 @@ with tab_tw:
                             disabled=not enabled_conditions)
     with colB:
         send_tg_btn = st.button("✈️ Send to TG", use_container_width=True,
-                                disabled=not notifier.is_configured())
+                                disabled=not notifier.is_configured(),
+                                key="send_tw_tg")
     with colC:
         min_hits_label = st.selectbox(
             "顯示需符合幾項",
@@ -340,7 +341,8 @@ with tab_pulse:
         stealth_btn = st.button("🌱 潛伏題材股", use_container_width=True, type="primary")
     with cD:
         send_pulse_tg = st.button("✈️ Send to TG", use_container_width=True,
-                                  disabled=not notifier.is_configured())
+                                  disabled=not notifier.is_configured(),
+                                  key="send_pulse_tg")
 
     if pulse_btn:
         try:
@@ -709,7 +711,8 @@ with tab_us:
         us_btn = st.button("🔄 更新美股推薦", use_container_width=True, type="primary")
     with cB:
         send_us_tg = st.button("✈️ Send to TG", use_container_width=True,
-                               disabled=not notifier.is_configured())
+                               disabled=not notifier.is_configured(),
+                               key="send_us_tg")
 
     if us_btn:
         try:
