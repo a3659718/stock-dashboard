@@ -118,6 +118,21 @@ def list_universe(market: str = "all") -> List[str]:
     return sub["stock_id"].tolist()
 
 
+def filter_tradeable_stocks(info: pd.DataFrame, exclude_etf: bool = True) -> pd.DataFrame:
+    """過濾出可正常買賣的個股 — 排除 ETF/權證/低價/全額交割等。"""
+    if info.empty:
+        return info
+    sub = info.copy()
+    sub = sub[sub["stock_id"].astype(str).str.fullmatch(r"\d{4}")]
+    if exclude_etf:
+        sub = sub[~sub["stock_id"].str.startswith("00")]  # 00xx ETF
+    # 名稱含特殊符號 (有些全額交割股會在名稱前後標 *)
+    if "stock_name" in sub.columns:
+        sub = sub[~sub["stock_name"].astype(str).str.contains(r"\*", na=False)]
+        sub = sub[~sub["stock_name"].astype(str).str.contains("DR$", na=False)]  # 排除 TDR
+    return sub.reset_index(drop=True)
+
+
 # ---------------------------------------------------------------------------
 # 通用：per-stock 平行抓取
 # ---------------------------------------------------------------------------
@@ -216,6 +231,52 @@ def fetch_margin_universe(stock_ids_tuple: tuple, start_date: str, end_date: str
     if df.empty:
         return df
     return df.sort_values(["stock_id", "date"]).reset_index(drop=True)
+
+
+# ---------------------------------------------------------------------------
+# 股本 (取最新季報的普通股股本) — 算投本比用
+# ---------------------------------------------------------------------------
+@st.cache_data(ttl=86400, show_spinner=False)
+def fetch_shares_outstanding(stock_ids_tuple: tuple) -> Dict[str, float]:
+    """回傳 {stock_id: 流通股本(張)}; 1張=1000股, 面額10元."""
+    end = dt.date.today().strftime("%Y-%m-%d")
+    start = (dt.date.today() - dt.timedelta(days=400)).strftime("%Y-%m-%d")
+    df = _fetch_universe("TaiwanStockBalanceSheet", list(stock_ids_tuple), start, end)
+    if df.empty:
+        return {}
+
+    # 試找股本欄位 (FinMind 在不同期間欄名可能不同)
+    type_col = None
+    for c in ["type", "type_name", "Type"]:
+        if c in df.columns:
+            type_col = c
+            break
+    val_col = None
+    for c in ["value", "Value"]:
+        if c in df.columns:
+            val_col = c
+            break
+    if type_col is None or val_col is None:
+        return {}
+
+    # 找「股本」(可能為 CommonStock / 普通股股本 / 4111 / 股本)
+    keywords = ["CommonStock", "普通股股本", "股本"]
+    sub = df[df[type_col].astype(str).str.contains("|".join(keywords), case=False, na=False)]
+    if sub.empty:
+        return {}
+    # 每檔取最近一期
+    sub = sub.sort_values(["stock_id", "date"]).groupby("stock_id").tail(1)
+    out: Dict[str, float] = {}
+    for _, row in sub.iterrows():
+        try:
+            value = float(row[val_col])  # 元
+            shares = value / 10.0          # 股 (面額10元)
+            lots = shares / 1000.0         # 張
+            if lots > 0:
+                out[str(row["stock_id"])] = lots
+        except Exception:
+            continue
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -363,6 +424,76 @@ def fetch_market_news_themes() -> List[Dict]:
 
 def get_finnhub_token() -> str:
     return _secret("FINNHUB_TOKEN")
+
+
+# ---------------------------------------------------------------------------
+# 台股市場情緒指數 (TW-specific Fear & Greed)
+# ---------------------------------------------------------------------------
+@st.cache_data(ttl=600, show_spinner=False)
+def fetch_tw_market_pulse() -> Dict:
+    """以加權指數 (^TWII) 合成 0-100 分台股情緒指數。
+
+    四個子分數平均：
+      1) 5 日動能 (近 5 日漲跌幅)
+      2) 20 日動能 (近 20 日漲跌幅)
+      3) 波動率反向 (高波動 = 恐慌)
+      4) 距 60 日均線位置
+    """
+    twii = fetch_yf_history("^TWII", period="6mo", interval="1d")
+    if twii.empty or len(twii) < 60:
+        return {}
+    try:
+        close = twii["Close"].astype(float)
+        last = float(close.iloc[-1])
+        ret_5d = (last / float(close.iloc[-6]) - 1) * 100 if len(close) >= 6 else 0
+        ret_20d = (last / float(close.iloc[-21]) - 1) * 100 if len(close) >= 21 else 0
+
+        daily_ret = close.pct_change().dropna()
+        vol_20d = float(daily_ret.iloc[-20:].std() * 100) if len(daily_ret) >= 20 else 1.0
+
+        ma60 = float(close.rolling(60).mean().iloc[-1])
+        ma60_dist = (last - ma60) / ma60 * 100 if ma60 else 0
+
+        # 0-100 子分數
+        s_5d = max(0, min(100, 50 + ret_5d * 10))      # ±5% → 0/100
+        s_20d = max(0, min(100, 50 + ret_20d * 5))     # ±10% → 0/100
+        # 台股日波動正常約 0.6-1.0%，>2% 恐慌
+        s_vol = max(0, min(100, 100 - (vol_20d - 0.6) * 50))
+        s_ma = max(0, min(100, 50 + ma60_dist * 5))    # ±10% → 0/100
+
+        score = (s_5d + s_20d + s_vol + s_ma) / 4
+
+        if score <= 25:
+            rating, rating_zh = "Extreme Fear", "極度恐慌"
+        elif score <= 45:
+            rating, rating_zh = "Fear", "恐慌"
+        elif score <= 55:
+            rating, rating_zh = "Neutral", "中性"
+        elif score <= 75:
+            rating, rating_zh = "Greed", "貪婪"
+        else:
+            rating, rating_zh = "Extreme Greed", "極度貪婪"
+
+        return {
+            "score": round(score, 1),
+            "rating": rating,
+            "rating_zh": rating_zh,
+            "components": {
+                "5日動能": round(s_5d, 1),
+                "20日動能": round(s_20d, 1),
+                "波動率": round(s_vol, 1),
+                "MA60距離": round(s_ma, 1),
+            },
+            "raw": {
+                "TWII": round(last, 2),
+                "5日%": round(ret_5d, 2),
+                "20日%": round(ret_20d, 2),
+                "20日日波動率%": round(vol_20d, 2),
+                "距 MA60 %": round(ma60_dist, 2),
+            },
+        }
+    except Exception:
+        return {}
 
 
 @st.cache_data(ttl=900, show_spinner=False)

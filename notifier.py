@@ -88,6 +88,79 @@ def fmt_strong_sectors(sectors_df) -> str:
     return "\n".join(lines)
 
 
+def fmt_ai_analysis(stock_id: str, name: str, ai_text: str) -> str:
+    """AI 個股分析推送格式. Telegram 訊息上限 4096 字，必要時截斷."""
+    head = f"<b>🤖 AI 深度分析 — {stock_id} {name}</b>\n"
+    body = ai_text
+    # 將 markdown 標題行轉成粗體
+    out_lines = []
+    for line in body.split("\n"):
+        s = line.strip()
+        if s.startswith("## "):
+            out_lines.append(f"<b>{s[3:]}</b>")
+        else:
+            out_lines.append(line)
+    full = head + "\n".join(out_lines)
+    if len(full) > 3900:
+        full = full[:3900] + "\n…(節錄)"
+    return full
+
+
+def fmt_stealth_picks(stealth_df, hot_themes_df=None) -> str:
+    """潛伏題材股推送格式."""
+    if stealth_df is None or stealth_df.empty:
+        return "🌱 潛伏題材股：今日無符合條件的標的。"
+    lines = ["<b>🌱 潛伏題材股 (族群熱、本身還沒大漲)</b>"]
+    if hot_themes_df is not None and not hot_themes_df.empty:
+        themes = "、".join(hot_themes_df["題材"].head(3).tolist())
+        lines.append(f"<i>熱門題材: {themes}</i>")
+    lines.append("")
+    for i, row in stealth_df.head(15).iterrows():
+        sid = row.get("stock_id", "")
+        name = row.get("stock_name", "")
+        theme = row.get("題材", "")
+        today = row.get("今日%", "—")
+        five = row.get("5日%", "—")
+        ratio = row.get("量比", "—")
+        lines.append(f"{i+1}. <code>{sid}</code> {name}  [{theme}]")
+        lines.append(f"   今日 {today}% / 5d {five}% / 量比 {ratio}x")
+    return "\n".join(lines)
+
+
+def fmt_growth_picks(picks_df) -> str:
+    if picks_df is None or picks_df.empty:
+        return "🌱 成長動能 Top 10：今日無符合條件的標的。"
+    lines = ["<b>🌱 成長動能 Top 10 (消息面 + K 線健康度)</b>", ""]
+    for i, r in picks_df.iterrows():
+        lines.append(f"{i+1}. <code>{r['代號']}</code> {r['名稱']} · {r.get('題材','')} · {r['score']}/10")
+        if r.get("理由"):
+            lines.append(f"   {r['理由']}")
+    return "\n".join(lines)
+
+
+def fmt_watchlist_alert(stock_id: str, name: str, hits: list, latest_date: str) -> str:
+    """watchlist 命中通知."""
+    line = f"<b>🔔 自選股警報 — {stock_id} {name}</b>\n資料日期: {latest_date}\n命中: {', '.join(hits)}"
+    return line
+
+
+def fmt_tw_pulse_alert(pulse: dict, threshold_low: int = 25, threshold_high: int = 75) -> Optional[str]:
+    if not pulse or pulse.get("score") is None:
+        return None
+    s = pulse["score"]
+    if s <= threshold_low:
+        return (f"⚠️ <b>台股市場極度恐慌</b>\n台股情緒指數: {s} ({pulse.get('rating_zh')})\n"
+                f"加權: {pulse['raw'].get('TWII')} · 5日 {pulse['raw'].get('5日%')}% · "
+                f"距 MA60 {pulse['raw'].get('距 MA60 %')}%\n"
+                "歷史經驗為逢低布局訊號，仍須個股控管風險。")
+    if s >= threshold_high:
+        return (f"⚠️ <b>台股市場極度貪婪</b>\n台股情緒指數: {s} ({pulse.get('rating_zh')})\n"
+                f"加權: {pulse['raw'].get('TWII')} · 5日 {pulse['raw'].get('5日%')}% · "
+                f"距 MA60 {pulse['raw'].get('距 MA60 %')}%\n"
+                "注意風控、避免追高。")
+    return None
+
+
 def fmt_fear_greed_alert(fg: dict, threshold_low: int = 25, threshold_high: int = 75) -> Optional[str]:
     if not fg or fg.get("score") is None:
         return None

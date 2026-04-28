@@ -145,39 +145,44 @@ def run_us_recommendation(top_n: int = 5) -> dict:
         mom = _momentum_metrics(df, spy_df)
         theme = _theme_score_for(sym, news_pool)
 
-        # 評分權重
+        # 評分權重 (消息面加重)
         score = 0
+        reasons: List[str] = []
         if tech.get("ma20_break"):
-            score += 1.5
+            score += 1.5; reasons.append("突破 MA20")
         if tech.get("ma50_break"):
-            score += 1.5
+            score += 1.5; reasons.append("突破 MA50")
         if tech.get("vol_ratio") and tech["vol_ratio"] >= 1.5:
-            score += 1.0
+            score += 1.0; reasons.append(f"量比 {tech['vol_ratio']:.1f}x")
         if mom.get("daily_pct") and mom["daily_pct"] > 1:
-            score += 0.5
+            score += 0.5; reasons.append(f"當日 +{mom['daily_pct']:.1f}%")
         if mom.get("rs_vs_spy_20d") and mom["rs_vs_spy_20d"] > 0:
             score += min(2.0, mom["rs_vs_spy_20d"] / 5.0)
+            reasons.append(f"RS+{mom['rs_vs_spy_20d']:.1f}")
+        # 消息面權重提高
         if theme["themes"]:
-            score += 0.5 * len(theme["themes"])
-        if theme["news_count"] >= 2:
+            score += 1.0 * len(theme["themes"])
+            reasons.append(f"題材: {', '.join(theme['themes'])}")
+        if theme["news_count"] >= 3:
+            score += 1.5; reasons.append(f"新聞熱度高 ({theme['news_count']} 則)")
+        elif theme["news_count"] >= 1:
             score += 0.5
 
-        rows.append(
-            {
-                "symbol": sym,
-                "last": tech.get("last"),
-                "daily_%": mom.get("daily_pct"),
-                "5d_%": mom.get("five_pct"),
-                "20d_%": mom.get("twenty_pct"),
-                "RS_20d": mom.get("rs_vs_spy_20d"),
-                "MA20突破": "Y" if tech.get("ma20_break") else "",
-                "MA50突破": "Y" if tech.get("ma50_break") else "",
-                "量比": tech.get("vol_ratio"),
-                "題材": ", ".join(theme["themes"]) if theme["themes"] else "",
-                "近期新聞": theme["news"],
-                "score": round(float(score), 2),
-            }
-        )
+        rows.append({
+            "symbol": sym,
+            "last": tech.get("last"),
+            "daily_%": mom.get("daily_pct"),
+            "5d_%": mom.get("five_pct"),
+            "20d_%": mom.get("twenty_pct"),
+            "RS_20d": mom.get("rs_vs_spy_20d"),
+            "MA20突破": "Y" if tech.get("ma20_break") else "",
+            "MA50突破": "Y" if tech.get("ma50_break") else "",
+            "量比": tech.get("vol_ratio"),
+            "題材": ", ".join(theme["themes"]) if theme["themes"] else "",
+            "近期新聞": theme["news"],
+            "進場理由": " · ".join(reasons),
+            "score": round(float(score), 2),
+        })
 
     if not rows:
         return {"top_picks": pd.DataFrame(), "fear_greed": fg, "sectors": sector, "news": news_pool}
