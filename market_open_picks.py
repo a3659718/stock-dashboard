@@ -23,6 +23,7 @@ import pandas as pd
 import streamlit as st
 
 import data_sources as ds
+import earnings_calendar
 import market_predictor
 import sector_pulse
 import stock_catalyst
@@ -153,6 +154,7 @@ def get_tw_open_picks(top_themes_n: int = 3, picks_per_theme: int = 3) -> Dict:
             d["_theme"] = p["theme"]
             all_picks_rows.append(d)
     catalysts = stock_catalyst.annotate_picks_with_catalysts(all_picks_rows, market="TW")
+    events = earnings_calendar.annotate_picks_with_events(all_picks_rows, market="TW")
 
     return {
         "themes": themes_df.head(top_themes_n),
@@ -160,6 +162,7 @@ def get_tw_open_picks(top_themes_n: int = 3, picks_per_theme: int = 3) -> Dict:
         "prediction": prediction,
         "accuracy": accuracy,
         "catalysts": catalysts,  # {stock_id: "催化劑文字"}
+        "events": events,        # {stock_id: {last_*, next_*, sentiment, summary}}
     }
 
 
@@ -276,6 +279,7 @@ def get_us_open_picks(top_sectors_n: int = 3, picks_per_sector: int = 3,
             d["_sector"] = "成長動能 / IPO"
             all_us_rows.append(d)
     catalysts = stock_catalyst.annotate_picks_with_catalysts(all_us_rows, market="US")
+    events = earnings_calendar.annotate_picks_with_events(all_us_rows, market="US")
 
     return {
         "sectors": sectors_sorted,
@@ -284,4 +288,5 @@ def get_us_open_picks(top_sectors_n: int = 3, picks_per_sector: int = 3,
         "prediction": prediction,
         "accuracy": accuracy,
         "catalysts": catalysts,
+        "events": events,
     }

@@ -175,6 +175,19 @@ def build_prompt(stock_meta: Dict, daily: pd.DataFrame, ind: pd.DataFrame,
 
     macro_block = "【市場大環境】\n" + "\n".join(macro_lines) + "\n" if macro_lines else ""
 
+    # 財報日期 / 法說會
+    events_block = ""
+    try:
+        import earnings_calendar
+        ev = earnings_calendar.get_stock_events(
+            stock_meta.get("stock_id", ""),
+            market="US" if is_us else "TW",
+        )
+        if ev and ev.get("summary"):
+            events_block = f"\n【財報行事曆】\n{ev['summary']}\n"
+    except Exception:
+        pass
+
     return f"""你是資深的股票分析師，風格務實、強調風險意識。請根據以下資料對股票做完整分析。
 
 【基本資料】
@@ -183,7 +196,7 @@ def build_prompt(stock_meta: Dict, daily: pd.DataFrame, ind: pd.DataFrame,
 產業: {stock_meta.get('industry')}
 市場: {stock_meta.get('market')}
 
-{macro_block}【K 線與漲跌】
+{macro_block}{events_block}【K 線與漲跌】
 {_summarize_kline(daily)}
 
 【{_summarize_indicators(ind)}】

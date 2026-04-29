@@ -229,6 +229,7 @@ def fmt_tw_open_picks(data: dict, ai_text: str = "") -> str:
 
     picks = data.get("picks", [])
     catalysts = data.get("catalysts", {})
+    events = data.get("events", {})
     if picks:
         lines.append("")
         lines.append("<b>📌 各族群動能潛在股 (3 檔)</b>")
@@ -250,6 +251,9 @@ def fmt_tw_open_picks(data: dict, ai_text: str = "") -> str:
                 cat = catalysts.get(str(sid))
                 if cat:
                     lines.append(f"    💡 {cat}")
+                ev = events.get(str(sid))
+                if ev and ev.get("summary") and ev["summary"] != "—":
+                    lines.append(f"    📅 {ev['summary']}")
 
     if ai_text:
         lines.append("")
@@ -288,6 +292,7 @@ def fmt_us_open_picks(data: dict, ai_text: str = "") -> str:
 
     sector_picks = data.get("sector_picks", [])
     catalysts = data.get("catalysts", {})
+    events = data.get("events", {})
     if sector_picks:
         lines.append("")
         lines.append("<b>📌 各板塊動能潛在股 (3 檔)</b>")
@@ -308,6 +313,9 @@ def fmt_us_open_picks(data: dict, ai_text: str = "") -> str:
                 cat = catalysts.get(str(sym))
                 if cat:
                     lines.append(f"    💡 {cat}")
+                ev = events.get(str(sym))
+                if ev and ev.get("summary") and ev["summary"] != "—":
+                    lines.append(f"    📅 {ev['summary']}")
 
     growth = data.get("growth")
     if growth is not None and not growth.empty:
@@ -325,6 +333,9 @@ def fmt_us_open_picks(data: dict, ai_text: str = "") -> str:
             cat = catalysts.get(str(sym))
             if cat:
                 lines.append(f"    💡 {cat}")
+            ev = events.get(str(sym))
+            if ev and ev.get("summary") and ev["summary"] != "—":
+                lines.append(f"    📅 {ev['summary']}")
 
     if ai_text:
         lines.append("")
