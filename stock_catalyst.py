@@ -25,6 +25,92 @@ import data_sources as ds
 
 
 # ---------------------------------------------------------------------------
+# Sentiment 關鍵字字典 (用於沒有 Gemini 時 fallback)
+# ---------------------------------------------------------------------------
+BULLISH_KW_TW = [
+    # 業績相關
+    "EPS 創新高", "創歷史新高", "創新高", "再創高", "暴賺", "獲利大增", "獲利成長",
+    "轉虧為盈", "扭虧", "獲利翻倍", "利多", "成長", "營收創高", "營收新高",
+    "毛利率提升", "毛利攀升", "上修財測", "上修目標價", "目標價調升",
+    # 訂單 / 業務
+    "大單", "大量訂單", "簽約", "得標", "入選", "認證通過", "獲認證", "入列供應鏈",
+    "出貨", "新單", "接單", "拿下", "搶下", "放量", "擴產", "新廠", "新品上市",
+    "推出新品", "合作", "策略結盟", "合資", "結盟",
+    # 題材
+    "AI 訂單", "AI 概念", "AI 伺服器", "受惠 AI", "AI 紅利", "供應鏈", "黃金供應鏈",
+    "電動車", "低軌衛星", "重電", "儲能", "散熱", "矽光子", "ABF",
+    # 法人 / 籌碼
+    "投信買超", "外資買超", "三大法人買超", "大股東增持", "庫藏股",
+    # 股價表現
+    "漲停", "亮燈漲停", "強勢", "領漲",
+]
+
+BEARISH_KW_TW = [
+    "虧損", "下修", "下滑", "減產", "停工", "裁員", "減資", "利空", "看空",
+    "賣超", "跌停", "認列損失", "認列減損", "衰退", "衝擊", "停牌", "下市",
+    "警示", "全額交割", "訴訟", "罰款", "違法", "失敗", "退單", "縮減", "暫停",
+    "大跌", "重挫", "腰斬", "停損", "出售", "減持", "賣出",
+    "降評", "目標價調降", "下修目標價", "預期下調", "獲利下滑",
+]
+
+BULLISH_KW_EN = [
+    "beat", "beats", "raise", "raises", "raised", "upgrade", "upgraded",
+    "outperform", "growth", "record high", "record", "all-time high",
+    "surge", "surged", "soar", "soared", "rally", "rallied",
+    "win", "wins", "won", "deal", "contract", "approval", "approved",
+    "expand", "expanded", "launch", "launched", "partnership",
+    "boost", "boosted", "exceed", "exceeded", "strong",
+    "buyback", "dividend hike", "guidance raised", "AI demand",
+]
+
+BEARISH_KW_EN = [
+    "miss", "missed", "cut", "downgrade", "downgraded", "underperform",
+    "decline", "declined", "loss", "losses", "plunge", "plunged",
+    "drop", "dropped", "slump", "slumped", "lawsuit", "fine", "fined",
+    "warning", "delay", "delayed", "halt", "halted", "recall",
+    "investigation", "probe", "scandal", "weak", "guidance cut",
+]
+
+
+def _score_news_sentiment(title: str, lang: str = "zh") -> Dict:
+    """為一則新聞 title 計分.
+    回傳 {score, bullish_words[], bearish_words[]}.
+    """
+    bull_kw = BULLISH_KW_TW if lang == "zh" else BULLISH_KW_EN
+    bear_kw = BEARISH_KW_TW if lang == "zh" else BEARISH_KW_EN
+    t = title.lower() if lang == "en" else title
+
+    bullish_hits = []
+    bearish_hits = []
+    for w in bull_kw:
+        if (w.lower() if lang == "en" else w) in t:
+            bullish_hits.append(w)
+    for w in bear_kw:
+        if (w.lower() if lang == "en" else w) in t:
+            bearish_hits.append(w)
+    score = len(bullish_hits) - len(bearish_hits)
+    return {"score": score, "bullish": bullish_hits, "bearish": bearish_hits}
+
+
+def _pick_relevant_news(news_list: List[Dict], lang: str = "zh") -> Optional[Dict]:
+    """從新聞列表挑出最有 sentiment 訊號的 (利多優先 → 利空 → 最新)."""
+    if not news_list:
+        return None
+    scored = []
+    for n in news_list:
+        title = (n.get("title") or "").strip()
+        if not title:
+            continue
+        s = _score_news_sentiment(title, lang=lang)
+        scored.append({**n, **s})
+    if not scored:
+        return None
+    # 排序：score 由高到低，相同 score 取較新
+    scored.sort(key=lambda x: (x.get("score", 0), x.get("date", "")), reverse=True)
+    return scored[0]
+
+
+# ---------------------------------------------------------------------------
 # 抓個股新聞
 # ---------------------------------------------------------------------------
 @st.cache_data(ttl=1800, show_spinner=False)
@@ -147,20 +233,20 @@ def annotate_picks_with_catalysts(picks_data: List[Dict], market: str = "TW") ->
     # 整理成 batch payload
     payload: List[Dict] = []
     for r in picks_data:
-        sid = str(r.get("stock_id", "") or r.get("代號", ""))
+        sid = str(r.get("stock_id", "") or r.get("代號", "") or r.get("symbol", ""))
         if not sid:
             continue
         nm = r.get("stock_name", "") or r.get("名稱", "") or ""
         pct = r.get("今日%")
         if pct is None:
-            pct = r.get("今日%") or r.get("daily_%")
-        news = fetch_news_for_stock(sid, market=market, max_items=5, days=7)
+            pct = r.get("daily_%")
+        news = fetch_news_for_stock(sid, market=market, max_items=8, days=14)
         payload.append({
             "stock_id": sid,
             "name": nm,
             "today_pct": pct,
             "news_titles": [n["title"] for n in news[:5] if n.get("title")],
-            "_first_news": news[0] if news else None,
+            "_news_list": news[:8],
         })
 
     # 嘗試 Gemini 批次
@@ -168,13 +254,31 @@ def annotate_picks_with_catalysts(picks_data: List[Dict], market: str = "TW") ->
     if catalysts:
         return catalysts
 
-    # Fallback: 取第一則新聞 title 為催化劑
+    # Fallback: 用關鍵字 sentiment 挑最相關新聞並標 利多 / 利空 / 中性
     fallback: Dict[str, str] = {}
+    lang = "zh" if market == "TW" else "en"
     for s in payload:
-        first = s.get("_first_news")
         sid = s["stock_id"]
-        if first and first.get("title"):
-            fallback[sid] = f"📰 {first['title']}"
-        else:
+        news_list = s.get("_news_list") or []
+        if not news_list:
             fallback[sid] = ""
+            continue
+
+        best = _pick_relevant_news(news_list, lang=lang)
+        if not best:
+            fallback[sid] = ""
+            continue
+
+        title = best.get("title", "")
+        score = best.get("score", 0)
+        if score > 0:
+            kws = "、".join(best.get("bullish", [])[:3]) if lang == "zh" else ", ".join(best.get("bullish", [])[:3])
+            tag = f"〔{kws}〕" if kws else ""
+            fallback[sid] = f"📈 利多：{title} {tag}"
+        elif score < 0:
+            kws = "、".join(best.get("bearish", [])[:3]) if lang == "zh" else ", ".join(best.get("bearish", [])[:3])
+            tag = f"〔{kws}〕" if kws else ""
+            fallback[sid] = f"📉 注意利空：{title} {tag}"
+        else:
+            fallback[sid] = f"📰 {title}"
     return fallback

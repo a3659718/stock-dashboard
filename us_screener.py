@@ -188,8 +188,25 @@ def run_us_recommendation(top_n: int = 5) -> dict:
         return {"top_picks": pd.DataFrame(), "fear_greed": fg, "sectors": sector, "news": news_pool}
 
     df_all = pd.DataFrame(rows).sort_values("score", ascending=False).reset_index(drop=True)
+    top_df = df_all.head(top_n).copy()
+
+    # 補催化劑（美股 Top 5）
+    try:
+        import stock_catalyst
+        records = []
+        for _, r in top_df.iterrows():
+            records.append({
+                "stock_id": r.get("symbol", ""),
+                "stock_name": r.get("symbol", ""),
+                "今日%": r.get("daily_%"),
+            })
+        cat_map = stock_catalyst.annotate_picks_with_catalysts(records, market="US")
+        top_df["催化劑"] = top_df["symbol"].astype(str).map(cat_map).fillna("")
+    except Exception:
+        pass
+
     return {
-        "top_picks": df_all.head(top_n),
+        "top_picks": top_df,
         "all_scored": df_all,
         "fear_greed": fg,
         "sectors": sector,

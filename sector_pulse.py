@@ -199,10 +199,29 @@ def compute_hot_themes() -> dict:
         if df_unf is None or df_unf.empty:
             leaders[theme] = pd.DataFrame()
             continue
-        # 排掉已經出現在更高排名題材的個股
         df_dedup = df_unf[~df_unf["stock_id"].isin(seen_stocks)].head(5).reset_index(drop=True)
         leaders[theme] = df_dedup
         seen_stocks.update(df_dedup["stock_id"].tolist())
+
+    # 補催化劑（用一次 Gemini 批次處理所有 leaders）
+    try:
+        import stock_catalyst
+        all_records = []
+        for theme, df in leaders.items():
+            if df is not None and not df.empty:
+                for _, r in df.iterrows():
+                    rec = r.to_dict()
+                    rec["_theme"] = theme
+                    all_records.append(rec)
+        if all_records:
+            cat_map = stock_catalyst.annotate_picks_with_catalysts(all_records, market="TW")
+            for theme, df in leaders.items():
+                if df is None or df.empty:
+                    continue
+                df["催化劑"] = df["stock_id"].astype(str).map(cat_map).fillna("")
+                leaders[theme] = df
+    except Exception:
+        pass
 
     return {"themes": themes, "leaders": leaders}
 
@@ -269,4 +288,16 @@ def find_stealth_followers(top_themes: int = 5) -> dict:
 
     cols = ["stock_id", "stock_name", "題材", "現價", "今日%", "5日%", "量比", "振幅%"]
     cols = [c for c in cols if c in stealth.columns]
-    return {"hot_themes": themes_df.head(top_themes), "stealth": stealth[cols].head(20)}
+    stealth_top = stealth[cols].head(20).copy()
+
+    # 補催化劑
+    try:
+        import stock_catalyst
+        cat_map = stock_catalyst.annotate_picks_with_catalysts(
+            stealth_top.to_dict("records"), market="TW",
+        )
+        stealth_top["催化劑"] = stealth_top["stock_id"].astype(str).map(cat_map).fillna("")
+    except Exception:
+        pass
+
+    return {"hot_themes": themes_df.head(top_themes), "stealth": stealth_top}

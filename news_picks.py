@@ -164,4 +164,20 @@ def run_news_growth_picks(top_n: int = 10, themes_filter: List[str] = None) -> d
     if not rows:
         return {"picks": pd.DataFrame()}
     picks = pd.DataFrame(rows).sort_values("score", ascending=False).head(top_n).reset_index(drop=True)
+
+    # 補催化劑
+    try:
+        import stock_catalyst
+        records = []
+        for _, r in picks.iterrows():
+            records.append({
+                "stock_id": str(r.get("代號", "")),
+                "stock_name": r.get("名稱", ""),
+                "今日%": None,
+            })
+        cat_map = stock_catalyst.annotate_picks_with_catalysts(records, market="TW")
+        picks["催化劑"] = picks["代號"].astype(str).map(cat_map).fillna("")
+    except Exception:
+        pass
+
     return {"picks": picks}

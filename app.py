@@ -17,11 +17,13 @@ import streamlit as st
 import ai_analyzer
 import backtest
 import data_sources as ds
+import earnings_calendar
 import market_open_picks
 import news_picks
 import notifier
 import sector_pulse
 import stock_analyzer
+import stock_catalyst
 import tracker
 import tw_screener
 import us_screener
@@ -362,11 +364,37 @@ with tab_tw:
             view = combined[combined["hit_count"] >= min_hits]
 
             st.markdown(f"**共 {len(view)} 檔符合 (顯示條件: {min_hits_label})**")
-            # 動態挑可顯示的欄位 (有的條件沒打開就沒對應數值)
+
+            # On-demand 催化劑按鈕（命中股可能很多，避免每次都打 Gemini）
+            cCat1, cCat2 = st.columns([1, 3])
+            with cCat1:
+                load_catalyst_btn = st.button(
+                    "💡 補上催化劑 (AI 推測上漲原因)",
+                    key="tw_catalyst_btn",
+                    use_container_width=True,
+                )
+
+            if load_catalyst_btn:
+                top_n = min(20, len(view))
+                with st.spinner(f"AI 分析前 {top_n} 檔上漲原因…"):
+                    try:
+                        records = view.head(top_n).to_dict("records")
+                        cat_map = stock_catalyst.annotate_picks_with_catalysts(records, market="TW")
+                        st.session_state["tw_catalyst_map"] = cat_map
+                    except Exception as e:
+                        st.error(f"催化劑分析失敗：{e}")
+
+            cat_map_tw = st.session_state.get("tw_catalyst_map", {}) or {}
+            view_with_cat = view.copy()
+            if cat_map_tw:
+                view_with_cat["催化劑"] = view_with_cat["stock_id"].astype(str).map(cat_map_tw).fillna("")
+
             base_cols = ["stock_id", "stock_name", "market", "hit_count", "hits_label"]
             extra_cols = ["現價", "今日%", "今日量", "量比", "投信今日(張)", "投信5日(張)", "投本比%"]
-            show_cols = base_cols + [c for c in extra_cols if c in view.columns]
-            display = view[show_cols].rename(columns={
+            if cat_map_tw:
+                extra_cols.append("催化劑")
+            show_cols = base_cols + [c for c in extra_cols if c in view_with_cat.columns]
+            display = view_with_cat[show_cols].rename(columns={
                 "stock_id": "代號", "stock_name": "名稱", "market": "市場",
                 "hit_count": "命中數", "hits_label": "命中條件",
             })
@@ -617,6 +645,15 @@ with tab_pulse:
     if stealth_df is not None and not stealth_df.empty:
         st.markdown("### 🌱 潛伏題材股 (族群熱、本身還沒大漲、有量能跡象)")
         st.dataframe(stealth_df, use_container_width=True, hide_index=True)
+        # 催化劑明細
+        if "催化劑" in stealth_df.columns and stealth_df["催化劑"].astype(str).str.len().sum() > 0:
+            with st.expander("💡 各檔上漲原因 / 催化劑", expanded=False):
+                for _, row in stealth_df.iterrows():
+                    sid = row.get("stock_id", "")
+                    nm = row.get("stock_name", "")
+                    cat = row.get("催化劑", "")
+                    if cat:
+                        st.markdown(f"- **{sid} {nm}** — {cat}")
         send_stealth_tg = st.button(
             "✈️ Send to TG", use_container_width=True, key="send_stealth_tg",
             disabled=not notifier.is_configured()
@@ -722,6 +759,14 @@ with tab_growth:
         st.info("按上方按鈕開始分析。")
     else:
         st.dataframe(picks, use_container_width=True, hide_index=True)
+        if "催化劑" in picks.columns and picks["催化劑"].astype(str).str.len().sum() > 0:
+            with st.expander("💡 各檔上漲原因 / 催化劑", expanded=True):
+                for _, row in picks.iterrows():
+                    code = row.get("代號", "")
+                    nm = row.get("名稱", "")
+                    cat = row.get("催化劑", "")
+                    if cat:
+                        st.markdown(f"- **{code} {nm}** — {cat}")
         if send_growth_tg and notifier.is_configured():
             ok, info = notifier.send_message(notifier.fmt_growth_picks(picks))
             if ok:
@@ -806,6 +851,81 @@ with tab_stock:
             st.success("命中條件: " + " · ".join(reasons))
         else:
             st.info("目前沒有命中任何條件。")
+
+        # ========== 💡 上漲催化劑 + 財報事件 ==========
+        st.markdown("---")
+        st.markdown("### 💡 為什麼可能會漲？")
+
+        is_us_stock = full.get("is_us", False)
+        market_label = "US" if is_us_stock else "TW"
+
+        # 取近 7 天新聞
+        try:
+            news_list = stock_catalyst.fetch_news_for_stock(
+                sid, market=market_label, max_items=5, days=7
+            )
+        except Exception:
+            news_list = []
+
+        # 取催化劑 (Gemini 批次 / 新聞 fallback)
+        try:
+            today_pct = float(full["daily"]["close"].iloc[-1] /
+                              full["daily"]["close"].iloc[-2] - 1) * 100 if len(full["daily"]) >= 2 else 0.0
+        except Exception:
+            today_pct = 0.0
+
+        try:
+            catalyst_map = stock_catalyst.annotate_picks_with_catalysts(
+                [{"stock_id": sid, "stock_name": full.get("name", ""), "今日%": round(today_pct, 2)}],
+                market=market_label,
+            )
+            catalyst_text = catalyst_map.get(sid, "") if catalyst_map else ""
+        except Exception:
+            catalyst_text = ""
+
+        if catalyst_text:
+            if ai_analyzer.gemini_available():
+                st.info(f"🤖 **AI 推測上漲原因**\n\n{catalyst_text}")
+            else:
+                st.info(f"📰 **近期重點消息**\n\n{catalyst_text}")
+        else:
+            st.warning("近期沒有抓到明顯的催化劑訊息。可以按下方「🤖 AI 深度」做更完整的分析。")
+
+        # 財報行事曆
+        try:
+            ev = earnings_calendar.get_stock_events(sid, market=market_label)
+        except Exception:
+            ev = {}
+
+        if ev and ev.get("summary") and ev["summary"] != "—":
+            sentiment = ev.get("sentiment", "neutral")
+            color_map = {"warn": "🔴", "caution": "🟡", "watch": "🟠", "neutral": "🟢"}
+            icon = color_map.get(sentiment, "🟢")
+            st.markdown(f"**📅 財報行事曆** {icon}")
+            st.caption(ev["summary"])
+            if ev.get("brief"):
+                if sentiment in ("warn", "caution"):
+                    st.warning(f"⚠️ {ev['brief']}")
+                elif sentiment == "watch":
+                    st.info(f"👀 {ev['brief']}")
+
+        # 近期新聞
+        if news_list:
+            with st.expander(f"📰 近 7 天新聞 ({len(news_list)} 則)"):
+                for n in news_list[:8]:
+                    title = n.get("title", "")
+                    link = n.get("link", "")
+                    date = n.get("date", "")
+                    src = n.get("source", "")
+                    head = f"[{date}]" if date else ""
+                    if link:
+                        st.markdown(f"- {head} [{title}]({link}) <span style='color:#888;font-size:11px'>{src}</span>",
+                                     unsafe_allow_html=True)
+                    else:
+                        st.markdown(f"- {head} {title} <span style='color:#888;font-size:11px'>{src}</span>",
+                                     unsafe_allow_html=True)
+
+        st.markdown("---")
 
         # K 線圖
         with st.expander("📈 6 個月 K 線 + MA + 量能", expanded=True):
@@ -985,6 +1105,14 @@ with tab_us:
     else:
         show_df = top_picks.drop(columns=["近期新聞"], errors="ignore")
         st.dataframe(show_df, use_container_width=True, hide_index=True)
+        # 催化劑顯示
+        if "催化劑" in top_picks.columns and top_picks["催化劑"].astype(str).str.len().sum() > 0:
+            with st.expander("💡 各檔上漲原因 / 催化劑", expanded=True):
+                for _, row in top_picks.iterrows():
+                    sym = row.get("symbol", "")
+                    cat = row.get("催化劑", "")
+                    if cat:
+                        st.markdown(f"- **{sym}** — {cat}")
         with st.expander("📰 候選個股近期新聞 / 題材"):
             for _, row in top_picks.iterrows():
                 st.markdown(f"**{row['symbol']}** — 題材: {row.get('題材') or '—'}")
