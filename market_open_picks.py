@@ -23,7 +23,9 @@ import pandas as pd
 import streamlit as st
 
 import data_sources as ds
+import market_predictor
 import sector_pulse
+import stock_catalyst
 
 
 # ---------------------------------------------------------------------------
@@ -108,32 +110,56 @@ def get_tw_open_picks(top_themes_n: int = 3, picks_per_theme: int = 3) -> Dict:
 
     top_themes = themes_df.head(top_themes_n)["題材"].tolist()
     picks: List[Dict] = []
+    seen_sids: set = set()  # 跨題材去重
 
     info = ds.get_taiwan_stock_info()
     name_map = info.set_index("stock_id")["stock_name"].to_dict() if "stock_name" in info.columns else {}
 
     for theme in top_themes:
         df = leaders_map.get(theme, pd.DataFrame())
-        if df.empty:
-            # 退而從題材池抓
+        if df is None or df.empty:
             stock_ids = sector_pulse.TW_THEMES.get(theme, [])
             market_map = info.set_index("stock_id")["type"].to_dict()
             df = sector_pulse.fetch_intraday_metrics(stock_ids, market_map)
-        if df.empty:
-            picks.append({"theme": theme, "stocks": []})
+        if df is None or df.empty:
+            picks.append({"theme": theme, "stocks": pd.DataFrame()})
             continue
 
-        # 計分挑前 N
         df = df.copy()
+        # 跨題材去重
+        df = df[~df["stock_id"].isin(seen_sids)]
         df["score"] = df.apply(lambda r: _score_stock_momentum(r.to_dict()), axis=1)
         df = df[df["score"] > 0].sort_values("score", ascending=False).head(picks_per_theme)
         if "stock_name" not in df.columns:
             df["stock_name"] = df["stock_id"].map(name_map).fillna("")
+        seen_sids.update(df["stock_id"].tolist())
         picks.append({"theme": theme, "stocks": df})
+
+    # 大盤盤型預測 + 評估歷史準確率
+    prediction = market_predictor.predict_tw_pattern()
+    if not prediction.get("error"):
+        market_predictor.save_prediction(prediction)
+    market_predictor.evaluate_pending_predictions()
+    accuracy = market_predictor.accuracy_stats(market="TW", lookback_days=30)
+
+    # 替每檔個股補上催化劑摘要 (Gemini 一次批次處理)
+    all_picks_rows = []
+    for p in picks:
+        st_df = p.get("stocks")
+        if st_df is None or (hasattr(st_df, "empty") and st_df.empty):
+            continue
+        for _, row in st_df.iterrows():
+            d = row.to_dict()
+            d["_theme"] = p["theme"]
+            all_picks_rows.append(d)
+    catalysts = stock_catalyst.annotate_picks_with_catalysts(all_picks_rows, market="TW")
 
     return {
         "themes": themes_df.head(top_themes_n),
         "picks": picks,
+        "prediction": prediction,
+        "accuracy": accuracy,
+        "catalysts": catalysts,  # {stock_id: "催化劑文字"}
     }
 
 
@@ -178,9 +204,12 @@ def get_us_open_picks(top_sectors_n: int = 3, picks_per_sector: int = 3,
         sectors_sorted = sectors.head(top_sectors_n)
 
     sector_picks: List[Dict] = []
+    seen_us_sids: set = set()
     for _, sec in sectors_sorted.iterrows():
         sym = sec["symbol"]
         candidates = US_SECTOR_STOCKS.get(sym, [])
+        # 跨板塊去重
+        candidates = [c for c in candidates if c not in seen_us_sids]
         rows = []
         for s in candidates:
             m = _us_stock_metrics(s)
@@ -191,6 +220,7 @@ def get_us_open_picks(top_sectors_n: int = 3, picks_per_sector: int = 3,
         if rows:
             df = pd.DataFrame(rows)
             df = df[df["score"] > 0].sort_values("score", ascending=False).head(picks_per_sector)
+            seen_us_sids.update(df["symbol"].tolist())
             sector_picks.append({"sector": f"{sym} {sec.get('sector','')}", "stocks": df})
         else:
             sector_picks.append({"sector": f"{sym} {sec.get('sector','')}", "stocks": pd.DataFrame()})
@@ -221,8 +251,37 @@ def get_us_open_picks(top_sectors_n: int = 3, picks_per_sector: int = 3,
     if not growth_df.empty:
         growth_df = growth_df.sort_values("growth_score", ascending=False).head(growth_top)
 
+    # 大盤預測 + 準確率
+    prediction = market_predictor.predict_us_pattern()
+    if not prediction.get("error"):
+        market_predictor.save_prediction(prediction)
+    market_predictor.evaluate_pending_predictions()
+    accuracy = market_predictor.accuracy_stats(market="US", lookback_days=30)
+
+    # 美股催化劑
+    all_us_rows = []
+    for sp in sector_picks:
+        st_df = sp.get("stocks")
+        if st_df is None or st_df.empty:
+            continue
+        for _, row in st_df.iterrows():
+            d = row.to_dict()
+            d["stock_id"] = d.get("symbol", "")  # 統一欄位
+            d["_sector"] = sp["sector"]
+            all_us_rows.append(d)
+    if growth_df is not None and not growth_df.empty:
+        for _, row in growth_df.iterrows():
+            d = row.to_dict()
+            d["stock_id"] = d.get("symbol", "")
+            d["_sector"] = "成長動能 / IPO"
+            all_us_rows.append(d)
+    catalysts = stock_catalyst.annotate_picks_with_catalysts(all_us_rows, market="US")
+
     return {
         "sectors": sectors_sorted,
         "sector_picks": sector_picks,
         "growth": growth_df,
+        "prediction": prediction,
+        "accuracy": accuracy,
+        "catalysts": catalysts,
     }

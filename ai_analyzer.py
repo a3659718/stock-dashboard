@@ -336,7 +336,7 @@ def _build_chart_prompt(extra_note: str = "", fg: dict | None = None,
 
 def analyze_open_picks(market: str, picks_summary: str,
                         model: str = DEFAULT_MODEL) -> Tuple[bool, str]:
-    """對開盤分析的 picks 做 AI 觀點補強 (3-5 句)."""
+    """對開盤分析的 picks 做 AI 觀點補強 (含國際新聞 / 油價 / Trump 等 sentiment context)."""
     api_key = get_gemini_key()
     if not api_key:
         return False, "尚未設定 GEMINI_API_KEY"
@@ -345,6 +345,7 @@ def analyze_open_picks(market: str, picks_summary: str,
     except ImportError:
         return False, "google-generativeai 未安裝"
 
+    # 市場情緒指數
     fg = ds.fetch_fear_greed()
     tw_p = ds.fetch_tw_market_pulse() if market == "TW" else None
     macro = []
@@ -354,25 +355,47 @@ def analyze_open_picks(market: str, picks_summary: str,
         macro.append(f"美股 F&G {fg['score']:.0f} ({fg.get('rating')})")
     macro_line = "市場大環境: " + " / ".join(macro) if macro else ""
 
-    prompt = f"""你是專業 {('台股' if market == 'TW' else '美股')}分析師。下面是今日開盤後 30 分鐘的資金流向與動能股分析：
+    # 國際新聞 + 油價 + Trump 等 sentiment context
+    news_context = ""
+    try:
+        import news_sources
+        news_context = news_sources.build_news_context(include_trump=True)
+    except Exception:
+        pass
+
+    prompt = f"""你是專業 {('台股' if market == 'TW' else '美股')}分析師。下面是今日開盤後 30 分鐘的市場狀態。
 
 {macro_line}
 
+【今日資金流向 + 動能股清單】
 {picks_summary}
 
-請用 4-6 句繁體中文總結：
-1. 今日資金主流是什麼類型？(防禦/成長/題材/輪動?)
-2. 上述族群中，哪一個有機會延續整天？哪一個可能只是早盤反彈?
-3. 給投資人 1-2 個操作節奏建議 (例如「等回測支撐」、「分批佈局 A 族群」、「規避 B 族群」)。
+【國際新聞 / 大宗商品 / 政治面 sentiment】
+{news_context if news_context else '(本次未取得新聞資料)'}
 
-避免空泛、不要逐檔評論。結尾加「以上分析僅供參考，不構成投資建議」。"""
+請用繁體中文以下列結構回應：
+
+## 🌎 國際新聞與大宗商品評估
+- 哪些屬於「利多」風險性資產？
+- 哪些屬於「利空」風險性資產？
+- 油價/美元/殖利率/Trump 言論等是否有特別需要警戒的訊號？
+(每點 1-2 句，3-5 點即可)
+
+## 📊 今日大盤判讀
+- 今日資金主流是什麼類型？(防禦/成長/題材/輪動?)
+- 上述族群中，哪一個有機會延續整天？哪一個可能只是早盤反彈？
+
+## 🎯 操作節奏建議
+- 1-2 個具體建議 (例如「等回測支撐」、「分批佈局 A 族群」、「規避 B 族群」、「縮短持股時間」)
+
+不要空泛、不要逐檔評論。結尾加「以上分析僅供參考，不構成投資建議」。"""
 
     try:
         genai.configure(api_key=api_key)
         m = genai.GenerativeModel(model)
         resp = m.generate_content(
             prompt,
-            generation_config={"temperature": 0.5, "max_output_tokens": 600},
+            generation_config={"temperature": 0.5, "max_output_tokens": 1200},
         )
         text = (resp.text or "").strip()
         return (bool(text), text or "Gemini 沒有回應")

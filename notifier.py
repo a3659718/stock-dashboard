@@ -148,11 +148,75 @@ def fmt_strong_sectors(sectors_df) -> str:
     return "\n".join(lines)
 
 
+def _fmt_prediction_block(prediction: dict, accuracy: dict) -> list:
+    """預測 + 準確率區塊."""
+    if not prediction or prediction.get("error"):
+        return []
+    out = ["", f"<b>📊 大盤盤型預測: {prediction.get('pattern','—')} ({prediction.get('confidence','')}信心)</b>"]
+    out.append(f"   偏向: {prediction.get('bias','—')}")
+    raw_parts = []
+    if prediction.get("gap_pct") is not None:
+        raw_parts.append(f"開盤跳空 {prediction['gap_pct']:+.2f}%")
+    if prediction.get("drift_pct") is not None:
+        raw_parts.append(f"30 分鐘走勢 {prediction['drift_pct']:+.2f}%")
+    if prediction.get("vol_ratio") is not None:
+        raw_parts.append(f"量比 {prediction['vol_ratio']:.1f}x")
+    if raw_parts:
+        out.append(f"   {' · '.join(raw_parts)}")
+    if prediction.get("explanation"):
+        out.append(f"   <i>{prediction['explanation']}</i>")
+    if accuracy and accuracy.get("n"):
+        out.append(f"   📈 過去 30 天準確率: <b>{accuracy['accuracy_pct']}%</b> ({accuracy['correct']}/{accuracy['n']} 次)")
+    return out
+
+
+def _fmt_external_signals_block() -> list:
+    """油價 + macro 指標摘要 (簡短版，TG 用)."""
+    try:
+        import news_sources
+    except ImportError:
+        return []
+    out = []
+    oil = news_sources.fetch_oil_signal()
+    if oil:
+        out.append("")
+        out.append(f"<b>🛢️ 油價: ${oil['price']} ({oil['pct_5d']:+.1f}% 5d)</b>")
+        out.append(f"   {oil['signal']}")
+    macro = news_sources.fetch_macro_indicators()
+    if macro:
+        parts = []
+        if "美元指數" in macro:
+            parts.append(f"DXY {macro['美元指數']['value']} ({macro['美元指數']['pct_5d']:+.2f}%)")
+        if "10年美債殖利率" in macro:
+            parts.append(f"10Y {macro['10年美債殖利率']['value']}% ({macro['10年美債殖利率']['pct_5d']:+.2f}%)")
+        if "VIX" in macro:
+            parts.append(f"VIX {macro['VIX']['value']} ({macro['VIX']['pct_5d']:+.1f}%)")
+        if "BTC" in macro:
+            parts.append(f"BTC ${macro['BTC']['value']:,.0f} ({macro['BTC']['pct_5d']:+.1f}%)")
+        if parts:
+            out.append(f"<i>{' · '.join(parts)}</i>")
+    # Trump 最近一條
+    trumps = news_sources.fetch_trump_truth_social(max_items=2)
+    if trumps:
+        out.append("")
+        out.append("<b>🦅 Trump 最新言論</b>")
+        for t in trumps[:1]:
+            text = t.get("text", "")
+            if len(text) > 220:
+                text = text[:220] + "…"
+            out.append(f"   {text}")
+    return out
+
+
 def fmt_tw_open_picks(data: dict, ai_text: str = "") -> str:
     """台股開盤後 30 分推播."""
     if data.get("error"):
         return f"🇹🇼 台股開盤分析：{data['error']}"
     lines = [f"<b>🇹🇼 台股開盤後 30 分鐘 · 資金流向</b>"]
+    # 大盤預測
+    lines.extend(_fmt_prediction_block(data.get("prediction"), data.get("accuracy")))
+    # 國際訊號
+    lines.extend(_fmt_external_signals_block())
     themes_df = data.get("themes")
     if themes_df is not None and not themes_df.empty:
         lines.append("")
@@ -164,6 +228,7 @@ def fmt_tw_open_picks(data: dict, ai_text: str = "") -> str:
             lines.append(f"🔥 <b>{name}</b>  平均 {avg}% · 上漲 {up}/{n}")
 
     picks = data.get("picks", [])
+    catalysts = data.get("catalysts", {})
     if picks:
         lines.append("")
         lines.append("<b>📌 各族群動能潛在股 (3 檔)</b>")
@@ -182,6 +247,9 @@ def fmt_tw_open_picks(data: dict, ai_text: str = "") -> str:
                 lines.append(
                     f"  • <code>{sid}</code> {nm}  今日 {today}% · 量比 {ratio}x · 5d {five}%"
                 )
+                cat = catalysts.get(str(sid))
+                if cat:
+                    lines.append(f"    💡 {cat}")
 
     if ai_text:
         lines.append("")
@@ -205,6 +273,10 @@ def fmt_us_open_picks(data: dict, ai_text: str = "") -> str:
     if data.get("error"):
         return f"🇺🇸 美股開盤分析：{data['error']}"
     lines = [f"<b>🇺🇸 美股開盤後 30 分鐘 · 資金流向</b>"]
+    # 大盤預測
+    lines.extend(_fmt_prediction_block(data.get("prediction"), data.get("accuracy")))
+    # 國際訊號
+    lines.extend(_fmt_external_signals_block())
     sectors = data.get("sectors")
     if sectors is not None and not sectors.empty:
         lines.append("")
@@ -215,6 +287,7 @@ def fmt_us_open_picks(data: dict, ai_text: str = "") -> str:
             lines.append(f"🔥 <b>{sym} {sname}</b>  1d {r1:.2f}%")
 
     sector_picks = data.get("sector_picks", [])
+    catalysts = data.get("catalysts", {})
     if sector_picks:
         lines.append("")
         lines.append("<b>📌 各板塊動能潛在股 (3 檔)</b>")
@@ -232,6 +305,9 @@ def fmt_us_open_picks(data: dict, ai_text: str = "") -> str:
                 lines.append(
                     f"  • <code>{sym}</code>  今日 {today}% · 量比 {ratio}x · 20d {twenty}%"
                 )
+                cat = catalysts.get(str(sym))
+                if cat:
+                    lines.append(f"    💡 {cat}")
 
     growth = data.get("growth")
     if growth is not None and not growth.empty:
@@ -246,6 +322,9 @@ def fmt_us_open_picks(data: dict, ai_text: str = "") -> str:
             lines.append(
                 f"  • <code>{sym}</code>  今日 {today}% · 20d {twenty}% · 量比 {ratio}x · {score}/10"
             )
+            cat = catalysts.get(str(sym))
+            if cat:
+                lines.append(f"    💡 {cat}")
 
     if ai_text:
         lines.append("")

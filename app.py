@@ -492,10 +492,24 @@ with tab_pulse:
     # 顯示台股開盤結果
     tw_open = st.session_state.get("tw_open_data")
     if tw_open and not tw_open.get("error"):
+        # 大盤預測區塊
+        pred = tw_open.get("prediction") or {}
+        acc = tw_open.get("accuracy") or {}
+        if pred and not pred.get("error"):
+            cP1, cP2, cP3 = st.columns([2, 1, 1])
+            cP1.metric("🎯 大盤預測", pred.get("pattern", "—"),
+                        delta=pred.get("bias", ""))
+            cP2.metric("信心度", pred.get("confidence", "—"))
+            if acc and acc.get("n"):
+                cP3.metric("過去 30d 準確率", f"{acc['accuracy_pct']}%",
+                            delta=f"{acc['correct']}/{acc['n']} 次", delta_color="off")
+            st.caption(f"{pred.get('explanation','')}  ｜ 開盤跳空 {pred.get('gap_pct',0):+.2f}%、30 分走勢 {pred.get('drift_pct',0):+.2f}%、量比 {pred.get('vol_ratio',1):.1f}x")
+
         st.markdown("#### 🇹🇼 台股 — 資金主流前 3 族群")
         themes_df = tw_open.get("themes")
         if themes_df is not None and not themes_df.empty:
             st.dataframe(themes_df, use_container_width=True, hide_index=True)
+        catalysts_tw = tw_open.get("catalysts", {})
         for p in tw_open.get("picks", []):
             theme = p["theme"]
             stocks = p["stocks"]
@@ -505,6 +519,13 @@ with tab_pulse:
                 show_cols = [c for c in ["stock_id", "stock_name", "現價", "今日%", "5日%", "量比", "score"]
                               if c in stocks.columns]
                 st.dataframe(stocks[show_cols], use_container_width=True, hide_index=True)
+                # 催化劑
+                if catalysts_tw:
+                    for _, row in stocks.iterrows():
+                        sid = str(row.get("stock_id", ""))
+                        cat = catalysts_tw.get(sid)
+                        if cat:
+                            st.markdown(f"💡 **{sid} {row.get('stock_name','')}** — {cat}")
         # AI 觀點 + 推送
         if ai_analyzer.gemini_available():
             if st.button("🤖 加 Gemini 觀點", key="tw_open_ai", use_container_width=True):
@@ -529,10 +550,23 @@ with tab_pulse:
     # 顯示美股開盤結果
     us_open = st.session_state.get("us_open_data")
     if us_open and not us_open.get("error"):
+        pred = us_open.get("prediction") or {}
+        acc = us_open.get("accuracy") or {}
+        if pred and not pred.get("error"):
+            cQ1, cQ2, cQ3 = st.columns([2, 1, 1])
+            cQ1.metric("🎯 大盤預測", pred.get("pattern", "—"),
+                        delta=pred.get("bias", ""))
+            cQ2.metric("信心度", pred.get("confidence", "—"))
+            if acc and acc.get("n"):
+                cQ3.metric("過去 30d 準確率", f"{acc['accuracy_pct']}%",
+                            delta=f"{acc['correct']}/{acc['n']} 次", delta_color="off")
+            st.caption(f"{pred.get('explanation','')}  ｜ 開盤跳空 {pred.get('gap_pct',0):+.2f}%、30 分走勢 {pred.get('drift_pct',0):+.2f}%、量比 {pred.get('vol_ratio',1):.1f}x")
+
         st.markdown("#### 🇺🇸 美股 — 板塊輪動前 3")
         sectors_df = us_open.get("sectors")
         if sectors_df is not None and not sectors_df.empty:
             st.dataframe(sectors_df, use_container_width=True, hide_index=True)
+        catalysts_us = us_open.get("catalysts", {})
         for sp in us_open.get("sector_picks", []):
             sec = sp["sector"]
             stocks = sp["stocks"]
@@ -540,10 +574,22 @@ with tab_pulse:
                 continue
             with st.expander(f"📌 [{sec}] 動能潛在股 (3 檔)", expanded=False):
                 st.dataframe(stocks, use_container_width=True, hide_index=True)
+                if catalysts_us:
+                    for _, row in stocks.iterrows():
+                        sym = str(row.get("symbol", ""))
+                        cat = catalysts_us.get(sym)
+                        if cat:
+                            st.markdown(f"💡 **{sym}** — {cat}")
         growth = us_open.get("growth")
         if growth is not None and not growth.empty:
             st.markdown("##### 🚀 成長動能極強 / 近期 IPO Top 5")
             st.dataframe(growth, use_container_width=True, hide_index=True)
+            if catalysts_us:
+                for _, row in growth.iterrows():
+                    sym = str(row.get("symbol", ""))
+                    cat = catalysts_us.get(sym)
+                    if cat:
+                        st.markdown(f"💡 **{sym}** — {cat}")
 
         if ai_analyzer.gemini_available():
             if st.button("🤖 加 Gemini 觀點", key="us_open_ai", use_container_width=True):

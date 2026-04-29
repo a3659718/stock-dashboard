@@ -9,10 +9,16 @@ Standalone script — 由 GitHub Actions cron 在台股 / 美股開盤後 30 分
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 import types
 from pathlib import Path
+
+# 抑制 streamlit cache 在非 runtime 環境下的警告
+logging.getLogger("streamlit").setLevel(logging.ERROR)
+logging.getLogger("streamlit.runtime").setLevel(logging.ERROR)
+logging.getLogger("streamlit.runtime.caching").setLevel(logging.ERROR)
 
 # 加入上層目錄到 path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -94,25 +100,54 @@ def _summarize_us_for_ai(data: dict) -> str:
 def main() -> int:
     market = (sys.argv[1] if len(sys.argv) > 1 else "tw").lower()
 
+    # 診斷 log
+    print(f"=== Diagnostics ===")
+    print(f"FINMIND_TOKEN set: {bool(os.environ.get('FINMIND_TOKEN'))}")
+    print(f"TELEGRAM_BOT_TOKEN set: {bool(os.environ.get('TELEGRAM_BOT_TOKEN'))}")
+    print(f"TELEGRAM_CHAT_ID set: {bool(os.environ.get('TELEGRAM_CHAT_ID'))}")
+    print(f"GEMINI_API_KEY set: {bool(os.environ.get('GEMINI_API_KEY'))}")
+    print(f"ai_analyzer.gemini_available(): {ai_analyzer.gemini_available()}")
+    print(f"==================")
+
     if market == "tw":
         print("Running TW market open analysis...")
         data = market_open_picks.get_tw_open_picks()
+        if data.get("error"):
+            print(f"data error: {data['error']}")
+        else:
+            print(f"Got {len(data.get('picks', []))} themes with picks")
+            print(f"Prediction: {data.get('prediction', {}).get('pattern', 'N/A')}")
         ai_text = ""
         if ai_analyzer.gemini_available():
+            print("Calling Gemini...")
             ok, ai_text = ai_analyzer.analyze_open_picks("TW", _summarize_tw_for_ai(data))
             if not ok:
                 print(f"AI failed: {ai_text}")
                 ai_text = ""
+            else:
+                print(f"Gemini returned {len(ai_text)} chars")
+        else:
+            print("Gemini not available - skipping AI section")
         msg = notifier.fmt_tw_open_picks(data, ai_text=ai_text)
     elif market == "us":
         print("Running US market open analysis...")
         data = market_open_picks.get_us_open_picks()
+        if data.get("error"):
+            print(f"data error: {data['error']}")
+        else:
+            print(f"Got {len(data.get('sector_picks', []))} sectors with picks")
+            print(f"Prediction: {data.get('prediction', {}).get('pattern', 'N/A')}")
         ai_text = ""
         if ai_analyzer.gemini_available():
+            print("Calling Gemini...")
             ok, ai_text = ai_analyzer.analyze_open_picks("US", _summarize_us_for_ai(data))
             if not ok:
                 print(f"AI failed: {ai_text}")
                 ai_text = ""
+            else:
+                print(f"Gemini returned {len(ai_text)} chars")
+        else:
+            print("Gemini not available - skipping AI section")
         msg = notifier.fmt_us_open_picks(data, ai_text=ai_text)
     else:
         print(f"Unknown market: {market}", file=sys.stderr)

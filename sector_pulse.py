@@ -136,12 +136,15 @@ def compute_strong_sectors(top_n: int = 200) -> dict:
     sect = sect[sect["n"] >= 3]
     sect = sect.sort_values(["avg_change", "up_ratio"], ascending=False).reset_index(drop=True)
 
-    leaders = (
-        merged.sort_values(["今日%"], ascending=False)
-        .groupby(industry_col)
-        .head(5)
-        .reset_index(drop=True)
-    )
+    # 去重：股票只出現在排名最高的產業
+    leaders_rows = []
+    seen = set()
+    for ind in sect[industry_col].tolist():
+        sub = merged[merged[industry_col] == ind].sort_values("今日%", ascending=False)
+        sub = sub[~sub["stock_id"].isin(seen)].head(5)
+        leaders_rows.append(sub)
+        seen.update(sub["stock_id"].tolist())
+    leaders = pd.concat(leaders_rows, ignore_index=True) if leaders_rows else pd.DataFrame()
     return {"sectors": sect, "stocks": merged, "leaders": leaders}
 
 
@@ -167,7 +170,7 @@ def compute_hot_themes() -> dict:
     quotes["stock_name"] = quotes["stock_id"].map(name_map).fillna("")
 
     rows = []
-    leaders: Dict[str, pd.DataFrame] = {}
+    leaders_unfiltered: Dict[str, pd.DataFrame] = {}
     for theme, sids in TW_THEMES.items():
         sub = quotes[quotes["stock_id"].isin(sids)].copy()
         if sub.empty:
@@ -184,9 +187,23 @@ def compute_hot_themes() -> dict:
             "樣本數": n,
             "上漲比率%": round(up_n / n * 100, 1) if n else None,
         })
-        leaders[theme] = sub.sort_values("今日%", ascending=False).head(5).reset_index(drop=True)
+        leaders_unfiltered[theme] = sub.sort_values("今日%", ascending=False).reset_index(drop=True)
 
     themes = pd.DataFrame(rows).sort_values(["平均%", "上漲比率%"], ascending=False).reset_index(drop=True)
+
+    # 去重：每檔股票只放在排名最高的題材底下
+    leaders: Dict[str, pd.DataFrame] = {}
+    seen_stocks = set()
+    for theme in themes["題材"].tolist():
+        df_unf = leaders_unfiltered.get(theme)
+        if df_unf is None or df_unf.empty:
+            leaders[theme] = pd.DataFrame()
+            continue
+        # 排掉已經出現在更高排名題材的個股
+        df_dedup = df_unf[~df_unf["stock_id"].isin(seen_stocks)].head(5).reset_index(drop=True)
+        leaders[theme] = df_dedup
+        seen_stocks.update(df_dedup["stock_id"].tolist())
+
     return {"themes": themes, "leaders": leaders}
 
 
