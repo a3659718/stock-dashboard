@@ -226,6 +226,189 @@ def fetch_trump_truth_social(max_items: int = 10) -> List[Dict]:
 # ---------------------------------------------------------------------------
 # 彙整訊號 → 給 AI 用
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Gemini 批次翻譯英文新聞 → 繁中
+# ---------------------------------------------------------------------------
+def _has_chinese(text: str) -> bool:
+    return any("一" <= ch <= "鿿" for ch in text or "")
+
+
+@st.cache_resource
+def _translation_cache() -> Dict[str, str]:
+    """記憶體 cache: {english_title: chinese_title}.
+    跨 session 共享，container 重啟才清。
+    """
+    return {}
+
+
+def _gemini_translate_batch(titles: List[str]) -> Dict[str, str]:
+    """一次呼叫 Gemini 翻譯多則 title 為繁中。"""
+    if not titles:
+        return {}
+    try:
+        import ai_analyzer as _ai
+    except ImportError:
+        return {}
+    if not _ai.gemini_available():
+        return {}
+    try:
+        import google.generativeai as genai
+    except ImportError:
+        return {}
+
+    numbered = "\n".join(f"{i+1}. {t}" for i, t in enumerate(titles))
+    prompt = (
+        "請把下列新聞標題翻譯為繁體中文（台灣財經慣用語）。"
+        "保留股票代號 / 公司名英文（例如 NVIDIA、Tesla 不翻）。"
+        "用嚴格 JSON 格式回應，key 是序號字串，value 是繁中翻譯。\n"
+        "範例: {\"1\": \"NVIDIA 與微軟簽下大單\", \"2\": \"歐洲股市受通膨拖累下跌\"}\n\n"
+        f"待翻譯標題：\n{numbered}"
+    )
+    try:
+        genai.configure(api_key=_ai.get_gemini_key())
+        m = genai.GenerativeModel("gemini-1.5-flash")
+        resp = m.generate_content(
+            prompt,
+            generation_config={
+                "temperature": 0.2,
+                "max_output_tokens": 2000,
+                "response_mime_type": "application/json",
+            },
+        )
+        text = (resp.text or "").strip()
+        if not text:
+            return {}
+        import json, re
+        text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.MULTILINE)
+        data = json.loads(text)
+        if not isinstance(data, dict):
+            return {}
+        out: Dict[str, str] = {}
+        for i, original in enumerate(titles, 1):
+            zh = data.get(str(i)) or data.get(i)
+            if zh and isinstance(zh, str):
+                out[original] = zh.strip()
+        return out
+    except Exception:
+        return {}
+
+
+def translate_news_titles(news_list: List[Dict]) -> List[Dict]:
+    """為每則 news 補上 title_zh 欄位 (繁中).
+    台股 / 已是中文的不會被翻譯, 只翻英文新聞.
+    Gemini 不可用時 title_zh = 原文.
+    """
+    cache = _translation_cache()
+    pending: List[str] = []
+    for n in news_list:
+        t = (n.get("title") or "").strip()
+        if not t or _has_chinese(t) or t in cache:
+            continue
+        pending.append(t)
+
+    # 去重
+    pending = list(dict.fromkeys(pending))
+
+    if pending:
+        # 一次最多翻 30 則 (避免 prompt 過長)
+        for i in range(0, len(pending), 30):
+            batch = pending[i:i + 30]
+            new_trans = _gemini_translate_batch(batch)
+            cache.update(new_trans)
+
+    out = []
+    for n in news_list:
+        x = dict(n)
+        t = (x.get("title") or "").strip()
+        if not t:
+            x["title_zh"] = ""
+        elif _has_chinese(t):
+            x["title_zh"] = t
+        else:
+            x["title_zh"] = cache.get(t, t)  # 翻不到就 fallback 原文
+        out.append(x)
+    return out
+
+
+def time_ago(iso_str: str) -> str:
+    """把 ISO 時間轉成「3 小時前 / 2 天前」的人類可讀字串."""
+    if not iso_str:
+        return ""
+    try:
+        d = dt.datetime.fromisoformat(iso_str.replace("Z", ""))
+    except Exception:
+        return iso_str[:16]
+    now = dt.datetime.utcnow()
+    diff = now - d
+    secs = int(diff.total_seconds())
+    if secs < 60:
+        return "剛剛"
+    if secs < 3600:
+        return f"{secs // 60} 分鐘前"
+    if secs < 86400:
+        return f"{secs // 3600} 小時前"
+    if secs < 604800:
+        return f"{secs // 86400} 天前"
+    return d.strftime("%Y-%m-%d")
+
+
+def enrich_news_with_sentiment(news_list: List[Dict], lang_default: str = "en") -> List[Dict]:
+    """為每則新聞補上 sentiment 標籤 + 命中關鍵字 + 相對時間.
+    lang_default: 'en' for world news, 'zh' for TaiwanStockNews.
+    """
+    try:
+        import stock_catalyst
+    except ImportError:
+        return news_list
+    out = []
+    for n in news_list:
+        x = dict(n)
+        title = x.get("title", "")
+        # Heuristic: 含中文字元 → zh
+        has_chinese = any("一" <= ch <= "鿿" for ch in title)
+        lang = "zh" if has_chinese else lang_default
+        s = stock_catalyst._score_news_sentiment(title, lang=lang)
+        x["sentiment"] = s.get("score", 0)
+        x["bullish_kw"] = s.get("bullish", [])
+        x["bearish_kw"] = s.get("bearish", [])
+        x["time_ago"] = time_ago(x.get("time", ""))
+        out.append(x)
+    return out
+
+
+def fetch_tw_news_aggregated(stock_ids: List[str] = None, days: int = 3,
+                                max_per_stock: int = 3) -> List[Dict]:
+    """從 FinMind TaiwanStockNews 抓多檔個股新聞彙整，做台股新聞分頁用."""
+    if not stock_ids:
+        return []
+    today = dt.date.today()
+    end = today.strftime("%Y-%m-%d")
+    start = (today - dt.timedelta(days=days)).strftime("%Y-%m-%d")
+    out: List[Dict] = []
+    for sid in stock_ids[:30]:  # 最多 30 檔避免太久
+        try:
+            df = ds._finmind_get("TaiwanStockNews", data_id=sid,
+                                  start_date=start, end_date=end)
+        except Exception:
+            continue
+        if df is None or df.empty:
+            continue
+        df["date"] = pd.to_datetime(df.get("date", pd.NaT), errors="coerce")
+        for _, r in df.head(max_per_stock).iterrows():
+            ts = ""
+            if pd.notna(r.get("date")):
+                ts = r["date"].isoformat()
+            out.append({
+                "source": f"FinMind ({sid})",
+                "title": str(r.get("title", "") or "")[:200],
+                "link": str(r.get("link", "") or ""),
+                "summary": str(r.get("summary", "") or "")[:300],
+                "time": ts,
+                "stock_id": sid,
+            })
+    return out
+
+
 def build_news_context(include_trump: bool = True) -> str:
     """組裝給 Gemini 用的純文字 context."""
     parts = []

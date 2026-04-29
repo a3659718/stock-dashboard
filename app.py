@@ -191,19 +191,50 @@ with st.sidebar:
     auto_send_on_alert = st.checkbox("強勢族群 / 恐慌指數異常時推播", value=True)
 
 
-# 跨 session 共享的 alert dedup 狀態
+# 跨 session 共享 + 檔案持久化的 alert dedup 狀態
+import json as _json
+import os as _os
+from pathlib import Path as _Path
+
+_ALERT_STATE_FILE = _Path(".alert_state.json")
+
+
 @st.cache_resource
 def _alert_dedup_state() -> dict:
-    """所有 session 共用的去重 dict。重啟 Streamlit 才會清。"""
+    """跨 session 共用的去重 dict。優先從檔案讀，避免容器重啟後重發。"""
+    if _ALERT_STATE_FILE.exists():
+        try:
+            return _json.loads(_ALERT_STATE_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            pass
     return {}
 
 
+def _save_dedup_state(state: dict) -> None:
+    try:
+        _ALERT_STATE_FILE.write_text(_json.dumps(state, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
+
+
 def _should_send_once(key: str) -> bool:
-    """同一個 key 一天最多送一次。回傳 True = 可以送、False = 跳過。"""
+    """同一個 key 一天最多送一次。回傳 True = 可以送、False = 跳過。
+    狀態同時存記憶體 (cache_resource) 與檔案，跨容器重啟也會去重。
+    跨日會自動清空 (透過 _date 標記)。
+    """
     state = _alert_dedup_state()
+    today = dt.date.today().isoformat()
+
+    # 跨日自動清空
+    if state.get("_date") != today:
+        state.clear()
+        state["_date"] = today
+        _save_dedup_state(state)
+
     if state.get(key):
         return False
     state[key] = True
+    _save_dedup_state(state)
     return True
 
 
@@ -1202,18 +1233,133 @@ with tab_mood:
         st.markdown("#### S&P SPDR 板塊輪動 (5 日 %)")
         st.dataframe(sectors_us, use_container_width=True, hide_index=True)
 
-    if news_pool:
-        st.markdown("#### 近 24 小時市場新聞題材")
-        for n in news_pool[:15]:
-            title = n.get("title")
-            link = n.get("link")
-            pub = n.get("publisher", "")
-            if title and link:
-                st.markdown(f"- [{title}]({link}) · _{pub}_")
-    elif "us_result" in st.session_state:
-        st.info("目前抓不到 24h 內的市場新聞。")
+    # ============== 📰 IBKR 風格新聞摘要 ==============
+    st.markdown("---")
+    st.markdown("### 📰 全球市場新聞摘要")
+    st.caption("整合 CNN / Fox / BBC / NYT / Reuters / FinMind 台股新聞 + 油價訊號 + Trump 言論。每則自動標利多/利空。")
+
+    cN1, cN2, cN3 = st.columns([1, 1, 1])
+    with cN1:
+        refresh_news_btn = st.button("🔄 更新所有新聞", use_container_width=True, type="primary",
+                                       key="refresh_world_news")
+    with cN2:
+        news_filter = st.selectbox(
+            "分類過濾",
+            options=["全部", "📈 利多", "📉 利空", "➖ 中性",
+                     "CNN", "Fox", "BBC", "NYT", "Reuters", "Trump"],
+            index=0, key="news_filter",
+        )
+    with cN3:
+        news_show_count = st.number_input("顯示筆數", 5, 50, 20, step=5, key="news_show_n")
+
+    if refresh_news_btn:
+        try:
+            import news_sources
+            with st.spinner("抓取全球新聞..."):
+                world_news = news_sources.fetch_world_news()
+                trump_posts = news_sources.fetch_trump_truth_social(max_items=5)
+                for tp in trump_posts:
+                    world_news.append({
+                        "source": "Trump",
+                        "title": tp.get("text", "")[:180],
+                        "link": tp.get("link", ""),
+                        "summary": tp.get("text", "")[:300],
+                        "time": tp.get("time", ""),
+                    })
+                # 補上 sentiment 跟相對時間
+                world_news = news_sources.enrich_news_with_sentiment(world_news)
+                # 翻譯成繁中 (Gemini 可用時才翻)
+                if ai_analyzer.gemini_available():
+                    with st.spinner("翻譯新聞為繁中..."):
+                        world_news = news_sources.translate_news_titles(world_news)
+            st.session_state["world_news"] = world_news
+        except Exception as e:
+            st.error(f"新聞抓取失敗：{e}")
+
+    world_news = st.session_state.get("world_news", [])
+    if world_news:
+        # 過濾
+        filtered = world_news
+        if news_filter == "📈 利多":
+            filtered = [n for n in filtered if n.get("sentiment", 0) > 0]
+        elif news_filter == "📉 利空":
+            filtered = [n for n in filtered if n.get("sentiment", 0) < 0]
+        elif news_filter == "➖ 中性":
+            filtered = [n for n in filtered if n.get("sentiment", 0) == 0]
+        elif news_filter not in ("全部",):
+            filtered = [n for n in filtered if news_filter.lower() in (n.get("source", "") or "").lower()]
+
+        # 統計
+        n_bull = sum(1 for n in world_news if n.get("sentiment", 0) > 0)
+        n_bear = sum(1 for n in world_news if n.get("sentiment", 0) < 0)
+        n_neut = sum(1 for n in world_news if n.get("sentiment", 0) == 0)
+        cS1, cS2, cS3, cS4 = st.columns(4)
+        cS1.metric("總計", len(world_news))
+        cS2.metric("📈 利多", n_bull)
+        cS3.metric("📉 利空", n_bear)
+        cS4.metric("➖ 中性", n_neut)
+
+        # IBKR 風格 card 顯示
+        st.caption(f"顯示 {min(int(news_show_count), len(filtered))} / {len(filtered)} 則")
+        for n in filtered[: int(news_show_count)]:
+            sent = n.get("sentiment", 0)
+            if sent > 0:
+                tag = "📈"
+                bar_color = "#3B6D11"
+                bg = "rgba(99, 153, 34, 0.08)"
+                kw_label = "、".join(n.get("bullish_kw", [])[:3])
+            elif sent < 0:
+                tag = "📉"
+                bar_color = "#A32D2D"
+                bg = "rgba(163, 45, 45, 0.08)"
+                kw_label = "、".join(n.get("bearish_kw", [])[:3])
+            else:
+                tag = "➖"
+                bar_color = "#888780"
+                bg = "rgba(127, 127, 127, 0.04)"
+                kw_label = ""
+
+            src = n.get("source", "—")
+            ta = n.get("time_ago", "")
+            title_orig = n.get("title", "")
+            title_zh = n.get("title_zh", title_orig)
+            # 標題顯示策略: 中文 (主) + 英文 (副), 或單獨原文
+            has_translation = title_zh and title_zh != title_orig
+            link = n.get("link", "")
+            summary = (n.get("summary", "") or "").strip()
+            if summary and len(summary) > 200:
+                summary = summary[:200] + "…"
+
+            kw_html = f"<span style='color:{bar_color};font-size:11px;margin-left:8px'>〔{kw_label}〕</span>" if kw_label else ""
+
+            card_html = (
+                f"<div style='background:{bg};border-left:3px solid {bar_color};"
+                f"border-radius:6px;padding:10px 14px;margin:6px 0;'>"
+                f"<div style='display:flex;justify-content:space-between;align-items:baseline;'>"
+                f"<span style='background:rgba(127,127,127,0.15);padding:2px 8px;border-radius:4px;"
+                f"font-size:11px;font-weight:500'>{src}</span>"
+                f"<span style='color:#888;font-size:11px'>{ta}</span>"
+                f"</div>"
+                f"<div style='margin-top:6px;font-size:14px;line-height:1.5'>"
+                f"<span style='font-size:14px'>{tag}</span> "
+            )
+            display_title = title_zh if has_translation else title_orig
+            if link:
+                card_html += f"<a href='{link}' target='_blank' style='color:inherit;text-decoration:none'>{display_title}</a>"
+            else:
+                card_html += display_title
+            card_html += f"{kw_html}</div>"
+            # 副標題顯示原文 (如果有翻譯)
+            if has_translation:
+                card_html += f"<div style='margin-top:4px;color:#aaa;font-size:11px;font-style:italic'>{title_orig}</div>"
+            if summary and summary != title_orig and summary != title_zh:
+                card_html += f"<div style='margin-top:6px;color:#888;font-size:12px'>{summary}</div>"
+            card_html += "</div>"
+            st.markdown(card_html, unsafe_allow_html=True)
+    elif refresh_news_btn:
+        st.info("目前抓不到任何新聞，可能是 RSS 來源暫時無回應，請稍後再試。")
     else:
-        st.info("按上方「抓取市場情緒」開始。")
+        st.info("按上方「🔄 更新所有新聞」開始抓取。")
 
 # =============================================================================
 # Tab — 回測勝率

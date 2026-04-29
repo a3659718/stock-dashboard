@@ -49,6 +49,30 @@ except ImportError:
     sys.modules["streamlit"] = st_stub
 
 
+# ===== 自我診斷：依序 import 所有需要的模組 =====
+print("=== Module Imports ===")
+_required_modules = [
+    "data_sources", "tw_screener", "sector_pulse", "us_screener",
+    "notifier", "ai_analyzer", "market_predictor",
+    "stock_catalyst", "news_sources", "earnings_calendar",
+    "market_open_picks",
+]
+_missing = []
+for _mod in _required_modules:
+    try:
+        __import__(_mod)
+        print(f"  [OK]   {_mod}")
+    except Exception as _e:
+        print(f"  [FAIL] {_mod}: {_e}")
+        _missing.append(_mod)
+if _missing:
+    print(f"❌ 失敗的 modules: {_missing}")
+    print("→ 請確認以下檔案都在 GitHub repo 根目錄:")
+    for _m in _missing:
+        print(f"   - {_m}.py")
+    sys.exit(3)
+print("==================\n")
+
 import ai_analyzer
 import market_open_picks
 import notifier
@@ -101,13 +125,43 @@ def main() -> int:
     market = (sys.argv[1] if len(sys.argv) > 1 else "tw").lower()
 
     # 診斷 log
-    print(f"=== Diagnostics ===")
-    print(f"FINMIND_TOKEN set: {bool(os.environ.get('FINMIND_TOKEN'))}")
-    print(f"TELEGRAM_BOT_TOKEN set: {bool(os.environ.get('TELEGRAM_BOT_TOKEN'))}")
-    print(f"TELEGRAM_CHAT_ID set: {bool(os.environ.get('TELEGRAM_CHAT_ID'))}")
-    print(f"GEMINI_API_KEY set: {bool(os.environ.get('GEMINI_API_KEY'))}")
+    print(f"=== Secrets Check ===")
+    finmind_ok = bool(os.environ.get('FINMIND_TOKEN'))
+    tg_bot_ok = bool(os.environ.get('TELEGRAM_BOT_TOKEN'))
+    tg_chat_ok = bool(os.environ.get('TELEGRAM_CHAT_ID'))
+    gemini_ok = bool(os.environ.get('GEMINI_API_KEY'))
+    print(f"FINMIND_TOKEN:      {'✓ set' if finmind_ok else '✗ MISSING'}")
+    print(f"TELEGRAM_BOT_TOKEN: {'✓ set' if tg_bot_ok else '✗ MISSING'}")
+    print(f"TELEGRAM_CHAT_ID:   {'✓ set' if tg_chat_ok else '✗ MISSING'}")
+    print(f"GEMINI_API_KEY:     {'✓ set' if gemini_ok else '✗ not set (optional)'}")
+    if not (finmind_ok and tg_bot_ok and tg_chat_ok):
+        print("❌ 必要 secrets 缺失，無法繼續。請到 GitHub → Settings → Secrets → Actions 補上。")
+        return 4
+    print(f"")
+
+    # 實測 Gemini API key 有效性
+    print(f"=== Gemini API Test ===")
+    if gemini_ok:
+        try:
+            import google.generativeai as genai
+            genai.configure(api_key=os.environ["GEMINI_API_KEY"])
+            test_model = genai.GenerativeModel("gemini-1.5-flash")
+            test_resp = test_model.generate_content(
+                "Reply with exactly the word: OK",
+                generation_config={"max_output_tokens": 10, "temperature": 0},
+            )
+            test_text = (test_resp.text or "").strip()
+            if test_text:
+                print(f"✓ Gemini test call OK: {test_text[:50]}")
+            else:
+                print(f"✗ Gemini returned empty (可能 safety filter)")
+        except Exception as e:
+            print(f"✗ Gemini test failed: {type(e).__name__}: {e}")
+            print(f"  → 可能是 key 無效、quota 用光、或網路問題")
+    else:
+        print("⊘ skipped (no GEMINI_API_KEY)")
     print(f"ai_analyzer.gemini_available(): {ai_analyzer.gemini_available()}")
-    print(f"==================")
+    print(f"=======================\n")
 
     if market == "tw":
         print("Running TW market open analysis...")
