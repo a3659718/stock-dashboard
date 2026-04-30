@@ -309,6 +309,32 @@ def fmt_tw_open_picks(data: dict, ai_text: str = "") -> str:
     lines = [f"<b>🇹🇼 台股開盤後 30 分鐘 · 資金流向</b>"]
     # 大盤預測
     lines.extend(_fmt_prediction_block(data.get("prediction"), data.get("accuracy")))
+    # 美股隔夜行情 (給 reference)
+    us_overnight = data.get("us_overnight") or {}
+    if us_overnight:
+        spy = us_overnight.get("SPY", {})
+        qqq = us_overnight.get("QQQ", {})
+        dia = us_overnight.get("DIA", {})
+        if any([spy, qqq, dia]):
+            lines.append("")
+            lines.append("------ 美股隔夜行情 (參考) ------")
+            parts = []
+            if spy.get("pct") is not None:
+                parts.append(f"SPY {spy['pct']:+.2f}%")
+            if qqq.get("pct") is not None:
+                parts.append(f"QQQ {qqq['pct']:+.2f}%")
+            if dia.get("pct") is not None:
+                parts.append(f"DIA {dia['pct']:+.2f}%")
+            if parts:
+                lines.append("  " + " · ".join(parts))
+            us_sectors = us_overnight.get("sectors")
+            if us_sectors is not None and not us_sectors.empty:
+                top3 = us_sectors.head(3)
+                bot1 = us_sectors.tail(1)
+                top_str = "、".join(f"{r['symbol']} {r.get('1d_%', 0):+.2f}%" for _, r in top3.iterrows())
+                bot_str = ", ".join(f"{r['symbol']} {r.get('1d_%', 0):+.2f}%" for _, r in bot1.iterrows())
+                lines.append(f"  領漲: {top_str}")
+                lines.append(f"  落後: {bot_str}")
     # 亞洲鄰近市場
     lines.extend(_fmt_asia_markets_block(data.get("asia") or {}))
     # 國際訊號
@@ -368,6 +394,131 @@ def fmt_tw_open_picks(data: dict, ai_text: str = "") -> str:
                 lines.append(f"<b>{s[3:]}</b>")
             else:
                 lines.append(line)
+
+    out = "\n".join(lines)
+    if len(out) > 3900:
+        out = out[:3900] + "\n…(節錄)"
+    return out
+
+
+def fmt_us_close_analysis(data: dict) -> str:
+    """美股收盤 +2h 推播 — 全日板塊 + 對台股次日開盤推理."""
+    if not data:
+        return "🇺🇸 美股盤後分析：資料不足"
+
+    spy_pct = data.get("spy_pct", 0)
+    qqq_pct = data.get("qqq_pct", 0)
+    dia_pct = data.get("dia_pct", 0)
+    sectors = data.get("sectors")
+    fg = data.get("fg") or {}
+    ai_text = data.get("ai_text", "")
+
+    lines = [
+        "<b>🇺🇸 美股盤後 (+2h) · 全日綜合 + 對台股次日開盤推理</b>",
+        "",
+        f"SPY: {spy_pct:+.2f}%   QQQ: {qqq_pct:+.2f}%   DIA: {dia_pct:+.2f}%",
+    ]
+    if fg.get("score") is not None:
+        lines.append(f"CNN F&G: {fg['score']:.0f} ({fg.get('rating','')})")
+
+    if sectors is not None and not sectors.empty:
+        lines.append("")
+        lines.append("------ 板塊輪動 (1d) ------")
+        for _, r in sectors.head(11).iterrows():
+            sym = r.get("symbol")
+            name = r.get("sector", "")
+            r1 = r.get("1d_%", 0)
+            sign = "+" if r1 >= 0 else ""
+            lines.append(f"  {sym} {name}: {sign}{r1}%")
+
+    # 受惠美股的台股推薦
+    beneficiaries = data.get("beneficiaries") or {}
+    reasons = data.get("beneficiary_reasons") or {}
+    if beneficiaries:
+        lines.append("")
+        lines.append("------ 受惠美股強勢 · 台股可能上漲 ------")
+        for theme, info in beneficiaries.items():
+            drivers = info.get("drivers", [])
+            picks = info.get("picks", [])
+            if not picks:
+                continue
+            drivers_str = "、".join(drivers)
+            lines.append("")
+            lines.append(f"<b>[{theme}]</b> 受美股 {drivers_str} 帶動")
+            for p in picks:
+                sid = p["stock_id"]
+                nm = p["name"]
+                reason = reasons.get(sid, "")
+                lines.append(f"  <code>{sid}</code> {nm}")
+                if reason:
+                    lines.append(f"     {reason}")
+
+    if ai_text:
+        lines.append("")
+        for ln in ai_text.split("\n"):
+            s = ln.strip()
+            if s.startswith("## "):
+                lines.append(f"<b>{s[3:]}</b>")
+            else:
+                lines.append(ln)
+
+    out = "\n".join(lines)
+    if len(out) > 3900:
+        out = out[:3900] + "\n…(節錄)"
+    return out
+
+
+def fmt_tw_close_analysis(data: dict) -> str:
+    """台股盤後 15:00 推播 — 全日表現 + 日韓比對 + AI 推理."""
+    if not data:
+        return "🇹🇼 台股盤後分析：資料不足"
+
+    twii_close = data.get("twii_close", 0)
+    twii_pct = data.get("twii_pct", 0)
+    jp_pct = data.get("jp_pct", 0)
+    kr_pct = data.get("kr_pct", 0)
+    themes_df = data.get("themes")
+    jp_kr_sectors = data.get("jp_kr_sectors", {})
+    theme_map = data.get("theme_to_asia_map", {})
+    ai_text = data.get("ai_text", "")
+
+    lines = [
+        f"<b>🇹🇼 台股盤後 (15:00) · 全日綜合分析</b>",
+        "",
+        f"加權指數: {twii_close:,.0f} ({twii_pct:+.2f}%)",
+        f"日經 225:   {jp_pct:+.2f}%",
+        f"韓國 KOSPI: {kr_pct:+.2f}%",
+    ]
+
+    if themes_df is not None and not themes_df.empty:
+        lines.append("")
+        lines.append("------ 台股族群 vs 日韓對應產業 ------")
+        for _, r in themes_df.head(8).iterrows():
+            theme = r["題材"]
+            avg = r.get("平均%", 0)
+            asia_secs = theme_map.get(theme, [])
+            tw_arrow = "+" if avg >= 0 else ""
+            line = f"\n<b>{theme}</b>: 台股 {tw_arrow}{avg}%"
+            if asia_secs:
+                asia_parts = []
+                for sec in asia_secs:
+                    p = jp_kr_sectors.get(sec)
+                    if p is not None:
+                        sign = "+" if p >= 0 else ""
+                        asia_parts.append(f"{sec} {sign}{p}%")
+                if asia_parts:
+                    line += "  |  " + " · ".join(asia_parts)
+            lines.append(line)
+
+    if ai_text:
+        lines.append("")
+        # AI 文字本身就有 "------ section ------" 結構，直接附上
+        for ln in ai_text.split("\n"):
+            s = ln.strip()
+            if s.startswith("## "):
+                lines.append(f"<b>{s[3:]}</b>")
+            else:
+                lines.append(ln)
 
     out = "\n".join(lines)
     if len(out) > 3900:

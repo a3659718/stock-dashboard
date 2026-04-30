@@ -82,6 +82,44 @@ def _summarize_tw_for_ai(data: dict) -> str:
     if data.get("error"):
         return ""
     lines = []
+    # 美股隔夜行情 (重要 macro context)
+    us_ov = data.get("us_overnight") or {}
+    if us_ov:
+        us_lines = []
+        for sym in ["SPY", "QQQ", "DIA"]:
+            if sym in us_ov and us_ov[sym].get("pct") is not None:
+                us_lines.append(f"{sym} {us_ov[sym]['pct']:+.2f}%")
+        if us_lines:
+            lines.append("美股隔夜: " + " / ".join(us_lines))
+        sec_df = us_ov.get("sectors")
+        if sec_df is not None and not sec_df.empty:
+            top_sec = ", ".join(f"{r['symbol']} ({r['1d_%']:+.2f}%)" for _, r in sec_df.head(3).iterrows())
+            lines.append(f"美股強勢板塊: {top_sec}")
+        fg_d = us_ov.get("fg") or {}
+        if fg_d.get("score") is not None:
+            lines.append(f"CNN F&G: {fg_d['score']:.0f} ({fg_d.get('rating')})")
+        lines.append("")
+
+    # 日韓 leading indicator (比台股早 1 小時開盤)
+    asia = data.get("asia") or {}
+    asia_snapshot = asia.get("snapshot") or []
+    asia_events = asia.get("events") or []
+    if asia_snapshot or asia_events:
+        lines.append("日韓盤中行情 (比台股早 1 小時開盤，可作 leading indicator):")
+        for s in asia_snapshot:
+            name = s.get("market", "")
+            dp = s.get("daily_pct", 0)
+            five = s.get("5d_pct", 0)
+            lines.append(f"  {name}: 今日 {dp:+.2f}% / 5d {five:+.2f}%")
+        if asia_events:
+            lines.append("  異常事件:")
+            for ev in asia_events[:5]:
+                name = ev.get("market", "")
+                event = ev.get("event", "")
+                msg = ev.get("msg", "")
+                lines.append(f"    - {name} [{event}] {msg}")
+        lines.append("")
+
     themes_df = data.get("themes")
     if themes_df is not None and not themes_df.empty:
         lines.append("熱門題材排行:")
@@ -122,7 +160,12 @@ def _summarize_us_for_ai(data: dict) -> str:
 
 
 def main() -> int:
-    market = (sys.argv[1] if len(sys.argv) > 1 else "tw").lower()
+    market = (sys.argv[1] if len(sys.argv) > 1 else "tw_open").lower()
+    # 舊參數相容
+    if market == "tw":
+        market = "tw_open"
+    if market == "us":
+        market = "us_open"
 
     # 診斷 log
     print(f"=== Secrets Check ===")
@@ -145,7 +188,7 @@ def main() -> int:
         try:
             import google.generativeai as genai
             genai.configure(api_key=os.environ["GEMINI_API_KEY"])
-            test_model = genai.GenerativeModel("gemini-1.5-flash")
+            test_model = genai.GenerativeModel("gemini-2.5-flash")
             test_resp = test_model.generate_content(
                 "Reply with exactly the word: OK",
                 generation_config={"max_output_tokens": 10, "temperature": 0},
@@ -163,8 +206,9 @@ def main() -> int:
     print(f"ai_analyzer.gemini_available(): {ai_analyzer.gemini_available()}")
     print(f"=======================\n")
 
-    if market == "tw":
-        print("Running TW market open analysis...")
+    if market in ("tw_open", "tw_mid"):
+        label = "開盤後 30 分鐘 (09:30)" if market == "tw_open" else "中盤更新 (11:00)"
+        print(f"Running TW {label}...")
         data = market_open_picks.get_tw_open_picks()
         if data.get("error"):
             print(f"data error: {data['error']}")
@@ -183,8 +227,18 @@ def main() -> int:
         else:
             print("Gemini not available - skipping AI section")
         msg = notifier.fmt_tw_open_picks(data, ai_text=ai_text)
-    elif market == "us":
-        print("Running US market open analysis...")
+        # 中盤版本標題改一下
+        if market == "tw_mid":
+            msg = msg.replace("台股開盤後 30 分鐘 · 資金流向", "台股中盤更新 11:00 · 資金流向")
+    elif market == "tw_close":
+        print("Running TW market close analysis (15:00)...")
+        data = market_open_picks.get_tw_close_analysis()
+        if data.get("ai_text"):
+            print(f"Gemini reasoning: {len(data['ai_text'])} chars")
+        msg = notifier.fmt_tw_close_analysis(data)
+    elif market in ("us_open", "us_mid"):
+        label = "開盤後 30 分鐘 (10:00 EDT)" if market == "us_open" else "開盤後 2 小時 (11:30 EDT)"
+        print(f"Running US {label}...")
         data = market_open_picks.get_us_open_picks()
         if data.get("error"):
             print(f"data error: {data['error']}")
@@ -203,6 +257,15 @@ def main() -> int:
         else:
             print("Gemini not available - skipping AI section")
         msg = notifier.fmt_us_open_picks(data, ai_text=ai_text)
+        if market == "us_mid":
+            msg = msg.replace("美股開盤後 30 分鐘 · 資金流向",
+                               "美股開盤後 2 小時 · 中盤更新 · 資金流向")
+    elif market == "us_close":
+        print("Running US market close analysis (+2h, 18:00 EDT)...")
+        data = market_open_picks.get_us_close_analysis()
+        if data.get("ai_text"):
+            print(f"Gemini reasoning: {len(data['ai_text'])} chars")
+        msg = notifier.fmt_us_close_analysis(data)
     else:
         print(f"Unknown market: {market}", file=sys.stderr)
         return 1

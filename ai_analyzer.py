@@ -376,11 +376,21 @@ def analyze_open_picks(market: str, picks_summary: str,
     except Exception:
         pass
 
-    prompt = f"""你是專業 {('台股' if market == 'TW' else '美股')}分析師。下面是今日開盤後 30 分鐘的市場狀態。
-
+    is_tw_market = (market == 'TW')
+    leading_hint = ""
+    if is_tw_market:
+        leading_hint = (
+            "\n📌 **重要分析提示**：日股 (^N225)、韓股 (KOSPI) 比台股早 1 小時開盤 "
+            "(08:00 台北 vs 09:00 台北)。請把 JP/KR 當前走勢當作**台股的 leading indicator**：\n"
+            "  - 若 JP/KR 同步走強 → 台股延續可能性高，是區域同步\n"
+            "  - 若 JP/KR 走弱但台股獨自走強 → 警告台股獨秀，留意尾盤回吐\n"
+            "  - JP/KR 急漲急跌應作為台股盤中操作的提前訊號\n"
+        )
+    prompt = f"""你是專業 {('台股' if is_tw_market else '美股')}分析師。下面是今日開盤後 30 分鐘的市場狀態。
+{leading_hint}
 {macro_line}
 
-【今日資金流向 + 動能股清單】
+【今日資金流向 + 動能股清單 (含美股隔夜 + 日韓盤中)】
 {picks_summary}
 
 【國際新聞 / 大宗商品 / 政治面 sentiment】
@@ -395,8 +405,10 @@ def analyze_open_picks(market: str, picks_summary: str,
 (每點 1-2 句，3-5 點即可)
 
 ## 📊 今日大盤判讀
+{"- 日韓比台股早一小時開盤，今日 JP/KR 走勢給的訊號是?" if is_tw_market else ""}
 - 今日資金主流是什麼類型？(防禦/成長/題材/輪動?)
 - 上述族群中，哪一個有機會延續整天？哪一個可能只是早盤反彈？
+{"- 哪些族群是亞洲區域同步? 哪些是台股獨秀?" if is_tw_market else ""}
 
 ## 🎯 操作節奏建議
 - 1-2 個具體建議 (例如「等回測支撐」、「分批佈局 A 族群」、「規避 B 族群」、「縮短持股時間」)

@@ -30,6 +30,58 @@ import market_predictor
 import sector_pulse
 import stock_catalyst
 
+# ---------------------------------------------------------------------------
+# 台股族群 vs 日韓對應產業 mapping (用於盤後比對)
+# ---------------------------------------------------------------------------
+TW_TO_ASIA_SECTOR_MAP = {
+    "AI 伺服器":  ["JP 半導體", "KR 半導體"],
+    "AI 邊緣":    ["JP 半導體", "KR 半導體"],
+    "AI PC":      ["JP 半導體"],
+    "ABF 載板":   ["JP 半導體", "KR 半導體"],
+    "高頻高速":   ["JP 半導體"],
+    "矽光子":     ["JP 半導體"],
+    "PCB":        ["JP 半導體", "KR 半導體"],
+    "被動元件":   ["JP 電子零組件"],
+    "面板":       ["JP 電子零組件", "KR 半導體"],
+    "汽車零件":   ["JP 汽車", "KR 汽車"],
+    "電動車":     ["JP 汽車", "KR 汽車"],
+    "金融":       ["JP 金融", "KR 金融"],
+    "航運":       ["JP 海運"],
+    "重電族群":   ["JP 工業"],
+    "儲能":       ["JP 工業"],
+    "散熱":       ["JP 電子零組件"],
+}
+
+
+# 日韓代表股 (用於計算對應產業的當日漲幅)
+# 美股板塊 → 台股對應題材 (用於美股盤後推薦受惠台股)
+US_SECTOR_TO_TW_THEMES = {
+    "XLK":  ["AI 伺服器", "AI 邊緣", "AI PC", "ABF 載板", "PCB", "高頻高速", "矽光子"],
+    "XLC":  ["AI 伺服器", "低軌衛星"],
+    "XLY":  ["航運", "汽車零件", "電動車"],
+    "XLI":  ["重電族群", "汽車零件", "機器人"],
+    "XLF":  ["金融"],
+    "XLV":  ["生技"],
+    "XLB":  [],
+    "XLE":  [],
+    "XLU":  ["重電族群", "儲能"],
+    "XLRE": [],
+    "XLP":  [],
+}
+
+
+JP_KR_PROXIES = {
+    "JP 半導體":     ["8035.T", "6857.T", "6920.T"],   # Tokyo Electron, Advantest, Lasertec
+    "JP 電子零組件": ["6981.T", "6594.T"],              # Murata, Nidec
+    "JP 汽車":       ["7203.T", "7267.T"],              # Toyota, Honda
+    "JP 海運":       ["9101.T", "9104.T"],              # NYK, MOL
+    "JP 工業":       ["6502.T", "6501.T"],              # Toshiba, Hitachi
+    "JP 金融":       ["8306.T", "8316.T"],              # MUFG, SMFG
+    "KR 半導體":     ["005930.KS", "000660.KS"],        # Samsung Elec, SK Hynix
+    "KR 汽車":       ["005380.KS"],                     # Hyundai Motor
+    "KR 金融":       ["105560.KS", "055550.KS"],        # KB Financial, Shinhan
+}
+
 
 # ---------------------------------------------------------------------------
 # 美股板塊 → 代表性個股池
@@ -165,6 +217,9 @@ def get_tw_open_picks(top_themes_n: int = 3, picks_per_theme: int = 3) -> Dict:
     laggards = laggard_finder.find_tw_laggards()
     laggards_ai = laggard_finder.analyze_laggards_with_gemini(laggards, market="TW") if laggards else {}
 
+    # 美股隔夜行情 (給 AI 跨市場推理用)
+    us_overnight = get_us_overnight_summary()
+
     return {
         "themes": themes_df.head(top_themes_n),
         "picks": picks,
@@ -175,6 +230,140 @@ def get_tw_open_picks(top_themes_n: int = 3, picks_per_theme: int = 3) -> Dict:
         "asia": asia,
         "laggards": laggards,
         "laggards_ai": laggards_ai,
+        "us_overnight": us_overnight,
+    }
+
+
+# ---------------------------------------------------------------------------
+# 台股盤後分析 (15:00) — 含日韓對應產業比對 + AI 推理
+# ---------------------------------------------------------------------------
+def _compute_jp_kr_sector_pcts() -> Dict[str, float]:
+    """計算每個 JP/KR 對應產業當日平均漲幅."""
+    out: Dict[str, float] = {}
+    for sec_name, syms in JP_KR_PROXIES.items():
+        pcts = []
+        for sym in syms:
+            df = ds.fetch_yf_history(sym, period="5d", interval="1d")
+            if df.empty or len(df) < 2:
+                continue
+            try:
+                close = df["Close"].astype(float)
+                last = float(close.iloc[-1])
+                prev = float(close.iloc[-2])
+                if prev > 0:
+                    pcts.append((last / prev - 1) * 100)
+            except Exception:
+                continue
+        if pcts:
+            out[sec_name] = round(sum(pcts) / len(pcts), 2)
+    return out
+
+
+def _gemini_close_reasoning(tw_themes: pd.DataFrame, jp_pct: float, kr_pct: float,
+                              jp_kr_sectors: Dict[str, float],
+                              theme_to_asia: Dict[str, List[str]],
+                              model: str = "gemini-2.5-flash") -> str:
+    """讓 Gemini 寫盤後比對結論."""
+    try:
+        import ai_analyzer as _ai
+    except ImportError:
+        return ""
+    if not _ai.gemini_available():
+        return ""
+
+    # 組對照表
+    rows = []
+    for _, r in tw_themes.head(8).iterrows():
+        theme = r["題材"]
+        avg = r.get("平均%")
+        asia_secs = theme_to_asia.get(theme, [])
+        asia_str = ", ".join(f"{s} {jp_kr_sectors.get(s, 'N/A')}%" for s in asia_secs) if asia_secs else "(無對應)"
+        rows.append(f"  {theme}: 台股均漲 {avg}% | 對應日韓: {asia_str}")
+
+    prompt = f"""你是亞洲股市分析師。今日台股已收盤，請根據以下資料推理：
+
+【台股各熱門族群當日表現】
+{chr(10).join(rows)}
+
+【日股 / 韓股大盤當日漲跌】
+日經 225: {jp_pct:+.2f}%
+韓國 KOSPI: {kr_pct:+.2f}%
+
+請用繁體中文回應 (避免太多 emoji 與廢話)，結構：
+
+------ 區域同步 vs 台股獨秀 ------
+- 哪些族群屬於「亞洲區域同步」漲跌? (台股 + 日韓對應產業同向)
+- 哪些族群是「台股獨秀」? (台股漲、日韓不漲；或反過來)
+- 對「台股獨秀」族群，可能是什麼原因 (法人佈局 / 訊息面 / 籌碼結構)
+
+------ 明日開盤推測 ------
+- 區域同步族群: 日韓收盤後到台股次日開盤前的影響
+- 留意可能影響台股的隔夜訊號 (美股 / 油價 / 美元 / Fed 等)
+
+------ 操作節奏 ------
+- 給 1-2 個具體建議 (持續觀察 / 待回測支撐 / 區域同步續航 / 規避台股獨秀股 等)
+
+結尾加「以上分析僅供參考，不構成投資建議」。"""
+
+    try:
+        import google.generativeai as genai
+        genai.configure(api_key=_ai.get_gemini_key())
+        m = genai.GenerativeModel(model)
+        resp = m.generate_content(
+            prompt,
+            generation_config={"temperature": 0.4, "max_output_tokens": 1500},
+        )
+        return (resp.text or "").strip()
+    except Exception as e:
+        return f"(Gemini 推理失敗: {e})"
+
+
+def get_tw_close_analysis() -> Dict:
+    """台股盤後 15:00 分析 — 全日表現 + 日韓比對 + AI 推理結論."""
+    # TW 各族群全日表現 (sector_pulse 用 yfinance, 收盤後就是當日完整漲跌)
+    hot = sector_pulse.compute_hot_themes()
+    themes_df = hot.get("themes")
+
+    # 日韓大盤
+    jp_df = ds.fetch_yf_history("^N225", period="5d", interval="1d")
+    kr_df = ds.fetch_yf_history("^KS11", period="5d", interval="1d")
+    jp_pct = 0.0
+    kr_pct = 0.0
+    if not jp_df.empty and len(jp_df) >= 2:
+        c = jp_df["Close"].astype(float)
+        jp_pct = (float(c.iloc[-1]) / float(c.iloc[-2]) - 1) * 100
+    if not kr_df.empty and len(kr_df) >= 2:
+        c = kr_df["Close"].astype(float)
+        kr_pct = (float(c.iloc[-1]) / float(c.iloc[-2]) - 1) * 100
+
+    # 日韓對應產業表現
+    jp_kr_sectors = _compute_jp_kr_sector_pcts()
+
+    # AI 推理
+    ai_text = ""
+    if themes_df is not None and not themes_df.empty:
+        ai_text = _gemini_close_reasoning(
+            themes_df, jp_pct, kr_pct, jp_kr_sectors, TW_TO_ASIA_SECTOR_MAP
+        )
+
+    # 加權指數收盤
+    twii_df = ds.fetch_yf_history("^TWII", period="5d", interval="1d")
+    twii_close = 0.0
+    twii_pct = 0.0
+    if not twii_df.empty and len(twii_df) >= 2:
+        c = twii_df["Close"].astype(float)
+        twii_close = float(c.iloc[-1])
+        twii_pct = (float(c.iloc[-1]) / float(c.iloc[-2]) - 1) * 100
+
+    return {
+        "themes": themes_df,
+        "twii_close": round(twii_close, 2),
+        "twii_pct": round(twii_pct, 2),
+        "jp_pct": round(jp_pct, 2),
+        "kr_pct": round(kr_pct, 2),
+        "jp_kr_sectors": jp_kr_sectors,
+        "theme_to_asia_map": TW_TO_ASIA_SECTOR_MAP,
+        "ai_text": ai_text,
     }
 
 
@@ -307,4 +496,239 @@ def get_us_open_picks(top_sectors_n: int = 3, picks_per_sector: int = 3,
         "events": events,
         "laggards": laggards,
         "laggards_ai": laggards_ai,
+    }
+
+
+# ---------------------------------------------------------------------------
+# 美股盤後 +2h 分析 (含台股次日開盤推測)
+# ---------------------------------------------------------------------------
+def _gemini_us_close_reasoning(sectors_df: pd.DataFrame, spy_pct: float,
+                                qqq_pct: float, dia_pct: float,
+                                fg: dict, model: str = "gemini-2.5-flash") -> str:
+    try:
+        import ai_analyzer as _ai
+    except ImportError:
+        return ""
+    if not _ai.gemini_available():
+        return ""
+
+    fg_line = ""
+    if fg and fg.get("score") is not None:
+        fg_line = f"CNN F&G: {fg['score']:.0f} ({fg.get('rating')})"
+
+    sector_lines = []
+    if sectors_df is not None and not sectors_df.empty:
+        for _, r in sectors_df.iterrows():
+            sym = r.get("symbol")
+            name = r.get("sector", "")
+            r1 = r.get("1d_%", 0)
+            sector_lines.append(f"  {sym} {name}: {r1:+.2f}%")
+
+    sector_block = "\n".join(sector_lines) if sector_lines else "(無資料)"
+
+    prompt = f"""你是美股 + 全球宏觀分析師。今日美股已收盤，請推理：
+
+【美股大盤當日】
+SPY: {spy_pct:+.2f}%
+QQQ: {qqq_pct:+.2f}%
+DIA: {dia_pct:+.2f}%
+{fg_line}
+
+【板塊輪動 (1d)】
+{sector_block}
+
+請用繁體中文回應 (避免太多 emoji)，結構：
+
+------ 今日美股總結 ------
+- 主流方向 (科技 / 防禦 / 循環 / 能源 等)
+- 強勢板塊與背後的市場原因
+- 市場情緒判讀
+
+------ 對台股次日開盤推測 ------
+- 區域影響: 美股強勢時，台股 ADR / 半導體股可能開高 N% 左右
+- 留意風險: Fed / 地緣 / 公司財報 等任何隔夜訊號
+- 預估台股開盤偏向: 開高走高 / 開高走低 / 開低 / 平盤
+
+------ 給台灣投資人的操作建議 ------
+- 1-2 個具體可行建議
+
+結尾加「以上分析僅供參考，不構成投資建議」。"""
+
+    try:
+        import google.generativeai as genai
+        genai.configure(api_key=_ai.get_gemini_key())
+        m = genai.GenerativeModel(model)
+        resp = m.generate_content(
+            prompt,
+            generation_config={"temperature": 0.4, "max_output_tokens": 1500},
+        )
+        return (resp.text or "").strip()
+    except Exception as e:
+        return f"(Gemini 推理失敗: {e})"
+
+
+def get_us_overnight_summary() -> Dict:
+    """取美股最近一次收盤的隔夜表現 (給 TW 開盤分析參考)."""
+    out = {}
+    for sym, name in [("SPY", "S&P 500"), ("QQQ", "NASDAQ"), ("DIA", "DOW")]:
+        df = ds.fetch_yf_history(sym, period="3d", interval="1d")
+        if df.empty or len(df) < 2:
+            continue
+        try:
+            c = df["Close"].astype(float)
+            pct = (float(c.iloc[-1]) / float(c.iloc[-2]) - 1) * 100
+            out[sym] = {"name": name, "pct": round(pct, 2)}
+        except Exception:
+            continue
+    sectors = ds.fetch_sector_rotation()
+    if sectors is not None and not sectors.empty:
+        out["sectors"] = sectors
+    fg = ds.fetch_fear_greed()
+    if fg:
+        out["fg"] = fg
+    return out
+
+
+def find_tw_beneficiaries_from_us(us_sectors_df: pd.DataFrame,
+                                    min_pct: float = 0.5,
+                                    top_per_theme: int = 4) -> Dict[str, List[Dict]]:
+    """根據美股強勢板塊，找對應的台股可能受惠者.
+    回傳: {tw_theme: [{stock_id, name, us_drivers}, ...]}
+    """
+    if us_sectors_df is None or us_sectors_df.empty or "1d_%" not in us_sectors_df.columns:
+        return {}
+
+    strong = us_sectors_df[us_sectors_df["1d_%"] > min_pct]
+    if strong.empty:
+        return {}
+
+    info = ds.get_taiwan_stock_info()
+    name_map = info.set_index("stock_id")["stock_name"].to_dict() if "stock_name" in info.columns else {}
+
+    # 收集 TW 題材 → driver
+    theme_drivers: Dict[str, List[str]] = {}
+    for _, r in strong.iterrows():
+        sym = r.get("symbol", "")
+        name = r.get("sector", "")
+        pct = r.get("1d_%", 0)
+        themes = US_SECTOR_TO_TW_THEMES.get(sym, [])
+        for t in themes:
+            theme_drivers.setdefault(t, []).append(f"{sym} {name} {pct:+.2f}%")
+
+    out: Dict[str, List[Dict]] = {}
+    seen: set = set()
+    for theme, drivers in theme_drivers.items():
+        stock_ids = sector_pulse.TW_THEMES.get(theme, [])
+        picks = []
+        for sid in stock_ids:
+            if sid in seen:
+                continue
+            picks.append({
+                "stock_id": sid,
+                "name": name_map.get(sid, ""),
+                "theme": theme,
+            })
+            seen.add(sid)
+            if len(picks) >= top_per_theme:
+                break
+        if picks:
+            out[theme] = {"drivers": drivers, "picks": picks}
+    return out
+
+
+def _gemini_recommend_tw_after_us(beneficiaries: Dict, model: str = "gemini-2.5-flash") -> Dict[str, str]:
+    """讓 Gemini 為每檔台股寫 1 句受惠美股的具體理由."""
+    try:
+        import ai_analyzer as _ai
+    except ImportError:
+        return {}
+    if not _ai.gemini_available() or not beneficiaries:
+        return {}
+
+    blocks = []
+    all_ids: List[str] = []
+    for theme, info in beneficiaries.items():
+        drivers = ", ".join(info.get("drivers", []))
+        picks = info.get("picks", [])
+        if not picks:
+            continue
+        names = ", ".join(f"{p['stock_id']} {p['name']}" for p in picks)
+        blocks.append(f"[{theme}] 受美股驅動: {drivers}\n候選台股: {names}")
+        all_ids.extend(p["stock_id"] for p in picks)
+
+    if not blocks:
+        return {}
+
+    prompt = f"""你是熟悉台美股聯動的分析師。下面是今日美股強勢板塊 → 對應台股題材 → 候選個股。
+請為每檔候選台股寫 1 句具體「受惠美股的方式」(產品 / 客戶 / 訂單 / 供應鏈位置 等)。
+
+請用嚴格 JSON 格式回應，key 是 stock_id，value 是 1 句中文理由。
+範例: {{"6669": "AI Server ODM Direct，直接接 NVIDIA / Meta 大單", "2382": "Microsoft AI 伺服器代工龍頭"}}
+
+不要加任何前後 markdown，只回 JSON。
+
+待分析:
+
+{chr(10).join(blocks)}"""
+
+    try:
+        import google.generativeai as genai
+        genai.configure(api_key=_ai.get_gemini_key())
+        m = genai.GenerativeModel(model)
+        resp = m.generate_content(
+            prompt,
+            generation_config={
+                "temperature": 0.4,
+                "max_output_tokens": 1500,
+                "response_mime_type": "application/json",
+            },
+        )
+        text = (resp.text or "").strip()
+        if not text:
+            return {}
+        import json, re
+        text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.MULTILINE)
+        data = json.loads(text)
+        return {str(k): str(v) for k, v in data.items()} if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def get_us_close_analysis() -> Dict:
+    """美股收盤 +2 小時 (18:00 EDT / 06:00 隔日台北) 全日綜合 + 對台股次日影響推理."""
+    sectors = ds.fetch_sector_rotation()
+    fg = ds.fetch_fear_greed()
+
+    spy_df = ds.fetch_yf_history("SPY", period="2d", interval="1d")
+    qqq_df = ds.fetch_yf_history("QQQ", period="2d", interval="1d")
+    dia_df = ds.fetch_yf_history("DIA", period="2d", interval="1d")
+
+    def _pct(df):
+        if df.empty or len(df) < 2:
+            return 0.0
+        try:
+            c = df["Close"].astype(float)
+            return (float(c.iloc[-1]) / float(c.iloc[-2]) - 1) * 100
+        except Exception:
+            return 0.0
+
+    spy_pct = _pct(spy_df)
+    qqq_pct = _pct(qqq_df)
+    dia_pct = _pct(dia_df)
+
+    ai_text = _gemini_us_close_reasoning(sectors, spy_pct, qqq_pct, dia_pct, fg)
+
+    # 受惠美股的台股推薦
+    beneficiaries = find_tw_beneficiaries_from_us(sectors, min_pct=0.5)
+    beneficiary_reasons = _gemini_recommend_tw_after_us(beneficiaries) if beneficiaries else {}
+
+    return {
+        "sectors": sectors,
+        "spy_pct": round(spy_pct, 2),
+        "qqq_pct": round(qqq_pct, 2),
+        "dia_pct": round(dia_pct, 2),
+        "fg": fg,
+        "ai_text": ai_text,
+        "beneficiaries": beneficiaries,
+        "beneficiary_reasons": beneficiary_reasons,
     }
