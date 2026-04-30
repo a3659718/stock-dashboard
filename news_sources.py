@@ -266,7 +266,7 @@ def _gemini_translate_batch(titles: List[str]) -> Dict[str, str]:
     )
     try:
         genai.configure(api_key=_ai.get_gemini_key())
-        m = genai.GenerativeModel("gemini-1.5-flash")
+        m = genai.GenerativeModel("gemini-2.5-flash")
         resp = m.generate_content(
             prompt,
             generation_config={

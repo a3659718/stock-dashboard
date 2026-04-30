@@ -22,8 +22,10 @@ from typing import Dict, List, Optional
 import pandas as pd
 import streamlit as st
 
+import asia_markets
 import data_sources as ds
 import earnings_calendar
+import laggard_finder
 import market_predictor
 import sector_pulse
 import stock_catalyst
@@ -156,13 +158,23 @@ def get_tw_open_picks(top_themes_n: int = 3, picks_per_theme: int = 3) -> Dict:
     catalysts = stock_catalyst.annotate_picks_with_catalysts(all_picks_rows, market="TW")
     events = earnings_calendar.annotate_picks_with_events(all_picks_rows, market="TW")
 
+    # 亞洲鄰近市場狀況
+    asia = asia_markets.check_asia_markets()
+
+    # 強勢族群裡的落後股 + Gemini 跟漲機會分析
+    laggards = laggard_finder.find_tw_laggards()
+    laggards_ai = laggard_finder.analyze_laggards_with_gemini(laggards, market="TW") if laggards else {}
+
     return {
         "themes": themes_df.head(top_themes_n),
         "picks": picks,
         "prediction": prediction,
         "accuracy": accuracy,
-        "catalysts": catalysts,  # {stock_id: "催化劑文字"}
-        "events": events,        # {stock_id: {last_*, next_*, sentiment, summary}}
+        "catalysts": catalysts,
+        "events": events,
+        "asia": asia,
+        "laggards": laggards,
+        "laggards_ai": laggards_ai,
     }
 
 
@@ -281,6 +293,10 @@ def get_us_open_picks(top_sectors_n: int = 3, picks_per_sector: int = 3,
     catalysts = stock_catalyst.annotate_picks_with_catalysts(all_us_rows, market="US")
     events = earnings_calendar.annotate_picks_with_events(all_us_rows, market="US")
 
+    # 美股板塊落後股
+    laggards = laggard_finder.find_us_laggards()
+    laggards_ai = laggard_finder.analyze_laggards_with_gemini(laggards, market="US") if laggards else {}
+
     return {
         "sectors": sectors_sorted,
         "sector_picks": sector_picks,
@@ -289,4 +305,6 @@ def get_us_open_picks(top_sectors_n: int = 3, picks_per_sector: int = 3,
         "accuracy": accuracy,
         "catalysts": catalysts,
         "events": events,
+        "laggards": laggards,
+        "laggards_ai": laggards_ai,
     }

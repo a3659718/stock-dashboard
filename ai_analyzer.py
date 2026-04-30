@@ -20,7 +20,7 @@ import data_sources as ds
 import tw_screener as tw
 
 # 模型 (Flash 免費版額度大)
-DEFAULT_MODEL = "gemini-1.5-flash"
+DEFAULT_MODEL = "gemini-2.5-flash"
 
 
 def get_gemini_key() -> str:

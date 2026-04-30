@@ -333,6 +333,14 @@ def evaluate_pending_predictions(symbol_for_market: Optional[Dict] = None) -> in
 
     df_eval = df.copy()
     df_eval["evaluated"] = df_eval["evaluated"].astype(str).str.lower().isin(["true", "1", "yes"])
+
+    # 強制這些欄位為 object 型別 (避免 pandas LossySetitemError)
+    for _col in ["actual_pattern", "actual_close", "actual_high", "actual_low", "correct"]:
+        if _col in df_eval.columns:
+            df_eval[_col] = df_eval[_col].astype(object)
+        else:
+            df_eval[_col] = ""
+
     pending = df_eval[~df_eval["evaluated"]]
     if pending.empty:
         return 0

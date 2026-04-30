@@ -114,46 +114,85 @@ def _pick_relevant_news(news_list: List[Dict], lang: str = "zh") -> Optional[Dic
 # 抓個股新聞
 # ---------------------------------------------------------------------------
 @st.cache_data(ttl=1800, show_spinner=False)
-def fetch_news_for_stock(stock_id: str, market: str = "TW", max_items: int = 5,
-                          days: int = 7) -> List[Dict]:
-    """取近 N 天個股新聞，TW 用 FinMind, US 用 yfinance."""
+def fetch_news_for_stock(stock_id: str, market: str = "TW", max_items: int = 8,
+                          days: int = 30) -> List[Dict]:
+    """取近 N 天個股新聞.
+    TW: 先試 FinMind, 拿不到 fallback 用 yfinance ".TW" / ".TWO".
+    US: yfinance.
+    """
+    items: List[Dict] = []
+
     if market == "TW":
         today = dt.date.today()
         end = today.strftime("%Y-%m-%d")
         start = (today - dt.timedelta(days=days)).strftime("%Y-%m-%d")
+        # 1) FinMind TaiwanStockNews
         try:
             df = ds._finmind_get("TaiwanStockNews", data_id=stock_id,
                                   start_date=start, end_date=end)
+            if df is not None and not df.empty:
+                for _, r in df.head(max_items).iterrows():
+                    items.append({
+                        "title": str(r.get("title", "") or "")[:200],
+                        "date": str(r.get("date", "") or "")[:10],
+                        "source": str(r.get("source", "") or "FinMind")[:30],
+                        "link": str(r.get("link", "") or ""),
+                    })
         except Exception:
-            return []
-        if df is None or df.empty:
-            return []
-        items = []
-        for _, r in df.head(max_items).iterrows():
-            items.append({
-                "title": str(r.get("title", "") or "")[:180],
-                "date": str(r.get("date", "") or "")[:10],
-                "source": str(r.get("source", "") or "")[:30],
-                "link": str(r.get("link", "") or ""),
-            })
+            pass
+
+        # 2) Fallback: yfinance with .TW / .TWO 後綴
+        if not items:
+            for suffix in [".TW", ".TWO"]:
+                yf_items = ds.fetch_yahoo_news(stock_id + suffix, max_n=max_items)
+                if yf_items:
+                    for it in yf_items:
+                        title = it.get("title", "") or ""
+                        if not title:
+                            continue
+                        ts = ""
+                        ppt = it.get("providerPublishTime")
+                        if ppt:
+                            try:
+                                ts = dt.datetime.fromtimestamp(int(ppt)).strftime("%Y-%m-%d")
+                            except Exception:
+                                pass
+                        items.append({
+                            "title": title[:200],
+                            "date": ts,
+                            "source": (it.get("publisher", "") or "Yahoo")[:30],
+                            "link": it.get("link", "") or "",
+                        })
+                    break  # 抓到一個就停
         return items
-    else:  # US
-        items = ds.fetch_yahoo_news(stock_id, max_n=max_items)
-        return [
-            {
-                "title": it.get("title", "") or "",
-                "date": "",
-                "source": it.get("publisher", "") or "",
-                "link": it.get("link", "") or "",
-            } for it in items if it.get("title")
-        ]
+
+    # US
+    yf_items = ds.fetch_yahoo_news(stock_id, max_n=max_items)
+    for it in yf_items:
+        title = it.get("title", "") or ""
+        if not title:
+            continue
+        ts = ""
+        ppt = it.get("providerPublishTime")
+        if ppt:
+            try:
+                ts = dt.datetime.fromtimestamp(int(ppt)).strftime("%Y-%m-%d")
+            except Exception:
+                pass
+        items.append({
+            "title": title[:200],
+            "date": ts,
+            "source": (it.get("publisher", "") or "Yahoo")[:30],
+            "link": it.get("link", "") or "",
+        })
+    return items
 
 
 # ---------------------------------------------------------------------------
 # Gemini 批次催化劑摘要
 # ---------------------------------------------------------------------------
 def _gemini_batch_catalysts(payload: List[Dict], market: str = "TW",
-                              model: str = "gemini-1.5-flash") -> Dict[str, str]:
+                              model: str = "gemini-2.5-flash") -> Dict[str, str]:
     """payload: [{stock_id, name, today_pct, news_titles: [str,...]}, ...]
     回傳 {stock_id: 1-2 句催化劑}.
     """

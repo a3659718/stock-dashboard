@@ -890,13 +890,14 @@ with tab_stock:
         is_us_stock = full.get("is_us", False)
         market_label = "US" if is_us_stock else "TW"
 
-        # 取近 7 天新聞
+        # 取近 30 天新聞 (TW 自動 fallback yfinance)
         try:
             news_list = stock_catalyst.fetch_news_for_stock(
-                sid, market=market_label, max_items=5, days=7
+                sid, market=market_label, max_items=10, days=30
             )
-        except Exception:
+        except Exception as _e:
             news_list = []
+            st.caption(f"⚠️ 新聞抓取錯誤: {_e}")
 
         # 取催化劑 (Gemini 批次 / 新聞 fallback)
         try:
@@ -940,21 +941,53 @@ with tab_stock:
                 elif sentiment == "watch":
                     st.info(f"👀 {ev['brief']}")
 
-        # 近期新聞
+        # 近期新聞 (含 sentiment 標籤)
         if news_list:
-            with st.expander(f"📰 近 7 天新聞 ({len(news_list)} 則)"):
-                for n in news_list[:8]:
-                    title = n.get("title", "")
+            # 補上 sentiment
+            try:
+                import news_sources
+                news_list = news_sources.enrich_news_with_sentiment(
+                    news_list, lang_default="zh" if market_label == "TW" else "en",
+                )
+                # Gemini 可用時翻譯成中文
+                if ai_analyzer.gemini_available():
+                    news_list = news_sources.translate_news_titles(news_list)
+            except Exception:
+                pass
+
+            with st.expander(f"📰 近 30 天新聞 ({len(news_list)} 則)", expanded=True):
+                for n in news_list[:10]:
+                    title_orig = n.get("title", "")
+                    title_zh = n.get("title_zh", title_orig)
+                    has_translation = title_zh and title_zh != title_orig
                     link = n.get("link", "")
                     date = n.get("date", "")
                     src = n.get("source", "")
-                    head = f"[{date}]" if date else ""
-                    if link:
-                        st.markdown(f"- {head} [{title}]({link}) <span style='color:#888;font-size:11px'>{src}</span>",
-                                     unsafe_allow_html=True)
+                    sent = n.get("sentiment", 0)
+                    if sent > 0:
+                        tag = "📈"
+                    elif sent < 0:
+                        tag = "📉"
                     else:
-                        st.markdown(f"- {head} {title} <span style='color:#888;font-size:11px'>{src}</span>",
-                                     unsafe_allow_html=True)
+                        tag = "▪"
+                    head = f"`[{date}]`" if date else ""
+                    display = title_zh if has_translation else title_orig
+                    if link:
+                        line = f"- {tag} {head} [{display}]({link})"
+                    else:
+                        line = f"- {tag} {head} {display}"
+                    line += f" <span style='color:#888;font-size:11px'>· {src}</span>"
+                    if has_translation:
+                        line += f"<br/><span style='color:#aaa;font-size:11px;font-style:italic;margin-left:24px'>{title_orig}</span>"
+                    st.markdown(line, unsafe_allow_html=True)
+        else:
+            with st.expander("📰 近 30 天新聞 (0 則)", expanded=False):
+                st.warning(
+                    "📭 此股票近 30 天**無新聞紀錄**。可能原因：\n"
+                    "- 中小型股 FinMind 新聞覆蓋率較低\n"
+                    "- 該股近期確實沒有重大消息\n"
+                    "- 您可以到 Goodinfo / 鉅亨網等網站手動查詢"
+                )
 
         st.markdown("---")
 

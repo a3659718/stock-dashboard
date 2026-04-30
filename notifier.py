@@ -170,6 +170,100 @@ def _fmt_prediction_block(prediction: dict, accuracy: dict) -> list:
     return out
 
 
+def _fmt_laggards_block(laggards: dict, laggards_ai: dict, market: str = "TW") -> list:
+    """強勢族群落後股 + AI 跟漲機會分析 (簡潔風格).
+    laggards: {theme: {theme_avg, leaders, laggards}}
+    laggards_ai: {stock_id: {chance, reason}}
+    """
+    if not laggards:
+        return []
+
+    out = ["", "------ 跟漲機會 (族群熱、個股還沒跟漲) ------"]
+
+    # 排序: chance=高 在前
+    chance_rank = {"高": 0, "中": 1, "低": 2}
+
+    for theme, info in laggards.items():
+        theme_avg = info.get("theme_avg", 0)
+        lag_df = info.get("laggards")
+        if lag_df is None or (hasattr(lag_df, "empty") and lag_df.empty):
+            continue
+
+        # 蒐集所有 lag 加上 AI 分析
+        rows_with_ai = []
+        for _, r in lag_df.iterrows():
+            sid = str(r.get("stock_id") or r.get("symbol") or "")
+            ai = laggards_ai.get(sid, {})
+            rows_with_ai.append({
+                "sid": sid,
+                "name": r.get("stock_name", "") or "",
+                "today_pct": r.get("今日%"),
+                "ratio": r.get("量比"),
+                "chance": ai.get("chance", "—"),
+                "reason": ai.get("reason", ""),
+            })
+        # 按 chance 排序
+        rows_with_ai.sort(key=lambda x: chance_rank.get(x["chance"], 9))
+
+        out.append("")
+        out.append(f"<b>[{theme}] 族群均漲 +{theme_avg}%</b>")
+        for r in rows_with_ai[:4]:
+            sid = r["sid"]
+            nm = r["name"]
+            tp = r["today_pct"]
+            ratio = r["ratio"]
+            chance = r["chance"]
+            reason = r["reason"]
+
+            # 跟漲機會用文字標 (少 emoji)
+            chance_label = {
+                "高": "<b>高</b>",
+                "中": "中",
+                "低": "低",
+            }.get(chance, "—")
+
+            out.append(f"  <code>{sid}</code> {nm}  今日 {tp}% / 量比 {ratio}x")
+            out.append(f"     跟漲機會: {chance_label}")
+            if reason:
+                out.append(f"     {reason}")
+    return out
+
+
+def _fmt_asia_markets_block(asia: dict) -> list:
+    """日股 / 韓股 / 港股 / 上證 摘要 + 事件提醒."""
+    if not asia:
+        return []
+    out = []
+    snapshot = asia.get("snapshot", [])
+    events = asia.get("events", [])
+
+    if snapshot:
+        out.append("")
+        out.append("<b>🌏 亞洲鄰近市場</b>")
+        for s in snapshot:
+            country = s.get("country", "")
+            name = s.get("market", "")
+            last = s.get("last", 0)
+            dp = s.get("daily_pct", 0)
+            arrow = "🔺" if dp > 0 else ("🔻" if dp < 0 else "▪")
+            out.append(f"  {country} {name}: {last:,.0f}  {arrow}{dp:+.2f}%")
+
+    if events:
+        out.append("")
+        out.append("<b>⚠️ 亞洲市場事件</b>")
+        # 依 severity 排序
+        sev_order = {"high": 0, "medium": 1, "low": 2}
+        events_sorted = sorted(events, key=lambda e: sev_order.get(e.get("severity", "low"), 9))
+        for ev in events_sorted[:6]:
+            country = ev.get("country", "")
+            name = ev.get("market", "")
+            event_name = ev.get("event", "")
+            msg = ev.get("msg", "")
+            severity_icon = "🚨" if ev.get("severity") == "high" else ("⚠️" if ev.get("severity") == "medium" else "💡")
+            out.append(f"  {severity_icon} {country} {name} <b>[{event_name}]</b> {msg}")
+    return out
+
+
 def _fmt_external_signals_block() -> list:
     """油價 + macro 指標摘要 (簡短版，TG 用)."""
     try:
@@ -215,6 +309,8 @@ def fmt_tw_open_picks(data: dict, ai_text: str = "") -> str:
     lines = [f"<b>🇹🇼 台股開盤後 30 分鐘 · 資金流向</b>"]
     # 大盤預測
     lines.extend(_fmt_prediction_block(data.get("prediction"), data.get("accuracy")))
+    # 亞洲鄰近市場
+    lines.extend(_fmt_asia_markets_block(data.get("asia") or {}))
     # 國際訊號
     lines.extend(_fmt_external_signals_block())
     themes_df = data.get("themes")
@@ -254,6 +350,13 @@ def fmt_tw_open_picks(data: dict, ai_text: str = "") -> str:
                 ev = events.get(str(sid))
                 if ev and ev.get("summary") and ev["summary"] != "—":
                     lines.append(f"    📅 {ev['summary']}")
+
+    # 落後股 / 跟漲機會
+    lines.extend(_fmt_laggards_block(
+        data.get("laggards") or {},
+        data.get("laggards_ai") or {},
+        market="TW",
+    ))
 
     if ai_text:
         lines.append("")
@@ -336,6 +439,13 @@ def fmt_us_open_picks(data: dict, ai_text: str = "") -> str:
             ev = events.get(str(sym))
             if ev and ev.get("summary") and ev["summary"] != "—":
                 lines.append(f"    📅 {ev['summary']}")
+
+    # 落後股 / 跟漲機會
+    lines.extend(_fmt_laggards_block(
+        data.get("laggards") or {},
+        data.get("laggards_ai") or {},
+        market="US",
+    ))
 
     if ai_text:
         lines.append("")
