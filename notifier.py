@@ -352,6 +352,7 @@ def fmt_tw_open_picks(data: dict, ai_text: str = "") -> str:
     picks = data.get("picks", [])
     catalysts = data.get("catalysts", {})
     events = data.get("events", {})
+    chips = data.get("chips", {})
     if picks:
         lines.append("")
         lines.append("<b>📌 各族群動能潛在股 (3 檔)</b>")
@@ -376,6 +377,16 @@ def fmt_tw_open_picks(data: dict, ai_text: str = "") -> str:
                 ev = events.get(str(sid))
                 if ev and ev.get("summary") and ev["summary"] != "—":
                     lines.append(f"    📅 {ev['summary']}")
+                ch = chips.get(str(sid))
+                if ch:
+                    direction = ch.get("direction", "")
+                    prob = ch.get("change_prob", 0)
+                    rec = ch.get("recommendation", "")
+                    reason = ch.get("reason", "")
+                    line = f"    🎯 主力{direction} · 換手{prob}% · 建議: <b>{rec}</b>"
+                    lines.append(line)
+                    if reason:
+                        lines.append(f"       {reason}")
 
     # 落後股 / 跟漲機會
     lines.extend(_fmt_laggards_block(

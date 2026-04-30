@@ -321,7 +321,9 @@ def _actual_day_pattern(symbol: str, target_date: dt.date) -> Optional[Dict]:
 
 
 def evaluate_pending_predictions(symbol_for_market: Optional[Dict] = None) -> int:
-    """評估有預測但 evaluated=False 的紀錄。回傳新評估的筆數。"""
+    """評估有預測但 evaluated=False 的紀錄。回傳新評估的筆數。
+    用 dict-based records 處理，**完全繞過 pandas dtype 問題**。
+    """
     if symbol_for_market is None:
         symbol_for_market = {"TW": "^TWII", "US": "SPY"}
 
@@ -331,47 +333,55 @@ def evaluate_pending_predictions(symbol_for_market: Optional[Dict] = None) -> in
     if "evaluated" not in df.columns:
         return 0
 
-    df_eval = df.copy()
-    df_eval["evaluated"] = df_eval["evaluated"].astype(str).str.lower().isin(["true", "1", "yes"])
-
-    # 強制這些欄位為 object 型別 (避免 pandas LossySetitemError)
-    for _col in ["actual_pattern", "actual_close", "actual_high", "actual_low", "correct"]:
-        if _col in df_eval.columns:
-            df_eval[_col] = df_eval[_col].astype(object)
-        else:
-            df_eval[_col] = ""
-
-    pending = df_eval[~df_eval["evaluated"]]
-    if pending.empty:
-        return 0
-
+    # 直接轉 list of dict，pandas 不會插手 dtype
+    records = df.to_dict("records")
     today = dt.date.today()
     updates = 0
-    for idx, row in pending.iterrows():
-        pred_date_str = str(row["date"])
+
+    for rec in records:
+        # 確保所有預期欄位存在
+        for col in PREDICTION_COLUMNS:
+            if col not in rec:
+                rec[col] = ""
+
+        evaluated = str(rec.get("evaluated", "")).lower() in ("true", "1", "yes")
+        if evaluated:
+            continue
+
+        pred_date_str = str(rec.get("date", ""))
         try:
             pred_date = dt.datetime.strptime(pred_date_str, "%Y-%m-%d").date()
         except Exception:
             continue
-        # 必須是「過去」的日期才能評估
         if pred_date >= today:
             continue
-        symbol = symbol_for_market.get(row["market"], "^TWII")
+
+        market_str = str(rec.get("market", "TW"))
+        symbol = symbol_for_market.get(market_str, "^TWII")
         actual = _actual_day_pattern(symbol, pred_date)
         if not actual:
             continue
-        df_eval.at[idx, "actual_pattern"] = actual["actual_pattern"]
-        df_eval.at[idx, "actual_close"] = actual["actual_close"]
-        df_eval.at[idx, "actual_high"] = actual["actual_high"]
-        df_eval.at[idx, "actual_low"] = actual["actual_low"]
-        df_eval.at[idx, "evaluated"] = True
-        df_eval.at[idx, "correct"] = (str(row["predicted_pattern"]) == actual["actual_pattern"])
+
+        rec["actual_pattern"] = actual["actual_pattern"]
+        rec["actual_close"] = actual["actual_close"]
+        rec["actual_high"] = actual["actual_high"]
+        rec["actual_low"] = actual["actual_low"]
+        rec["evaluated"] = True
+        rec["correct"] = (str(rec.get("predicted_pattern", "")) == actual["actual_pattern"])
         updates += 1
 
     if updates == 0:
         return 0
 
-    # 寫回
+    # 重建 DataFrame，所有欄位都是 object dtype (因為 records 包含混合類型)
+    df_eval = pd.DataFrame(records)
+    # 確保所有 PREDICTION_COLUMNS 存在
+    for col in PREDICTION_COLUMNS:
+        if col not in df_eval.columns:
+            df_eval[col] = ""
+    df_eval = df_eval[PREDICTION_COLUMNS]
+
+    # 寫回 sheet
     sheet = _get_predictions_sheet()
     if sheet is not None:
         try:
@@ -383,7 +393,7 @@ def evaluate_pending_predictions(symbol_for_market: Optional[Dict] = None) -> in
         except Exception:
             pass
     try:
-        df_eval[PREDICTION_COLUMNS].to_csv(PREDICTIONS_LOCAL_CSV, index=False)
+        df_eval.to_csv(PREDICTIONS_LOCAL_CSV, index=False)
     except Exception:
         pass
     return updates

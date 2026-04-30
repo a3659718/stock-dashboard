@@ -23,6 +23,7 @@ import pandas as pd
 import streamlit as st
 
 import asia_markets
+import chip_analyzer
 import data_sources as ds
 import earnings_calendar
 import laggard_finder
@@ -210,6 +211,12 @@ def get_tw_open_picks(top_themes_n: int = 3, picks_per_theme: int = 3) -> Dict:
     catalysts = stock_catalyst.annotate_picks_with_catalysts(all_picks_rows, market="TW")
     events = earnings_calendar.annotate_picks_with_events(all_picks_rows, market="TW")
 
+    # 籌碼 / 主力換手分析 (Gemini)
+    pick_ids = [str(r.get("stock_id", "")) for r in all_picks_rows if r.get("stock_id")]
+    pick_names = {str(r.get("stock_id", "")): r.get("stock_name", "")
+                   for r in all_picks_rows if r.get("stock_id")}
+    chips = chip_analyzer.analyze_chips_batch(pick_ids, pick_names) if pick_ids else {}
+
     # 亞洲鄰近市場狀況
     asia = asia_markets.check_asia_markets()
 
@@ -231,6 +238,7 @@ def get_tw_open_picks(top_themes_n: int = 3, picks_per_theme: int = 3) -> Dict:
         "laggards": laggards,
         "laggards_ai": laggards_ai,
         "us_overnight": us_overnight,
+        "chips": chips,
     }
 
 
