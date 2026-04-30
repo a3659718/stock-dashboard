@@ -312,6 +312,7 @@ def _gemini_close_reasoning(tw_themes: pd.DataFrame, jp_pct: float, kr_pct: floa
         resp = m.generate_content(
             prompt,
             generation_config={"temperature": 0.4, "max_output_tokens": 1500},
+            safety_settings=_ai.get_safety_settings(),
         )
         return (resp.text or "").strip()
     except Exception as e:
@@ -561,6 +562,7 @@ DIA: {dia_pct:+.2f}%
         resp = m.generate_content(
             prompt,
             generation_config={"temperature": 0.4, "max_output_tokens": 1500},
+            safety_settings=_ai.get_safety_settings(),
         )
         return (resp.text or "").strip()
     except Exception as e:
@@ -682,6 +684,7 @@ def _gemini_recommend_tw_after_us(beneficiaries: Dict, model: str = "gemini-2.5-
                 "max_output_tokens": 1500,
                 "response_mime_type": "application/json",
             },
+            safety_settings=_ai.get_safety_settings(),
         )
         text = (resp.text or "").strip()
         if not text:
@@ -692,6 +695,170 @@ def _gemini_recommend_tw_after_us(beneficiaries: Dict, model: str = "gemini-2.5-
         return {str(k): str(v) for k, v in data.items()} if isinstance(data, dict) else {}
     except Exception:
         return {}
+
+
+def _gemini_holiday_reasoning(spy_pct: float, qqq_pct: float, dia_pct: float,
+                                asia_data: dict, oil: dict, macro: dict,
+                                top_news: list, trump_posts: list,
+                                model: str = "gemini-2.5-flash") -> str:
+    """假日重大消息 Gemini 推理對台股下次開盤的影響."""
+    try:
+        import ai_analyzer as _ai
+    except ImportError:
+        return ""
+    if not _ai.gemini_available():
+        return ""
+
+    # 組 prompt 各部分
+    asia_str = ""
+    if asia_data and asia_data.get("snapshot"):
+        asia_lines = [f"  {s['country']} {s['market']}: {s['daily_pct']:+.2f}%"
+                       for s in asia_data["snapshot"]]
+        asia_str = "亞洲市場今日:\n" + "\n".join(asia_lines)
+        if asia_data.get("events"):
+            asia_str += "\n  異常事件: " + "; ".join(
+                f"{e['country']} {e['market']} [{e['event']}]" for e in asia_data["events"][:5]
+            )
+
+    oil_str = ""
+    if oil:
+        oil_str = f"WTI 原油: ${oil.get('price')} ({oil.get('pct_5d', 0):+.1f}% 5d) — {oil.get('signal','')}"
+
+    macro_str = ""
+    if macro:
+        parts = [f"{n}: {m['value']} ({m['pct_5d']:+.2f}%)" for n, m in macro.items()]
+        macro_str = "Macro: " + " · ".join(parts)
+
+    news_str = ""
+    if top_news:
+        news_lines = []
+        for n in top_news[:12]:
+            sent = n.get("sentiment", 0)
+            tag = "📈" if sent > 0 else ("📉" if sent < 0 else "▪")
+            t = n.get("title_zh") or n.get("title", "")
+            news_lines.append(f"  {tag} [{n.get('source','')}] {t}")
+        news_str = "今日重要新聞:\n" + "\n".join(news_lines)
+
+    trump_str = ""
+    if trump_posts:
+        trump_lines = []
+        for t in trump_posts[:3]:
+            text = t.get("text", "")[:200]
+            trump_lines.append(f"  - {text}")
+        trump_str = "Trump Truth Social:\n" + "\n".join(trump_lines)
+
+    prompt = f"""今日台股休市。請整理今日全球 / 區域市場重大消息，並推理對台股「下個交易日開盤」的可能影響。
+
+【美股大盤】
+SPY: {spy_pct:+.2f}%   QQQ: {qqq_pct:+.2f}%   DIA: {dia_pct:+.2f}%
+
+{asia_str}
+
+{oil_str}
+{macro_str}
+
+{news_str}
+
+{trump_str}
+
+------
+
+請用繁體中文回應 (避免太多 emoji)，結構：
+
+------ 今日重要事件摘要 ------
+- 列 3-5 個對台股影響最大的事件 / 新聞 / 政治面 / Macro
+- 每個 1-2 句
+
+------ 利多 vs 利空 分類 ------
+明確標註哪些是台股下次開盤的「利多」，哪些是「利空」
+
+------ 對台股下個開盤推測 ------
+- 評估 開高 / 開低 / 平盤 的可能性
+- 給出最可能情境 + 1-2 個風險情境
+
+------ 給投資人準備建議 ------
+- 1-2 個具體可行動作 (例如「持股觀望」、「準備加碼名單」、「降低部位」)
+
+結尾加「以上分析僅供參考，不構成投資建議」。"""
+
+    try:
+        import google.generativeai as genai
+        genai.configure(api_key=_ai.get_gemini_key())
+        m = genai.GenerativeModel(model)
+        resp = m.generate_content(
+            prompt,
+            generation_config={"temperature": 0.5, "max_output_tokens": 1500},
+            safety_settings=_ai.get_safety_settings(),
+        )
+        return (resp.text or "").strip()
+    except Exception as e:
+        return f"(Gemini 推理失敗: {e})"
+
+
+def get_holiday_news_summary() -> Dict:
+    """台股休市日 22:00 推播：彙整全球重大消息 + Gemini 推理對台股下次開盤影響."""
+    # 美股大盤 (US 可能在交易中或盤後)
+    spy_df = ds.fetch_yf_history("SPY", period="3d", interval="1d")
+    qqq_df = ds.fetch_yf_history("QQQ", period="3d", interval="1d")
+    dia_df = ds.fetch_yf_history("DIA", period="3d", interval="1d")
+
+    def _pct(df):
+        if df.empty or len(df) < 2:
+            return 0.0
+        try:
+            c = df["Close"].astype(float)
+            return (float(c.iloc[-1]) / float(c.iloc[-2]) - 1) * 100
+        except Exception:
+            return 0.0
+
+    spy_pct = _pct(spy_df)
+    qqq_pct = _pct(qqq_df)
+    dia_pct = _pct(dia_df)
+
+    # 亞洲市場
+    asia = asia_markets.check_asia_markets()
+
+    # Macro / Oil
+    try:
+        import news_sources
+        oil = news_sources.fetch_oil_signal()
+        macro = news_sources.fetch_macro_indicators()
+        news = news_sources.fetch_world_news()
+        news = news_sources.enrich_news_with_sentiment(news)
+        # 翻譯成中文 (Gemini 可用時)
+        try:
+            import ai_analyzer as _ai
+            if _ai.gemini_available():
+                news = news_sources.translate_news_titles(news)
+        except Exception:
+            pass
+        # 排序: 利多/利空優先，中性最後
+        news.sort(key=lambda n: -abs(n.get("sentiment", 0)))
+        trump = news_sources.fetch_trump_truth_social(max_items=3)
+    except Exception:
+        oil, macro, news, trump = {}, {}, [], []
+
+    # F&G
+    fg = ds.fetch_fear_greed()
+
+    # Gemini 推理
+    ai_text = _gemini_holiday_reasoning(
+        spy_pct, qqq_pct, dia_pct,
+        asia, oil, macro, news, trump,
+    )
+
+    return {
+        "spy_pct": round(spy_pct, 2),
+        "qqq_pct": round(qqq_pct, 2),
+        "dia_pct": round(dia_pct, 2),
+        "fg": fg,
+        "asia": asia,
+        "oil": oil,
+        "macro": macro,
+        "news": news[:12],
+        "trump": trump,
+        "ai_text": ai_text,
+    }
 
 
 def get_us_close_analysis() -> Dict:

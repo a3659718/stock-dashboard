@@ -23,6 +23,21 @@ import tw_screener as tw
 DEFAULT_MODEL = "gemini-2.5-flash"
 
 
+# 寬鬆 safety settings — 避免財經/政治/Trump 言論被預設過濾擋下
+# 有 4 個 category，全部設 BLOCK_ONLY_HIGH (只擋極端內容)
+SAFETY_SETTINGS = [
+    {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_ONLY_HIGH"},
+    {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_ONLY_HIGH"},
+    {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_ONLY_HIGH"},
+    {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_ONLY_HIGH"},
+]
+
+
+def get_safety_settings():
+    """匯出供其他模組使用 (各 Gemini call site 統一傳這個)."""
+    return SAFETY_SETTINGS
+
+
 def get_gemini_key() -> str:
     return ds._secret("GEMINI_API_KEY")
 
@@ -290,6 +305,7 @@ def analyze(stock_meta: Dict, daily: pd.DataFrame, ind: pd.DataFrame,
                 "top_p": 0.9,
                 "max_output_tokens": 1500,
             },
+            safety_settings=SAFETY_SETTINGS,
         )
         text = (resp.text or "").strip()
         if not text:
@@ -421,6 +437,7 @@ def analyze_open_picks(market: str, picks_summary: str,
         resp = m.generate_content(
             prompt,
             generation_config={"temperature": 0.5, "max_output_tokens": 1200},
+            safety_settings=SAFETY_SETTINGS,
         )
         text = (resp.text or "").strip()
         return (bool(text), text or "Gemini 沒有回應")
@@ -454,6 +471,7 @@ def analyze_chart_image(image_bytes: bytes, extra_note: str = "",
                 "top_p": 0.9,
                 "max_output_tokens": 1500,
             },
+            safety_settings=SAFETY_SETTINGS,
         )
         text = (resp.text or "").strip()
         if not text:

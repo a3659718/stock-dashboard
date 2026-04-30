@@ -167,6 +167,34 @@ def main() -> int:
     if market == "us":
         market = "us_open"
 
+    # === 假日檢查 ===
+    try:
+        import holiday_check
+
+        if market == "holiday_news":
+            # 反向邏輯: TW 開盤日才跳過 (其他正常推播會處理), 休市日才跑
+            if not holiday_check.is_market_closed_today("TW"):
+                print(f"=== Holiday Check ===")
+                print(f"今日 TW 開盤交易日，holiday_news 跳過此次推播。")
+                print(f"市場狀態: {holiday_check.market_status_summary()}")
+                return 0
+            print(f"=== Holiday Check ===")
+            print(f"今日 TW 休市，執行假日重大消息推播")
+            print(f"市場狀態: {holiday_check.market_status_summary()}")
+            print(f"=====================\n")
+        else:
+            market_for_holiday = "TW" if market.startswith("tw") else "US"
+            if holiday_check.is_market_closed_today(market_for_holiday):
+                print(f"=== Holiday Check ===")
+                print(f"今日 {market_for_holiday} 休市，跳過此次推播。")
+                print(f"市場狀態: {holiday_check.market_status_summary()}")
+                return 0
+            print(f"=== Holiday Check ===")
+            print(f"{market_for_holiday} 開盤中，繼續執行")
+            print(f"=====================\n")
+    except Exception as e:
+        print(f"⚠️ Holiday check failed: {e} - 忽略假日檢查繼續執行")
+
     # 診斷 log
     print(f"=== Secrets Check ===")
     finmind_ok = bool(os.environ.get('FINMIND_TOKEN'))
@@ -266,6 +294,13 @@ def main() -> int:
         if data.get("ai_text"):
             print(f"Gemini reasoning: {len(data['ai_text'])} chars")
         msg = notifier.fmt_us_close_analysis(data)
+    elif market == "holiday_news":
+        print("Running TW holiday news summary (22:30 台北)...")
+        data = market_open_picks.get_holiday_news_summary()
+        if data.get("ai_text"):
+            print(f"Gemini reasoning: {len(data['ai_text'])} chars")
+        print(f"Got {len(data.get('news', []))} news items")
+        msg = notifier.fmt_holiday_news(data)
     else:
         print(f"Unknown market: {market}", file=sys.stderr)
         return 1

@@ -240,6 +240,7 @@ def _gemini_batch_catalysts(payload: List[Dict], market: str = "TW",
             prompt,
             generation_config={"temperature": 0.4, "max_output_tokens": 1500,
                                 "response_mime_type": "application/json"},
+            safety_settings=_ai.get_safety_settings(),
         )
         text = (resp.text or "").strip()
         if not text:

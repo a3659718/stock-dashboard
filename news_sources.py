@@ -274,6 +274,7 @@ def _gemini_translate_batch(titles: List[str]) -> Dict[str, str]:
                 "max_output_tokens": 2000,
                 "response_mime_type": "application/json",
             },
+            safety_settings=_ai.get_safety_settings(),
         )
         text = (resp.text or "").strip()
         if not text:

@@ -401,6 +401,80 @@ def fmt_tw_open_picks(data: dict, ai_text: str = "") -> str:
     return out
 
 
+def fmt_holiday_news(data: dict) -> str:
+    """假日 22:00 重大消息推播."""
+    if not data:
+        return "📅 假日重大消息: 資料不足"
+
+    spy_pct = data.get("spy_pct", 0)
+    qqq_pct = data.get("qqq_pct", 0)
+    dia_pct = data.get("dia_pct", 0)
+    asia = data.get("asia") or {}
+    oil = data.get("oil") or {}
+    fg = data.get("fg") or {}
+    news = data.get("news") or []
+    trump = data.get("trump") or []
+    ai_text = data.get("ai_text", "")
+
+    lines = [
+        "<b>📅 台股休市日 · 全球重大消息整理</b>",
+        "",
+        f"美股: SPY {spy_pct:+.2f}%   QQQ {qqq_pct:+.2f}%   DIA {dia_pct:+.2f}%",
+    ]
+    if fg.get("score") is not None:
+        lines.append(f"CNN F&G: {fg['score']:.0f} ({fg.get('rating','')})")
+
+    # 亞洲市場
+    if asia.get("snapshot"):
+        lines.append("")
+        lines.append("------ 亞洲鄰近市場 ------")
+        for s in asia["snapshot"]:
+            country = s.get("country", "")
+            name = s.get("market", "")
+            dp = s.get("daily_pct", 0)
+            lines.append(f"  {country} {name}: {dp:+.2f}%")
+        if asia.get("events"):
+            for ev in asia["events"][:3]:
+                lines.append(f"    ⚠ {ev['country']} {ev['market']} [{ev['event']}]")
+
+    # 油價
+    if oil:
+        lines.append("")
+        lines.append(f"🛢 WTI 油價: ${oil.get('price')} ({oil.get('pct_5d', 0):+.1f}% 5d)")
+        if oil.get("signal"):
+            lines.append(f"   {oil['signal']}")
+
+    # 重要新聞 top 8 (利多利空優先)
+    if news:
+        lines.append("")
+        lines.append("------ 重要新聞 (利多/利空 優先) ------")
+        for n in news[:8]:
+            sent = n.get("sentiment", 0)
+            tag = "📈" if sent > 0 else ("📉" if sent < 0 else "▪")
+            t = n.get("title_zh") or n.get("title", "")
+            src = n.get("source", "")
+            lines.append(f"  {tag} <b>[{src}]</b> {t[:120]}")
+
+    # Trump
+    if trump:
+        lines.append("")
+        lines.append("------ Trump 言論 ------")
+        for t in trump[:2]:
+            text = t.get("text", "")[:200]
+            lines.append(f"  • {text}")
+
+    # AI 推理
+    if ai_text:
+        lines.append("")
+        for ln in ai_text.split("\n"):
+            lines.append(ln)
+
+    out = "\n".join(lines)
+    if len(out) > 3900:
+        out = out[:3900] + "\n…(節錄)"
+    return out
+
+
 def fmt_us_close_analysis(data: dict) -> str:
     """美股收盤 +2h 推播 — 全日板塊 + 對台股次日開盤推理."""
     if not data:
