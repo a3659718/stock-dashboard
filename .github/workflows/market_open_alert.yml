@@ -7,12 +7,12 @@ on:
     - cron: '0 3 * * 1-5'     # 11:00 (中盤更新)   = 03:00 UTC
     - cron: '0 7 * * 1-5'     # 15:00 (盤後+1.5h)  = 07:00 UTC
     # === 美股 ===
-    - cron: '0 14 * * 1-5'    # 10:00 EDT (開盤+30min)  = 14:00 UTC
-    - cron: '30 15 * * 1-5'   # 11:30 EDT (開盤+2h)     = 15:30 UTC
-    - cron: '0 22 * * 1-5'    # 18:00 EDT (收盤+2h)     = 22:00 UTC
-    # === 假日重大消息 (22:30 台北 every day) ===
-    - cron: '30 14 * * *'
-    # === 盤中監控 (自選股 / 大盤點數 / 加密貨幣) - 每 30 分 ===
+    - cron: '0 14 * * 1-5'    # 10:00 EDT (開盤+30min)
+    - cron: '30 15 * * 1-5'   # 11:30 EDT (開盤+2h)
+    - cron: '0 22 * * 1-5'    # 18:00 EDT (收盤+2h)
+    # === 假日重大消息 ===
+    - cron: '30 14 * * *'     # 22:30 台北 every day
+    # === 盤中監控 (每 30 分) ===
     - cron: '*/30 * * * *'
   workflow_dispatch:
     inputs:
@@ -65,7 +65,18 @@ jobs:
               14_30) echo "market=holiday_news" >> $GITHUB_OUTPUT ;;
               15_30) echo "market=us_mid"       >> $GITHUB_OUTPUT ;;
               22_00) echo "market=us_close"     >> $GITHUB_OUTPUT ;;
-              *)    echo "market=monitor"      >> $GITHUB_OUTPUT ;;
+              *)
+                # 容忍 cron 延遲: 接近的時段先匹配，沒到任何時段就跑 monitor
+                case "$HOUR" in
+                  01) [ "$MIN" -lt 45 ] && echo "market=tw_open"  >> $GITHUB_OUTPUT || echo "market=monitor" >> $GITHUB_OUTPUT ;;
+                  03) [ "$MIN" -lt 15 ] && echo "market=tw_mid"   >> $GITHUB_OUTPUT || echo "market=monitor" >> $GITHUB_OUTPUT ;;
+                  07) [ "$MIN" -lt 15 ] && echo "market=tw_close" >> $GITHUB_OUTPUT || echo "market=monitor" >> $GITHUB_OUTPUT ;;
+                  14) [ "$MIN" -lt 15 ] && echo "market=us_open"  >> $GITHUB_OUTPUT || ([ "$MIN" -lt 45 ] && echo "market=holiday_news" >> $GITHUB_OUTPUT || echo "market=monitor" >> $GITHUB_OUTPUT) ;;
+                  15) [ "$MIN" -ge 30 ] && echo "market=us_mid"   >> $GITHUB_OUTPUT || echo "market=monitor" >> $GITHUB_OUTPUT ;;
+                  22) [ "$MIN" -lt 15 ] && echo "market=us_close" >> $GITHUB_OUTPUT || echo "market=monitor" >> $GITHUB_OUTPUT ;;
+                  *)  echo "market=monitor" >> $GITHUB_OUTPUT ;;
+                esac
+                ;;
             esac
             echo "Cron trigger: UTC hour=$HOUR min=$MIN"
           fi
