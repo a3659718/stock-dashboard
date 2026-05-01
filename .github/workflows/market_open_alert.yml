@@ -2,20 +2,31 @@ name: Market Open Alert
 
 on:
   schedule:
-    # 台股 09:00 開盤 + 30 分 = 09:30 台北時間 = 01:30 UTC, 週一~週五
-    - cron: '30 1 * * 1-5'
-    # 美股 09:30 EDT 開盤 + 30 分 = 10:00 EDT = 14:00 UTC, 週一~週五
-    - cron: '0 14 * * 1-5'
+    # === 台股 ===
+    - cron: '30 1 * * 1-5'    # 09:30 (開盤+30min) = 01:30 UTC
+    - cron: '0 3 * * 1-5'     # 11:00 (中盤更新)   = 03:00 UTC
+    - cron: '0 7 * * 1-5'     # 15:00 (盤後+1.5h)  = 07:00 UTC
+    # === 美股 ===
+    - cron: '0 14 * * 1-5'    # 10:00 EDT (開盤+30min)  = 14:00 UTC
+    - cron: '30 15 * * 1-5'   # 11:30 EDT (開盤+2h)     = 15:30 UTC
+    - cron: '0 22 * * 1-5'    # 18:00 EDT (收盤+2h)     = 22:00 UTC
+    # === 假日重大消息 (22:00 台北 / 14:00 UTC, 但用 14:30 避免與 us_open 衝突) ===
+    - cron: '30 14 * * *'     # 22:30 台北 every day (TW 開盤日會 silent skip)
   workflow_dispatch:
     inputs:
       market:
-        description: '市場 (tw / us)'
+        description: '市場 (tw_open / tw_mid / tw_close / us_open / us_mid / us_close / holiday_news)'
         required: true
-        default: 'tw'
+        default: 'tw_open'
         type: choice
         options:
-          - tw
-          - us
+          - tw_open
+          - tw_mid
+          - tw_close
+          - us_open
+          - us_mid
+          - us_close
+          - holiday_news
 
 jobs:
   alert:
@@ -42,13 +53,28 @@ jobs:
             echo "Manual trigger: ${{ github.event.inputs.market }}"
           else
             HOUR=$(date -u +%H)
-            if [ "$HOUR" = "01" ]; then
-              echo "market=tw" >> $GITHUB_OUTPUT
-              echo "Cron trigger: TW (UTC hour=$HOUR)"
-            else
-              echo "market=us" >> $GITHUB_OUTPUT
-              echo "Cron trigger: US (UTC hour=$HOUR)"
-            fi
+            MIN=$(date -u +%M)
+            case "${HOUR}_${MIN}" in
+              01_30) echo "market=tw_open"      >> $GITHUB_OUTPUT ;;
+              03_00) echo "market=tw_mid"       >> $GITHUB_OUTPUT ;;
+              07_00) echo "market=tw_close"     >> $GITHUB_OUTPUT ;;
+              14_00) echo "market=us_open"      >> $GITHUB_OUTPUT ;;
+              14_30) echo "market=holiday_news" >> $GITHUB_OUTPUT ;;
+              15_30) echo "market=us_mid"       >> $GITHUB_OUTPUT ;;
+              22_00) echo "market=us_close"     >> $GITHUB_OUTPUT ;;
+              *)
+                case "$HOUR" in
+                  01) echo "market=tw_open"  >> $GITHUB_OUTPUT ;;
+                  03) echo "market=tw_mid"   >> $GITHUB_OUTPUT ;;
+                  07) echo "market=tw_close" >> $GITHUB_OUTPUT ;;
+                  14) echo "market=us_open"  >> $GITHUB_OUTPUT ;;
+                  15) echo "market=us_mid"   >> $GITHUB_OUTPUT ;;
+                  22) echo "market=us_close" >> $GITHUB_OUTPUT ;;
+                  *)  echo "market=tw_open"  >> $GITHUB_OUTPUT ;;
+                esac
+                ;;
+            esac
+            echo "Cron trigger: UTC hour=$HOUR min=$MIN"
           fi
 
       - name: Run market open analysis
