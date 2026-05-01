@@ -2,15 +2,19 @@ name: Market Open Alert
 
 on:
   schedule:
-    # === 台股 ===
+    # === 台股 (UTC, 無 DST) ===
     - cron: '30 1 * * 1-5'    # 09:30 (開盤+30min) = 01:30 UTC
     - cron: '0 3 * * 1-5'     # 11:00 (中盤更新)   = 03:00 UTC
     - cron: '0 7 * * 1-5'     # 15:00 (盤後+1.5h)  = 07:00 UTC
-    # === 美股 ===
-    - cron: '0 14 * * 1-5'    # 10:00 EDT (開盤+30min)  = 14:00 UTC
-    - cron: '30 15 * * 1-5'   # 11:30 EDT (開盤+2h)     = 15:30 UTC
-    - cron: '0 22 * * 1-5'    # 18:00 EDT (收盤+2h)     = 22:00 UTC
-    # === 假日重大消息 (22:00 台北 / 14:00 UTC, 但用 14:30 避免與 us_open 衝突) ===
+    # === 美股 EDT (3 月第 2 週日 ~ 11 月第 1 週日, UTC-4) ===
+    - cron: '0 14 * * 1-5'    # 10:00 EDT = 14:00 UTC
+    - cron: '30 15 * * 1-5'   # 11:30 EDT = 15:30 UTC
+    - cron: '0 22 * * 1-5'    # 18:00 EDT = 22:00 UTC
+    # === 美股 EST (11 月第 1 週日 ~ 3 月第 2 週日, UTC-5) ===
+    - cron: '0 15 * * 1-5'    # 10:00 EST = 15:00 UTC
+    - cron: '30 16 * * 1-5'   # 11:30 EST = 16:30 UTC
+    - cron: '0 23 * * 1-5'    # 18:00 EST = 23:00 UTC
+    # === 假日重大消息 (22:30 台北 / 14:30 UTC) ===
     - cron: '30 14 * * *'     # 22:30 台北 every day (TW 開盤日會 silent skip)
     # === 盤中監控 (自選股 / 大盤點數 / 加密貨幣) - 每 15/45 分 (避開其他 cron) ===
     - cron: '15,45 * * * *'   # 每點 15 分 / 45 分 (24x7)
@@ -57,30 +61,79 @@ jobs:
           else
             HOUR=$(date -u +%H)
             MIN=$(date -u +%M)
+            YYYYMMDD=$(date -u +%Y%m%d)
+            YEAR=$(date -u +%Y)
+
+            # === 美國 DST 判斷: 3 月第 2 週日 ~ 11 月第 1 週日 ===
+            case "$YEAR" in
+              2026) DST_START=20260308; DST_END=20261101 ;;
+              2027) DST_START=20270314; DST_END=20271107 ;;
+              2028) DST_START=20280312; DST_END=20281105 ;;
+              2029) DST_START=20290311; DST_END=20291104 ;;
+              2030) DST_START=20300310; DST_END=20301103 ;;
+              2031) DST_START=20310309; DST_END=20311102 ;;
+              2032) DST_START=20320314; DST_END=20321107 ;;
+              # fallback: 用粗略日期 (3/8 ~ 11/1) — 邊界誤差最多 1 週
+              *)    DST_START="${YEAR}0308"; DST_END="${YEAR}1101" ;;
+            esac
+
+            if [ "$YYYYMMDD" -ge "$DST_START" ] && [ "$YYYYMMDD" -lt "$DST_END" ]; then
+              US_DST=1   # EDT (UTC-4)
+              echo "US is in EDT (DST)"
+            else
+              US_DST=0   # EST (UTC-5)
+              echo "US is in EST (no DST)"
+            fi
+
             case "${HOUR}_${MIN}" in
+              # === 台股 (固定 UTC) ===
               01_30) echo "market=tw_open"      >> $GITHUB_OUTPUT ;;
               03_00) echo "market=tw_mid"       >> $GITHUB_OUTPUT ;;
               07_00) echo "market=tw_close"     >> $GITHUB_OUTPUT ;;
-              14_00) echo "market=us_open"      >> $GITHUB_OUTPUT ;;
+              # === 假日新聞 (固定) ===
               14_30) echo "market=holiday_news" >> $GITHUB_OUTPUT ;;
-              15_30) echo "market=us_mid"       >> $GITHUB_OUTPUT ;;
-              22_00) echo "market=us_close"     >> $GITHUB_OUTPUT ;;
-              # 15 / 45 分一律 monitor (避開其他 cron 衝突)
-              *_15|*_45) echo "market=monitor"    >> $GITHUB_OUTPUT ;;
+              # === 美股 EDT (US_DST=1 才生效, EST 期間 silent → monitor) ===
+              14_00) [ "$US_DST" = "1" ] && echo "market=us_open"  >> $GITHUB_OUTPUT || echo "market=monitor" >> $GITHUB_OUTPUT ;;
+              15_30) [ "$US_DST" = "1" ] && echo "market=us_mid"   >> $GITHUB_OUTPUT || echo "market=monitor" >> $GITHUB_OUTPUT ;;
+              22_00) [ "$US_DST" = "1" ] && echo "market=us_close" >> $GITHUB_OUTPUT || echo "market=monitor" >> $GITHUB_OUTPUT ;;
+              # === 美股 EST (US_DST=0 才生效, EDT 期間 silent → monitor) ===
+              15_00) [ "$US_DST" = "0" ] && echo "market=us_open"  >> $GITHUB_OUTPUT || echo "market=monitor" >> $GITHUB_OUTPUT ;;
+              16_30) [ "$US_DST" = "0" ] && echo "market=us_mid"   >> $GITHUB_OUTPUT || echo "market=monitor" >> $GITHUB_OUTPUT ;;
+              23_00) [ "$US_DST" = "0" ] && echo "market=us_close" >> $GITHUB_OUTPUT || echo "market=monitor" >> $GITHUB_OUTPUT ;;
+              # === 監控 cron (15/45 分) ===
+              *_15|*_45) echo "market=monitor" >> $GITHUB_OUTPUT ;;
               *)
                 # 其他時段 (cron 延遲) fallback by hour
                 case "$HOUR" in
                   01) [ "$MIN" -lt 45 ] && echo "market=tw_open"  >> $GITHUB_OUTPUT || echo "market=monitor" >> $GITHUB_OUTPUT ;;
                   03) [ "$MIN" -lt 15 ] && echo "market=tw_mid"   >> $GITHUB_OUTPUT || echo "market=monitor" >> $GITHUB_OUTPUT ;;
                   07) [ "$MIN" -lt 15 ] && echo "market=tw_close" >> $GITHUB_OUTPUT || echo "market=monitor" >> $GITHUB_OUTPUT ;;
-                  14) [ "$MIN" -lt 15 ] && echo "market=us_open"  >> $GITHUB_OUTPUT || ([ "$MIN" -lt 45 ] && echo "market=holiday_news" >> $GITHUB_OUTPUT || echo "market=monitor" >> $GITHUB_OUTPUT) ;;
-                  15) [ "$MIN" -ge 30 ] && echo "market=us_mid"   >> $GITHUB_OUTPUT || echo "market=monitor" >> $GITHUB_OUTPUT ;;
-                  22) [ "$MIN" -lt 15 ] && echo "market=us_close" >> $GITHUB_OUTPUT || echo "market=monitor" >> $GITHUB_OUTPUT ;;
+                  14)
+                    if [ "$MIN" -lt 15 ] && [ "$US_DST" = "1" ]; then
+                      echo "market=us_open" >> $GITHUB_OUTPUT
+                    elif [ "$MIN" -ge 15 ] && [ "$MIN" -lt 45 ]; then
+                      echo "market=holiday_news" >> $GITHUB_OUTPUT
+                    else
+                      echo "market=monitor" >> $GITHUB_OUTPUT
+                    fi
+                    ;;
+                  15)
+                    if [ "$MIN" -lt 10 ] && [ "$US_DST" = "0" ]; then
+                      echo "market=us_open" >> $GITHUB_OUTPUT
+                    elif [ "$MIN" -ge 30 ] && [ "$MIN" -lt 45 ] && [ "$US_DST" = "1" ]; then
+                      echo "market=us_mid" >> $GITHUB_OUTPUT
+                    else
+                      echo "market=monitor" >> $GITHUB_OUTPUT
+                    fi
+                    ;;
+                  16) [ "$MIN" -ge 30 ] && [ "$US_DST" = "0" ] && echo "market=us_mid"   >> $GITHUB_OUTPUT || echo "market=monitor" >> $GITHUB_OUTPUT ;;
+                  22) [ "$MIN" -lt 15 ] && [ "$US_DST" = "1" ] && echo "market=us_close" >> $GITHUB_OUTPUT || echo "market=monitor" >> $GITHUB_OUTPUT ;;
+                  23) [ "$MIN" -lt 15 ] && [ "$US_DST" = "0" ] && echo "market=us_close" >> $GITHUB_OUTPUT || echo "market=monitor" >> $GITHUB_OUTPUT ;;
                   *)  echo "market=monitor" >> $GITHUB_OUTPUT ;;
                 esac
                 ;;
             esac
-            echo "Cron trigger: UTC hour=$HOUR min=$MIN"
+            echo "Cron trigger: UTC hour=$HOUR min=$MIN US_DST=$US_DST"
           fi
 
       - name: Run market open analysis
