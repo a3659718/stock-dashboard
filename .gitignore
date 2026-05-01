@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+.streamlit/secrets.toml
+.env
+.venv/
+venv/
+.DS_Store
+*.log
+.idea/
+.vscode/
+
+# Runtime state files (不要 commit)
+.alert_state.json
+predictions_history.csv
+tracking_history.csv
+watchlist.json
+monitor_state.json
