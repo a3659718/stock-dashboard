@@ -28,6 +28,7 @@ import data_sources as ds
 import earnings_calendar
 import laggard_finder
 import market_predictor
+import potential_picker
 import sector_pulse
 import stock_catalyst
 
@@ -495,6 +496,18 @@ def get_us_open_picks(top_sectors_n: int = 3, picks_per_sector: int = 3,
     laggards = laggard_finder.find_us_laggards()
     laggards_ai = laggard_finder.analyze_laggards_with_gemini(laggards, market="US") if laggards else {}
 
+    # 5 支台股潛力股 (基於目前美股強勢板塊)
+    macro_str = ""
+    if sectors is not None and not sectors.empty:
+        top3 = sectors.head(3)
+        macro_str = "美股強勢板塊: " + ", ".join(
+            f"{r['symbol']} {r['sector']} {r.get('1d_%', 0):+.2f}%"
+            for _, r in top3.iterrows()
+        )
+    potential_picks = potential_picker.find_picks_from_us_sectors(
+        sectors, macro_context=macro_str, top_n=5
+    )
+
     return {
         "sectors": sectors_sorted,
         "sector_picks": sector_picks,
@@ -505,6 +518,7 @@ def get_us_open_picks(top_sectors_n: int = 3, picks_per_sector: int = 3,
         "events": events,
         "laggards": laggards,
         "laggards_ai": laggards_ai,
+        "potential_picks": potential_picks,
     }
 
 
@@ -855,6 +869,16 @@ def get_holiday_news_summary() -> Dict:
         asia, oil, macro, news, trump,
     )
 
+    # 5 支台股潛力股 (假日復盤後可關注)
+    macro_str = (
+        f"假日復盤前 macro: 美股 SPY {spy_pct:+.2f}%, QQQ {qqq_pct:+.2f}%, "
+        f"日經 {asia.get('snapshot',[{}])[0].get('daily_pct', 0) if asia.get('snapshot') else 0:+.2f}%, "
+        f"F&G: {fg.get('rating','')}"
+    )
+    potential_picks = potential_picker.find_picks_for_holiday(
+        macro_context=macro_str, top_n=5
+    )
+
     return {
         "spy_pct": round(spy_pct, 2),
         "qqq_pct": round(qqq_pct, 2),
@@ -866,6 +890,7 @@ def get_holiday_news_summary() -> Dict:
         "news": news[:12],
         "trump": trump,
         "ai_text": ai_text,
+        "potential_picks": potential_picks,
     }
 
 
@@ -897,6 +922,16 @@ def get_us_close_analysis() -> Dict:
     beneficiaries = find_tw_beneficiaries_from_us(sectors, min_pct=0.5)
     beneficiary_reasons = _gemini_recommend_tw_after_us(beneficiaries) if beneficiaries else {}
 
+    # 5 支台股潛力股 + 目標價
+    macro_str = (
+        f"美股 SPY {spy_pct:+.2f}% / QQQ {qqq_pct:+.2f}%, "
+        f"F&G: {fg.get('rating','')}"
+        if fg else f"美股 SPY {spy_pct:+.2f}% / QQQ {qqq_pct:+.2f}%"
+    )
+    potential_picks = potential_picker.find_picks_from_us_sectors(
+        sectors, macro_context=macro_str, top_n=5
+    )
+
     return {
         "sectors": sectors,
         "spy_pct": round(spy_pct, 2),
@@ -906,4 +941,5 @@ def get_us_close_analysis() -> Dict:
         "ai_text": ai_text,
         "beneficiaries": beneficiaries,
         "beneficiary_reasons": beneficiary_reasons,
+        "potential_picks": potential_picks,
     }

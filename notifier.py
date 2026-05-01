@@ -152,7 +152,7 @@ def _fmt_prediction_block(prediction: dict, accuracy: dict) -> list:
     """預測 + 準確率區塊."""
     if not prediction or prediction.get("error"):
         return []
-    out = ["", f"<b>📊 大盤盤型預測: {prediction.get('pattern','—')} ({prediction.get('confidence','')}信心)</b>"]
+    out = ["", f"<b>大盤盤型預測: {prediction.get('pattern','—')} ({prediction.get('confidence','')}信心)</b>"]
     out.append(f"   偏向: {prediction.get('bias','—')}")
     raw_parts = []
     if prediction.get("gap_pct") is not None:
@@ -166,7 +166,7 @@ def _fmt_prediction_block(prediction: dict, accuracy: dict) -> list:
     if prediction.get("explanation"):
         out.append(f"   <i>{prediction['explanation']}</i>")
     if accuracy and accuracy.get("n"):
-        out.append(f"   📈 過去 30 天準確率: <b>{accuracy['accuracy_pct']}%</b> ({accuracy['correct']}/{accuracy['n']} 次)")
+        out.append(f"   過去 30 天準確率: <b>{accuracy['accuracy_pct']}%</b> ({accuracy['correct']}/{accuracy['n']} 次)")
     return out
 
 
@@ -239,7 +239,7 @@ def _fmt_asia_markets_block(asia: dict) -> list:
 
     if snapshot:
         out.append("")
-        out.append("<b>🌏 亞洲鄰近市場</b>")
+        out.append("<b>亞洲鄰近市場</b>")
         for s in snapshot:
             country = s.get("country", "")
             name = s.get("market", "")
@@ -250,7 +250,7 @@ def _fmt_asia_markets_block(asia: dict) -> list:
 
     if events:
         out.append("")
-        out.append("<b>⚠️ 亞洲市場事件</b>")
+        out.append("<b>亞洲市場事件</b>")
         # 依 severity 排序
         sev_order = {"high": 0, "medium": 1, "low": 2}
         events_sorted = sorted(events, key=lambda e: sev_order.get(e.get("severity", "low"), 9))
@@ -274,7 +274,7 @@ def _fmt_external_signals_block() -> list:
     oil = news_sources.fetch_oil_signal()
     if oil:
         out.append("")
-        out.append(f"<b>🛢️ 油價: ${oil['price']} ({oil['pct_5d']:+.1f}% 5d)</b>")
+        out.append(f"<b>WTI 油價: ${oil['price']} ({oil['pct_5d']:+.1f}% 5d)</b>")
         out.append(f"   {oil['signal']}")
     macro = news_sources.fetch_macro_indicators()
     if macro:
@@ -293,7 +293,7 @@ def _fmt_external_signals_block() -> list:
     trumps = news_sources.fetch_trump_truth_social(max_items=2)
     if trumps:
         out.append("")
-        out.append("<b>🦅 Trump 最新言論</b>")
+        out.append("<b>Trump 最新言論</b>")
         for t in trumps[:1]:
             text = t.get("text", "")
             if len(text) > 220:
@@ -306,7 +306,7 @@ def fmt_tw_open_picks(data: dict, ai_text: str = "") -> str:
     """台股開盤後 30 分推播."""
     if data.get("error"):
         return f"🇹🇼 台股開盤分析：{data['error']}"
-    lines = [f"<b>🇹🇼 台股開盤後 30 分鐘 · 資金流向</b>"]
+    lines = [f"<b>台股開盤後 30 分鐘 · 資金流向</b>"]
     # 大盤預測
     lines.extend(_fmt_prediction_block(data.get("prediction"), data.get("accuracy")))
     # 美股隔夜行情 (給 reference)
@@ -347,7 +347,7 @@ def fmt_tw_open_picks(data: dict, ai_text: str = "") -> str:
             avg = row.get("平均%")
             up = int(row.get("上漲家數", 0))
             n = int(row.get("樣本數", 0))
-            lines.append(f"🔥 <b>{name}</b>  平均 {avg}% · 上漲 {up}/{n}")
+            lines.append(f"<b>{name}</b>  平均 {avg}% · 上漲 {up}/{n}")
 
     picks = data.get("picks", [])
     catalysts = data.get("catalysts", {})
@@ -355,7 +355,7 @@ def fmt_tw_open_picks(data: dict, ai_text: str = "") -> str:
     chips = data.get("chips", {})
     if picks:
         lines.append("")
-        lines.append("<b>📌 各族群動能潛在股 (3 檔)</b>")
+        lines.append("<b>各族群動能潛在股 (3 檔)</b>")
         for p in picks:
             theme = p["theme"]
             stocks = p["stocks"]
@@ -373,17 +373,17 @@ def fmt_tw_open_picks(data: dict, ai_text: str = "") -> str:
                 )
                 cat = catalysts.get(str(sid))
                 if cat:
-                    lines.append(f"    💡 {cat}")
+                    lines.append(f"    催化劑: {cat}")
                 ev = events.get(str(sid))
                 if ev and ev.get("summary") and ev["summary"] != "—":
-                    lines.append(f"    📅 {ev['summary']}")
+                    lines.append(f"    財報: {ev['summary']}")
                 ch = chips.get(str(sid))
                 if ch:
                     direction = ch.get("direction", "")
                     prob = ch.get("change_prob", 0)
                     rec = ch.get("recommendation", "")
                     reason = ch.get("reason", "")
-                    line = f"    🎯 主力{direction} · 換手{prob}% · 建議: <b>{rec}</b>"
+                    line = f"    主力{direction} · 換手{prob}% · 建議: <b>{rec}</b>"
                     lines.append(line)
                     if reason:
                         lines.append(f"       {reason}")
@@ -397,7 +397,7 @@ def fmt_tw_open_picks(data: dict, ai_text: str = "") -> str:
 
     if ai_text:
         lines.append("")
-        lines.append("<b>🤖 AI 觀點</b>")
+        lines.append("<b>AI 觀點</b>")
         # 簡化 markdown
         for line in ai_text.split("\n"):
             s = line.strip()
@@ -428,7 +428,7 @@ def fmt_holiday_news(data: dict) -> str:
     ai_text = data.get("ai_text", "")
 
     lines = [
-        "<b>📅 台股休市日 · 全球重大消息整理</b>",
+        "<b>台股休市日 · 全球重大消息整理</b>",
         "",
         f"美股: SPY {spy_pct:+.2f}%   QQQ {qqq_pct:+.2f}%   DIA {dia_pct:+.2f}%",
     ]
@@ -474,6 +474,9 @@ def fmt_holiday_news(data: dict) -> str:
             text = t.get("text", "")[:200]
             lines.append(f"  • {text}")
 
+    # 5 支台股潛力股 + 目標價
+    lines.extend(_fmt_potential_picks_block(data.get("potential_picks") or []))
+
     # AI 推理
     if ai_text:
         lines.append("")
@@ -483,6 +486,36 @@ def fmt_holiday_news(data: dict) -> str:
     out = "\n".join(lines)
     if len(out) > 3900:
         out = out[:3900] + "\n…(節錄)"
+    return out
+
+
+def _fmt_potential_picks_block(picks: list) -> list:
+    """5 支台股潛力股 + 目標價 (簡潔風格少 emoji)."""
+    if not picks:
+        return []
+    out = ["", "------ 台股潛力股 Top 5 (含目標價) ------"]
+    for i, p in enumerate(picks, 1):
+        sid = p.get("stock_id", "")
+        nm = p.get("name", "")
+        theme = p.get("theme", "")
+        cur = p.get("current", 0)
+        e_low = p.get("entry_low", 0)
+        e_high = p.get("entry_high", 0)
+        target = p.get("target_price", 0)
+        target_pct = p.get("target_pct", 0)
+        stop = p.get("stop_loss", 0)
+        stop_pct = p.get("stop_pct", 0)
+        win_prob = p.get("win_prob", "")
+        hold = p.get("hold_period", "")
+        reason = p.get("reason", "")
+
+        out.append("")
+        out.append(f"<b>{i}. {sid} {nm}</b>  [{theme}]")
+        out.append(f"   現價 {cur} / 進場區間 {e_low}~{e_high}")
+        out.append(f"   目標 {target} ({target_pct:+}%) / 停損 {stop} ({stop_pct:+}%)")
+        out.append(f"   上漲機率 {win_prob} · 建議持有 {hold}")
+        if reason:
+            out.append(f"   {reason}")
     return out
 
 
@@ -499,7 +532,7 @@ def fmt_us_close_analysis(data: dict) -> str:
     ai_text = data.get("ai_text", "")
 
     lines = [
-        "<b>🇺🇸 美股盤後 (+2h) · 全日綜合 + 對台股次日開盤推理</b>",
+        "<b>美股盤後 (+2h) · 全日綜合 + 對台股次日開盤推理</b>",
         "",
         f"SPY: {spy_pct:+.2f}%   QQQ: {qqq_pct:+.2f}%   DIA: {dia_pct:+.2f}%",
     ]
@@ -515,6 +548,9 @@ def fmt_us_close_analysis(data: dict) -> str:
             r1 = r.get("1d_%", 0)
             sign = "+" if r1 >= 0 else ""
             lines.append(f"  {sym} {name}: {sign}{r1}%")
+
+    # 5 支台股潛力股 + 目標價
+    lines.extend(_fmt_potential_picks_block(data.get("potential_picks") or []))
 
     # 受惠美股的台股推薦
     beneficiaries = data.get("beneficiaries") or {}
@@ -568,7 +604,7 @@ def fmt_tw_close_analysis(data: dict) -> str:
     ai_text = data.get("ai_text", "")
 
     lines = [
-        f"<b>🇹🇼 台股盤後 (15:00) · 全日綜合分析</b>",
+        f"<b>台股盤後 (15:00) · 全日綜合分析</b>",
         "",
         f"加權指數: {twii_close:,.0f} ({twii_pct:+.2f}%)",
         f"日經 225:   {jp_pct:+.2f}%",
@@ -615,7 +651,7 @@ def fmt_us_open_picks(data: dict, ai_text: str = "") -> str:
     """美股開盤後 30 分推播."""
     if data.get("error"):
         return f"🇺🇸 美股開盤分析：{data['error']}"
-    lines = [f"<b>🇺🇸 美股開盤後 30 分鐘 · 資金流向</b>"]
+    lines = [f"<b>美股開盤後 30 分鐘 · 資金流向</b>"]
     # 大盤預測
     lines.extend(_fmt_prediction_block(data.get("prediction"), data.get("accuracy")))
     # 國際訊號
@@ -651,15 +687,15 @@ def fmt_us_open_picks(data: dict, ai_text: str = "") -> str:
                 )
                 cat = catalysts.get(str(sym))
                 if cat:
-                    lines.append(f"    💡 {cat}")
+                    lines.append(f"    催化劑: {cat}")
                 ev = events.get(str(sym))
                 if ev and ev.get("summary") and ev["summary"] != "—":
-                    lines.append(f"    📅 {ev['summary']}")
+                    lines.append(f"    財報: {ev['summary']}")
 
     growth = data.get("growth")
     if growth is not None and not growth.empty:
         lines.append("")
-        lines.append("<b>🚀 成長動能極強 / 近期 IPO Top 5</b>")
+        lines.append("<b>成長動能極強 / 近期 IPO Top 5</b>")
         for _, s in growth.head(5).iterrows():
             sym = s.get("symbol", "")
             today = s.get("今日%")
@@ -671,10 +707,10 @@ def fmt_us_open_picks(data: dict, ai_text: str = "") -> str:
             )
             cat = catalysts.get(str(sym))
             if cat:
-                lines.append(f"    💡 {cat}")
+                lines.append(f"    催化劑: {cat}")
             ev = events.get(str(sym))
             if ev and ev.get("summary") and ev["summary"] != "—":
-                lines.append(f"    📅 {ev['summary']}")
+                lines.append(f"    財報: {ev['summary']}")
 
     # 落後股 / 跟漲機會
     lines.extend(_fmt_laggards_block(
@@ -683,9 +719,12 @@ def fmt_us_open_picks(data: dict, ai_text: str = "") -> str:
         market="US",
     ))
 
+    # 5 支台股潛力股 + 目標價
+    lines.extend(_fmt_potential_picks_block(data.get("potential_picks") or []))
+
     if ai_text:
         lines.append("")
-        lines.append("<b>🤖 AI 觀點</b>")
+        lines.append("<b>AI 觀點</b>")
         for line in ai_text.split("\n"):
             s = line.strip()
             if s.startswith("## "):
