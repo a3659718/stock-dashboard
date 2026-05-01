@@ -262,10 +262,137 @@ watchlist = parse_watchlist(watchlist_raw)
 # ---------------------------------------------------------------------------
 # Tabs
 # ---------------------------------------------------------------------------
-tab_tw, tab_pulse, tab_growth, tab_stock, tab_us, tab_mood, tab_bt, tab_track = st.tabs(
-    ["🇹🇼 台股篩選", "🚀 強勢族群", "🌱 成長動能", "🔍 個股分析",
+tab_wl, tab_tw, tab_pulse, tab_growth, tab_stock, tab_us, tab_mood, tab_bt, tab_track = st.tabs(
+    ["📋 自選股", "🇹🇼 台股篩選", "🚀 強勢族群", "🌱 成長動能", "🔍 個股分析",
      "🇺🇸 美股 Top 5", "🧭 市場情緒", "📊 回測勝率", "📈 推薦追蹤"]
 )
+
+
+# =============================================================================
+# Tab — 自選股管理 (含警報設定)
+# =============================================================================
+with tab_wl:
+    st.subheader("自選股管理")
+    st.caption(
+        "新增最多 15 檔自選股 (台股+美股)。"
+        "盤中監控每 30 分檢查，累計漲跌每超過 5% 就跳 TG 通知 (基準 = 入場價或開始監控時的價格)。"
+    )
+
+    import watchlist_store
+    import watchlist_alerts
+
+    # 載入現有清單
+    current_wl = watchlist_store.load_watchlist()
+
+    cWL1, cWL2 = st.columns(2)
+
+    with cWL1:
+        st.markdown("**新增自選股**")
+        new_sid = st.text_input("代號", placeholder="例 2330 / NVDA / 8082", key="wl_sid")
+        new_name = st.text_input("名稱 (可選)", placeholder="例 台積電 / NVIDIA", key="wl_name")
+        new_market = st.selectbox("市場", options=["TW", "US"], key="wl_market")
+        new_entry = st.number_input("入場價 (可選, 0 = 用當前價當基準)",
+                                       min_value=0.0, value=0.0, step=0.5, key="wl_entry")
+        if st.button("新增", use_container_width=True, type="primary",
+                      key="wl_add", disabled=len(current_wl) >= 15):
+            if new_sid.strip():
+                ep = float(new_entry) if new_entry > 0 else None
+                ok = watchlist_store.add_to_watchlist(
+                    new_sid.strip().upper(), new_name.strip(), new_market, ep
+                )
+                if ok:
+                    st.success(f"已新增 {new_sid}")
+                    st.rerun()
+                else:
+                    st.error("新增失敗 (可能已達 15 檔上限或代號為空)")
+
+    with cWL2:
+        st.markdown("**目前自選股清單 (上限 15 檔)**")
+        st.markdown(f"已加入 **{len(current_wl)} / 15**")
+
+        if not current_wl:
+            st.info("還沒新增，請從左邊加入。")
+        else:
+            for item in current_wl:
+                sid = item.get("stock_id", "")
+                nm = item.get("name", "")
+                mk = item.get("market", "TW")
+                ep = item.get("entry_price")
+                added = item.get("added_date", "")
+                cR1, cR2, cR3 = st.columns([5, 2, 2])
+                with cR1:
+                    info_str = f"**{sid}** {nm} ({mk})"
+                    if ep:
+                        info_str += f"  入場 {ep}"
+                    if added:
+                        info_str += f"  · {added}"
+                    st.markdown(info_str)
+                with cR2:
+                    if st.button("重設基準", key=f"reset_{sid}", help="重設警報基準價"):
+                        watchlist_alerts.reset_watchlist_baseline(sid)
+                        st.toast(f"已重設 {sid} 基準價", icon="✅")
+                with cR3:
+                    if st.button("刪除", key=f"del_{sid}"):
+                        watchlist_store.remove_from_watchlist(sid)
+                        st.rerun()
+
+    st.divider()
+    st.markdown("**警報設定**")
+    st.markdown("""
+- 自選股: 每 5% 累計漲跌跳通知 (5%、10%、15%...)
+- 大盤監控:
+  - 日經 225 每 ±150 點
+  - 韓國 KOSPI 每 ±50 點
+  - 台灣加權 每 ±100 點
+- 加密貨幣: BTC / ETH 每 ±2.5% (24h)
+- 連續同方向觸發 → 加上 [連續警示]，提醒台股可能要減碼
+
+cron 每 30 分執行一次 (24x7)。
+""")
+
+    if st.button("🔍 立即手動檢查警報", use_container_width=True, key="manual_check_alerts"):
+        with st.spinner("檢查中..."):
+            try:
+                import index_alerts
+                wl_alerts = watchlist_alerts.check_watchlist_alerts()
+                idx_alerts = index_alerts.check_index_alerts()
+                cry_alerts = index_alerts.check_crypto_alerts()
+                st.session_state["last_manual_alerts"] = {
+                    "wl": wl_alerts, "idx": idx_alerts, "cry": cry_alerts,
+                }
+            except Exception as e:
+                st.error(f"檢查失敗: {e}")
+
+    last_alerts = st.session_state.get("last_manual_alerts")
+    if last_alerts:
+        wl = last_alerts.get("wl", [])
+        idx = last_alerts.get("idx", [])
+        cry = last_alerts.get("cry", [])
+        if wl or idx or cry:
+            st.markdown("**手動檢查結果**")
+            if wl:
+                st.markdown("自選股觸發:")
+                for a in wl:
+                    st.text(f"  {a['stock_id']} {a['name']}: {a['current']} ({a['current_pct']:+.2f}%) 觸發 {int(a['threshold_bucket'])}%")
+            if idx:
+                st.markdown("大盤觸發:")
+                for a in idx:
+                    st.text(f"  {a['name']}: {a['current']} ({a['diff']:+.0f} 點) 觸發 {int(a['threshold_bucket'])}")
+            if cry:
+                st.markdown("加密貨幣觸發:")
+                for a in cry:
+                    st.text(f"  {a['name']}: ${a['current']} ({a['change_pct']:+.2f}%) 觸發 {int(a['threshold_bucket'])}%")
+            if st.button("✈️ Send 警報 to TG", use_container_width=True, key="send_alerts_tg",
+                          disabled=not notifier.is_configured()):
+                msg = notifier.fmt_monitor_alerts(wl, idx, cry)
+                if msg:
+                    ok, info = notifier.send_message(msg)
+                    if ok:
+                        st.success("已送出 ✅")
+                    else:
+                        st.error(info)
+        else:
+            st.info("目前無新觸發警報")
 
 
 # =============================================================================

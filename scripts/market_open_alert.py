@@ -171,7 +171,12 @@ def main() -> int:
     try:
         import holiday_check
 
-        if market == "holiday_news":
+        if market == "monitor":
+            # monitor 不檢查假日 (24x7 都跑, 自然會無新警報)
+            print(f"=== Holiday Check ===")
+            print(f"monitor mode: 24x7 執行，不檢查假日")
+            print(f"=====================\n")
+        elif market == "holiday_news":
             # 反向邏輯: TW 開盤日才跳過 (其他正常推播會處理), 休市日才跑
             if not holiday_check.is_market_closed_today("TW"):
                 print(f"=== Holiday Check ===")
@@ -301,6 +306,23 @@ def main() -> int:
             print(f"Gemini reasoning: {len(data['ai_text'])} chars")
         print(f"Got {len(data.get('news', []))} news items")
         msg = notifier.fmt_holiday_news(data)
+    elif market == "monitor":
+        # 盤中監控: 自選股 5% / 大盤 ±150/50 / 加密 ±2.5%
+        print("Running monitor mode (intraday alerts)...")
+        try:
+            import watchlist_alerts
+            import index_alerts
+            wl = watchlist_alerts.check_watchlist_alerts()
+            idx = index_alerts.check_index_alerts()
+            cry = index_alerts.check_crypto_alerts()
+            print(f"Alerts: watchlist={len(wl)} index={len(idx)} crypto={len(cry)}")
+            msg = notifier.fmt_monitor_alerts(wl, idx, cry)
+            if not msg:
+                print("無新觸發警報，跳過推播")
+                return 0
+        except Exception as e:
+            print(f"Monitor mode failed: {e}")
+            return 1
     else:
         print(f"Unknown market: {market}", file=sys.stderr)
         return 1

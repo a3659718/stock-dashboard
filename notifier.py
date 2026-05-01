@@ -412,6 +412,81 @@ def fmt_tw_open_picks(data: dict, ai_text: str = "") -> str:
     return out
 
 
+def fmt_monitor_alerts(watchlist_alerts: list, index_alerts: list, crypto_alerts: list) -> str:
+    """盤中監控警報推播 (簡潔風格少 emoji)."""
+    if not (watchlist_alerts or index_alerts or crypto_alerts):
+        return ""
+
+    lines = ["<b>盤中監控警報</b>", ""]
+
+    if watchlist_alerts:
+        lines.append("------ 自選股價格警報 ------")
+        for a in watchlist_alerts:
+            sid = a.get("stock_id", "")
+            name = a.get("name", "")
+            market = a.get("market", "")
+            cur = a.get("current", 0)
+            base = a.get("base_price", 0)
+            prev_price = a.get("previous_price", base)
+            pct = a.get("current_pct", 0)
+            bucket = a.get("threshold_bucket", 0)
+            prev_bucket = a.get("previous_bucket", 0)
+            diff = a.get("diff_bucket", 0)
+            direction = a.get("direction", "")
+            step = a.get("threshold_step", 5)
+
+            sign_b = "+" if bucket > 0 else ""
+            sign_p = "+" if prev_bucket > 0 else ""
+            sign_d = "+" if diff > 0 else ""
+
+            lines.append(f"\n  <b>{sid} {name}</b> ({market})  {direction}")
+            lines.append(f"     現價 {cur} (基準 {base}, 累計 {pct:+.2f}%)")
+            lines.append(f"     本次門檻 {sign_b}{bucket}%  (上次 {sign_p}{prev_bucket}%)")
+            lines.append(f"     自上次警報變動: {sign_d}{diff}% ({prev_price} → {cur})")
+            lines.append(f"     [{market} 每 {step}% 一次]")
+        lines.append("")
+
+    if index_alerts:
+        lines.append("------ 大盤點數警報 ------")
+        for a in index_alerts:
+            country = a.get("country", "")
+            name = a.get("name", "")
+            diff = a.get("diff", 0)
+            cur = a.get("current", 0)
+            direction = a.get("direction", "")
+            consecutive = a.get("consecutive", 1)
+            warning = a.get("warning", False)
+            sign = "+" if diff > 0 else ""
+            lines.append(
+                f"  [{country}] {name}: {cur} ({sign}{int(diff)} 點 vs 開盤)"
+            )
+            if warning:
+                lines.append(
+                    f"     <b>連續 {consecutive} 次同方向{direction}</b>，注意趨勢延續"
+                )
+                if direction == "跌":
+                    lines.append(f"     建議: 評估台股相關部位是否減碼")
+        lines.append("")
+
+    if crypto_alerts:
+        lines.append("------ 加密貨幣警報 ------")
+        for a in crypto_alerts:
+            name = a.get("name", "")
+            cur = a.get("current", 0)
+            pct = a.get("change_pct", 0)
+            bucket = a.get("threshold_bucket", 0)
+            direction = a.get("direction", "")
+            sign = "+" if pct > 0 else ""
+            lines.append(f"  {name}: ${cur:,.0f} (24h {sign}{pct:.2f}%)")
+            lines.append(f"     觸發 {direction} {abs(int(bucket))}% 門檻")
+        lines.append("")
+
+    out = "\n".join(lines)
+    if len(out) > 3900:
+        out = out[:3900] + "\n…(節錄)"
+    return out
+
+
 def fmt_holiday_news(data: dict) -> str:
     """假日 22:00 重大消息推播."""
     if not data:
