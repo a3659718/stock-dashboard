@@ -504,9 +504,15 @@ def get_us_open_picks(top_sectors_n: int = 3, picks_per_sector: int = 3,
             f"{r['symbol']} {r['sector']} {r.get('1d_%', 0):+.2f}%"
             for _, r in top3.iterrows()
         )
-    potential_picks = potential_picker.find_picks_from_us_sectors(
-        sectors, macro_context=macro_str, top_n=5
-    )
+    # 5 支台股潛力股 (受惠美股強勢板塊)
+    # 此 step 依賴 FinMind, 失敗時 graceful skip 不要炸到整個推播
+    try:
+        potential_picks = potential_picker.find_picks_from_us_sectors(
+            sectors, macro_context=macro_str, top_n=5
+        )
+    except Exception as e:
+        print(f"[market_open_picks] potential_picker failed: {e}", flush=True)
+        potential_picks = []
 
     return {
         "sectors": sectors_sorted,

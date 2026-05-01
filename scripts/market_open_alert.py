@@ -239,6 +239,34 @@ def main() -> int:
     print(f"ai_analyzer.gemini_available(): {ai_analyzer.gemini_available()}")
     print(f"=======================\n")
 
+    # 實測 FinMind Token 有效性 (避免後續 deep error)
+    print(f"=== FinMind API Test ===")
+    try:
+        import requests as _req
+        token = os.environ.get("FINMIND_TOKEN", "").strip()
+        # 檢查 token 是否有 leading/trailing whitespace
+        raw_token = os.environ.get("FINMIND_TOKEN", "")
+        if raw_token != token:
+            print(f"⚠️  Token 有前後空白 (raw len={len(raw_token)}, stripped len={len(token)}) — 已自動去除")
+        if not token:
+            print(f"✗ FINMIND_TOKEN 是空字串")
+        else:
+            r = _req.get(
+                "https://api.finmindtrade.com/api/v4/data",
+                params={"dataset": "TaiwanStockInfo", "token": token},
+                timeout=10,
+            )
+            if r.status_code == 200:
+                print(f"✓ FinMind token OK")
+            elif r.status_code == 400 and "illegal" in r.text.lower():
+                print(f"✗ FinMind token 被拒 (illegal): {r.text[:120]}")
+                print(f"  → 請到 https://finmindtrade.com/ 重新生成, 並更新 GitHub secret")
+            else:
+                print(f"⚠️ FinMind HTTP {r.status_code}: {r.text[:120]}")
+    except Exception as e:
+        print(f"✗ FinMind test failed: {type(e).__name__}: {e}")
+    print(f"========================\n")
+
     if market in ("tw_open", "tw_mid"):
         label = "開盤後 30 分鐘 (09:30)" if market == "tw_open" else "中盤更新 (11:00)"
         print(f"Running TW {label}...")
@@ -272,7 +300,24 @@ def main() -> int:
     elif market in ("us_open", "us_mid"):
         label = "開盤後 30 分鐘 (10:00 EDT)" if market == "us_open" else "開盤後 2 小時 (11:30 EDT)"
         print(f"Running US {label}...")
-        data = market_open_picks.get_us_open_picks()
+        try:
+            data = market_open_picks.get_us_open_picks()
+        except Exception as e:
+            print(f"get_us_open_picks fatal failure: {e}", flush=True)
+            # 發一個簡訊告知失敗, 至少不要 silent
+            err_msg = (
+                f"<b>美股 {label} 推播失敗</b>\n\n"
+                f"原因: <code>{type(e).__name__}: {str(e)[:200]}</code>\n\n"
+                f"建議檢查:\n"
+                f"  • FinMind Token 是否有效 (常見: 過期/重新生成)\n"
+                f"  • Yahoo Finance 是否被 rate-limit\n"
+                f"  • GitHub Actions log 看詳細 stack trace"
+            )
+            try:
+                notifier.send_message(err_msg)
+            except Exception:
+                pass
+            return 1
         if data.get("error"):
             print(f"data error: {data['error']}")
         else:
@@ -281,12 +326,16 @@ def main() -> int:
         ai_text = ""
         if ai_analyzer.gemini_available():
             print("Calling Gemini...")
-            ok, ai_text = ai_analyzer.analyze_open_picks("US", _summarize_us_for_ai(data))
-            if not ok:
-                print(f"AI failed: {ai_text}")
+            try:
+                ok, ai_text = ai_analyzer.analyze_open_picks("US", _summarize_us_for_ai(data))
+                if not ok:
+                    print(f"AI failed: {ai_text}")
+                    ai_text = ""
+                else:
+                    print(f"Gemini returned {len(ai_text)} chars")
+            except Exception as e:
+                print(f"Gemini exception: {e}")
                 ai_text = ""
-            else:
-                print(f"Gemini returned {len(ai_text)} chars")
         else:
             print("Gemini not available - skipping AI section")
         msg = notifier.fmt_us_open_picks(data, ai_text=ai_text)

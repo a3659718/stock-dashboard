@@ -152,10 +152,19 @@ def _gemini_pick_with_targets(candidates: List[Dict], macro_context: str = "",
 # 候選池構建 (依 context 決定要看哪些題材)
 # ---------------------------------------------------------------------------
 def _build_candidates(themes: List[str], max_candidates: int = 40) -> List[Dict]:
-    """根據題材 list 收集候選股 + 補上價位資訊."""
-    info = ds.get_taiwan_stock_info()
+    """根據題材 list 收集候選股 + 補上價位資訊.
+    FinMind 失敗時 graceful return []，不要炸掉整個 process.
+    """
+    try:
+        info = ds.get_taiwan_stock_info()
+    except Exception as e:
+        print(f"[potential_picker] FinMind get_taiwan_stock_info failed: {e}", flush=True)
+        return []
+    if info is None or info.empty:
+        print("[potential_picker] taiwan_stock_info is empty", flush=True)
+        return []
     name_map = info.set_index("stock_id")["stock_name"].to_dict() if "stock_name" in info.columns else {}
-    market_map = info.set_index("stock_id")["type"].to_dict()
+    market_map = info.set_index("stock_id")["type"].to_dict() if "type" in info.columns else {}
 
     seen: set = set()
     pool: List[Dict] = []
@@ -194,35 +203,46 @@ def find_picks_from_us_sectors(us_sectors_df: pd.DataFrame,
                                   macro_context: str = "",
                                   top_n: int = 5,
                                   min_us_pct: float = 0.4) -> List[Dict]:
-    """根據強勢的美股板塊，找對應 TW 題材的潛力股."""
+    """根據強勢的美股板塊，找對應 TW 題材的潛力股.
+    任何 step 失敗 → return [] 而非 raise，避免炸掉上層推播流程.
+    """
     try:
-        import market_open_picks as mop
-    except ImportError:
-        return []
+        try:
+            import market_open_picks as mop
+        except ImportError:
+            return []
 
-    if us_sectors_df is None or us_sectors_df.empty:
-        themes = list(sector_pulse.TW_THEMES.keys())[:8]  # fallback
-    else:
-        strong = us_sectors_df[us_sectors_df["1d_%"] > min_us_pct]
-        themes = set()
-        for _, r in strong.iterrows():
-            sym = r.get("symbol", "")
-            themes.update(mop.US_SECTOR_TO_TW_THEMES.get(sym, []))
-        if not themes:
-            themes = list(sector_pulse.TW_THEMES.keys())[:8]
-        themes = list(themes)
+        if us_sectors_df is None or us_sectors_df.empty:
+            themes = list(sector_pulse.TW_THEMES.keys())[:8]  # fallback
+        else:
+            strong = us_sectors_df[us_sectors_df["1d_%"] > min_us_pct]
+            themes = set()
+            for _, r in strong.iterrows():
+                sym = r.get("symbol", "")
+                themes.update(mop.US_SECTOR_TO_TW_THEMES.get(sym, []))
+            if not themes:
+                themes = list(sector_pulse.TW_THEMES.keys())[:8]
+            themes = list(themes)
 
-    candidates = _build_candidates(themes, max_candidates=40)
-    if not candidates:
+        candidates = _build_candidates(themes, max_candidates=40)
+        if not candidates:
+            return []
+        return _gemini_pick_with_targets(candidates, macro_context, top_n)
+    except Exception as e:
+        print(f"[potential_picker] find_picks_from_us_sectors failed: {e}", flush=True)
         return []
-    return _gemini_pick_with_targets(candidates, macro_context, top_n)
 
 
 def find_picks_for_holiday(macro_context: str = "", top_n: int = 5) -> List[Dict]:
-    """假日推播用 — 從所有熱門題材池選潛力股."""
-    # 取主要題材 (top 12)
-    themes = list(sector_pulse.TW_THEMES.keys())[:12]
-    candidates = _build_candidates(themes, max_candidates=50)
-    if not candidates:
+    """假日推播用 — 從所有熱門題材池選潛力股.
+    任何 step 失敗 → return [].
+    """
+    try:
+        themes = list(sector_pulse.TW_THEMES.keys())[:12]
+        candidates = _build_candidates(themes, max_candidates=50)
+        if not candidates:
+            return []
+        return _gemini_pick_with_targets(candidates, macro_context, top_n)
+    except Exception as e:
+        print(f"[potential_picker] find_picks_for_holiday failed: {e}", flush=True)
         return []
-    return _gemini_pick_with_targets(candidates, macro_context, top_n)
