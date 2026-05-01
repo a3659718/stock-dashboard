@@ -10,12 +10,14 @@ on:
     - cron: '0 14 * * 1-5'    # 10:00 EDT (開盤+30min)  = 14:00 UTC
     - cron: '30 15 * * 1-5'   # 11:30 EDT (開盤+2h)     = 15:30 UTC
     - cron: '0 22 * * 1-5'    # 18:00 EDT (收盤+2h)     = 22:00 UTC
-    # === 假日重大消息 (22:00 台北 / 14:00 UTC, 但用 14:30 避免與 us_open 衝突) ===
-    - cron: '30 14 * * *'     # 22:30 台北 every day (TW 開盤日會 silent skip)
+    # === 假日重大消息 (22:30 台北 every day) ===
+    - cron: '30 14 * * *'
+    # === 盤中監控 (自選股 / 大盤點數 / 加密貨幣) - 每 30 分 ===
+    - cron: '*/30 * * * *'
   workflow_dispatch:
     inputs:
       market:
-        description: '市場 (tw_open / tw_mid / tw_close / us_open / us_mid / us_close / holiday_news)'
+        description: '市場 (tw_open / tw_mid / tw_close / us_open / us_mid / us_close / holiday_news / monitor)'
         required: true
         default: 'tw_open'
         type: choice
@@ -27,6 +29,7 @@ on:
           - us_mid
           - us_close
           - holiday_news
+          - monitor
 
 jobs:
   alert:
@@ -62,17 +65,7 @@ jobs:
               14_30) echo "market=holiday_news" >> $GITHUB_OUTPUT ;;
               15_30) echo "market=us_mid"       >> $GITHUB_OUTPUT ;;
               22_00) echo "market=us_close"     >> $GITHUB_OUTPUT ;;
-              *)
-                case "$HOUR" in
-                  01) echo "market=tw_open"  >> $GITHUB_OUTPUT ;;
-                  03) echo "market=tw_mid"   >> $GITHUB_OUTPUT ;;
-                  07) echo "market=tw_close" >> $GITHUB_OUTPUT ;;
-                  14) echo "market=us_open"  >> $GITHUB_OUTPUT ;;
-                  15) echo "market=us_mid"   >> $GITHUB_OUTPUT ;;
-                  22) echo "market=us_close" >> $GITHUB_OUTPUT ;;
-                  *)  echo "market=tw_open"  >> $GITHUB_OUTPUT ;;
-                esac
-                ;;
+              *)    echo "market=monitor"      >> $GITHUB_OUTPUT ;;
             esac
             echo "Cron trigger: UTC hour=$HOUR min=$MIN"
           fi
