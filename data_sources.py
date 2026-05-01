@@ -308,18 +308,37 @@ def fetch_yf_quote(symbol: str) -> Dict:
 
 
 @st.cache_data(ttl=120, show_spinner=False)
-def fetch_yf_history(symbol: str, period: str = "6mo", interval: str = "1d") -> pd.DataFrame:
+def fetch_yf_history(symbol: str, period: str = "6mo", interval: str = "1d",
+                      max_retries: int = 3) -> pd.DataFrame:
+    """yfinance 抓歷史資料，失敗自動 retry + sleep (避開 Yahoo rate limit)."""
     if yf is None:
         return pd.DataFrame()
-    try:
-        df = yf.download(symbol, period=period, interval=interval, progress=False, auto_adjust=False)
-        if df is None or df.empty:
-            return pd.DataFrame()
-        df = df.reset_index()
-        df.columns = [c if isinstance(c, str) else c[0] for c in df.columns]
-        return df
-    except Exception:
-        return pd.DataFrame()
+    import time
+    last_err = None
+    for attempt in range(max_retries):
+        try:
+            df = yf.download(symbol, period=period, interval=interval,
+                              progress=False, auto_adjust=False)
+            if df is None or df.empty:
+                # 空資料但沒 throw → 直接回 (不算錯誤)
+                return pd.DataFrame()
+            df = df.reset_index()
+            df.columns = [c if isinstance(c, str) else c[0] for c in df.columns]
+            return df
+        except Exception as e:
+            last_err = e
+            err_str = str(e).lower()
+            # 只對 rate limit / 連線錯誤 retry
+            if any(kw in err_str for kw in ["rate", "429", "timeout", "connection",
+                                              "max retries", "ssl"]):
+                if attempt < max_retries - 1:
+                    # 指數 backoff: 2s, 5s, 10s
+                    sleep_s = (attempt + 1) * 2 + (attempt * 3)
+                    time.sleep(sleep_s)
+                    continue
+            # 非 rate limit 錯誤 → 立刻放棄
+            break
+    return pd.DataFrame()
 
 
 # ---------------------------------------------------------------------------
