@@ -331,44 +331,238 @@ with tab_wl:
 
         if not current_wl:
             st.info("還沒新增，請從左邊加入。")
-        else:
+
+    # ===== 今日表現摘要 + 個股卡片 (亞洲慣例: 紅漲 / 綠跌) =====
+    if current_wl:
+        @st.cache_data(ttl=300, show_spinner=False)
+        def _wl_fetch_today_status(stock_id: str, market: str = "TW"):
+            """抓自選股今日 (current + prev_close + today_pct)."""
+            try:
+                if market.upper() == "US":
+                    df = ds.fetch_yf_history(stock_id, period="5d", interval="1d")
+                else:
+                    df = pd.DataFrame()
+                    for suffix in [".TW", ".TWO"]:
+                        df = ds.fetch_yf_history(f"{stock_id}{suffix}", period="5d", interval="1d")
+                        if not df.empty:
+                            break
+                if df is None or df.empty or len(df) < 2:
+                    return None
+                close = df["Close"].astype(float)
+                current = float(close.iloc[-1])
+                prev = float(close.iloc[-2])
+                return {
+                    "current": current,
+                    "prev_close": prev,
+                    "today_pct": (current / prev - 1) * 100 if prev > 0 else 0,
+                }
+            except Exception:
+                return None
+
+        st.divider()
+        # 抓所有自選股即時資料
+        with st.spinner("抓取即時股價..."):
+            statuses = {}
             for item in current_wl:
                 sid = item.get("stock_id", "")
-                nm = item.get("name", "")
                 mk = item.get("market", "TW")
-                ep = item.get("entry_price")
-                added = item.get("added_date", "")
+                s = _wl_fetch_today_status(sid, mk)
+                if s:
+                    statuses[sid] = s
 
-                # 從 monitor state 取目前 base + 上次觸發 bucket
-                sid_state = _wl_state.get(sid, {})
-                base_p = sid_state.get("base_price")
-                base_src = sid_state.get("base_source", "—")
-                last_b = sid_state.get("last_pct", 0)
+        # 統計: 漲/跌/平/平均今日 % / 平均投報率
+        def _pct_pos(p):
+            return p > 0.005
+        def _pct_neg(p):
+            return p < -0.005
 
-                cR1, cR2, cR3 = st.columns([5, 2, 2])
-                with cR1:
-                    head = f"**{sid}** {nm} ({mk})"
-                    if added:
-                        head += f"  · 加入 {added}"
-                    sub_parts = []
-                    if ep:
-                        sub_parts.append(f"入場 {ep}")
-                    if base_p:
-                        src_zh = "入場" if base_src == "entry" else ("自動" if base_src == "auto" else "—")
-                        sub_parts.append(f"基準 {round(float(base_p), 2)} ({src_zh})")
-                    if last_b:
-                        sub_parts.append(f"上次觸發 {last_b:+.1f}%")
-                    if not base_p:
-                        sub_parts.append("(尚未開始監控)")
-                    sub_str = " · ".join(sub_parts) if sub_parts else ""
-                    st.markdown(head + ("\n\n" + f"<span style='color:#888;font-size:0.9em'>{sub_str}</span>" if sub_str else ""), unsafe_allow_html=True)
-                with cR2:
+        up_count = sum(1 for s in statuses.values() if _pct_pos(s["today_pct"]))
+        down_count = sum(1 for s in statuses.values() if _pct_neg(s["today_pct"]))
+        flat_count = len(statuses) - up_count - down_count
+        today_pcts = [s["today_pct"] for s in statuses.values()]
+        avg_today = sum(today_pcts) / len(today_pcts) if today_pcts else 0
+
+        # 投報率 vs base_price (優先 monitor state, 沒就用 entry_price)
+        rois = []
+        for item in current_wl:
+            sid = item.get("stock_id", "")
+            if sid not in statuses:
+                continue
+            sid_state = _wl_state.get(sid, {})
+            base = sid_state.get("base_price")
+            if base in (None, "", 0, 0.0):
+                base = item.get("entry_price")
+            try:
+                base_f = float(base) if base not in (None, "", 0, 0.0) else None
+            except Exception:
+                base_f = None
+            if base_f and base_f > 0:
+                rois.append((statuses[sid]["current"] / base_f - 1) * 100)
+        avg_roi = sum(rois) / len(rois) if rois else None
+
+        # ----- 摘要面板 (4 顆 metric, 紅漲綠跌) -----
+        st.markdown("**自選股今日表現**")
+        cMs1, cMs2, cMs3, cMs4 = st.columns(4)
+        # 上漲 (紅)
+        cMs1.markdown(
+            f"<div style='background:#ffebee; padding:12px; border-radius:8px; "
+            f"text-align:center; border-top:3px solid #d32f2f;'>"
+            f"<div style='color:#888; font-size:0.85em;'>上漲</div>"
+            f"<div style='color:#c62828; font-size:1.8em; font-weight:bold; line-height:1.1;'>{up_count}</div>"
+            f"<div style='color:#aaa; font-size:0.75em;'>檔</div></div>",
+            unsafe_allow_html=True,
+        )
+        # 下跌 (綠)
+        cMs2.markdown(
+            f"<div style='background:#e8f5e9; padding:12px; border-radius:8px; "
+            f"text-align:center; border-top:3px solid #388e3c;'>"
+            f"<div style='color:#888; font-size:0.85em;'>下跌</div>"
+            f"<div style='color:#2e7d32; font-size:1.8em; font-weight:bold; line-height:1.1;'>{down_count}</div>"
+            f"<div style='color:#aaa; font-size:0.75em;'>檔 (持平 {flat_count})</div></div>",
+            unsafe_allow_html=True,
+        )
+        # 平均今日 %
+        avg_color = "#c62828" if avg_today > 0.005 else ("#2e7d32" if avg_today < -0.005 else "#616161")
+        avg_bg = "#ffebee" if avg_today > 0.005 else ("#e8f5e9" if avg_today < -0.005 else "#f5f5f5")
+        avg_border = "#d32f2f" if avg_today > 0.005 else ("#388e3c" if avg_today < -0.005 else "#9e9e9e")
+        avg_sign = "+" if avg_today > 0 else ""
+        cMs3.markdown(
+            f"<div style='background:{avg_bg}; padding:12px; border-radius:8px; "
+            f"text-align:center; border-top:3px solid {avg_border};'>"
+            f"<div style='color:#888; font-size:0.85em;'>平均今日</div>"
+            f"<div style='color:{avg_color}; font-size:1.6em; font-weight:bold; line-height:1.1;'>{avg_sign}{avg_today:.2f}%</div>"
+            f"<div style='color:#aaa; font-size:0.75em;'>vs 昨收</div></div>",
+            unsafe_allow_html=True,
+        )
+        # 平均投報率
+        if avg_roi is not None:
+            roi_color = "#c62828" if avg_roi > 0.005 else ("#2e7d32" if avg_roi < -0.005 else "#616161")
+            roi_bg = "#ffebee" if avg_roi > 0.005 else ("#e8f5e9" if avg_roi < -0.005 else "#f5f5f5")
+            roi_border = "#d32f2f" if avg_roi > 0.005 else ("#388e3c" if avg_roi < -0.005 else "#9e9e9e")
+            roi_sign = "+" if avg_roi > 0 else ""
+            cMs4.markdown(
+                f"<div style='background:{roi_bg}; padding:12px; border-radius:8px; "
+                f"text-align:center; border-top:3px solid {roi_border};'>"
+                f"<div style='color:#888; font-size:0.85em;'>平均投報率</div>"
+                f"<div style='color:{roi_color}; font-size:1.6em; font-weight:bold; line-height:1.1;'>{roi_sign}{avg_roi:.2f}%</div>"
+                f"<div style='color:#aaa; font-size:0.75em;'>vs 基準價</div></div>",
+                unsafe_allow_html=True,
+            )
+        else:
+            cMs4.markdown(
+                f"<div style='background:#f5f5f5; padding:12px; border-radius:8px; "
+                f"text-align:center; border-top:3px solid #9e9e9e;'>"
+                f"<div style='color:#888; font-size:0.85em;'>平均投報率</div>"
+                f"<div style='color:#888; font-size:1.0em; padding-top:6px;'>—</div>"
+                f"<div style='color:#aaa; font-size:0.75em;'>(尚無基準)</div></div>",
+                unsafe_allow_html=True,
+            )
+
+        st.markdown("")  # 空行
+
+        # ----- 個股卡片 (紅漲綠跌) -----
+        st.markdown("**個股表現**")
+        for item in current_wl:
+            sid = item.get("stock_id", "")
+            nm = item.get("name", "")
+            mk = item.get("market", "TW")
+            ep = item.get("entry_price")
+            added = item.get("added_date", "")
+
+            sid_state = _wl_state.get(sid, {})
+            base_p = sid_state.get("base_price")
+            base_src = sid_state.get("base_source", "—")
+            last_b = sid_state.get("last_pct", 0)
+
+            # 取今日資料
+            stat = statuses.get(sid)
+            if stat:
+                today_pct = stat["today_pct"]
+                current_p = stat["current"]
+                prev_close = stat["prev_close"]
+            else:
+                today_pct = 0
+                current_p = None
+                prev_close = None
+
+            # 顏色 (亞洲: 紅漲綠跌)
+            if today_pct > 0.005:
+                bg = "#ffebee"; border = "#d32f2f"; tc = "#c62828"; sign = "+"
+            elif today_pct < -0.005:
+                bg = "#e8f5e9"; border = "#388e3c"; tc = "#2e7d32"; sign = ""
+            else:
+                bg = "#f5f5f5"; border = "#9e9e9e"; tc = "#616161"; sign = ""
+
+            # 投報率 (vs base_price)
+            roi_str = ""
+            base_for_roi = base_p if base_p not in (None, "", 0, 0.0) else ep
+            try:
+                base_for_roi = float(base_for_roi) if base_for_roi not in (None, "", 0, 0.0) else None
+            except Exception:
+                base_for_roi = None
+            if current_p is not None and base_for_roi and base_for_roi > 0:
+                roi_pct = (current_p / base_for_roi - 1) * 100
+                roi_sign = "+" if roi_pct > 0 else ""
+                roi_color = "#c62828" if roi_pct > 0.005 else ("#2e7d32" if roi_pct < -0.005 else "#616161")
+                roi_str = (
+                    f" · 投報率 <b style='color:{roi_color};'>{roi_sign}{roi_pct:.2f}%</b>"
+                    f" <span style='color:#888;font-size:0.85em;'>(基準 {round(base_for_roi,2)})</span>"
+                )
+
+            # sub line (基準/觸發/加入日)
+            sub_parts = []
+            if ep:
+                sub_parts.append(f"入場 {ep}")
+            if base_p:
+                src_zh = "入場" if base_src == "entry" else ("自動" if base_src == "auto" else "—")
+                sub_parts.append(f"基準 {round(float(base_p),2)} ({src_zh})")
+            if last_b:
+                sub_parts.append(f"上次觸發 {last_b:+.1f}%")
+            if not base_p:
+                sub_parts.append("尚未開始監控")
+            if added:
+                sub_parts.append(f"加入 {added}")
+            sub_str = " · ".join(sub_parts) if sub_parts else ""
+
+            # 卡片內容
+            if current_p is not None:
+                head_line = (
+                    f"<b style='font-size:1.05em;'>{sid}</b> {nm} "
+                    f"<span style='color:#888;font-size:0.85em;'>({mk})</span>"
+                )
+                price_line = (
+                    f"現價 <b>{current_p:.2f}</b>"
+                    f" <span style='color:{tc};font-weight:bold;'>{sign}{today_pct:.2f}%</span>"
+                    f" <span style='color:#888;font-size:0.85em;'>(昨收 {prev_close:.2f})</span>"
+                    f"{roi_str}"
+                )
+            else:
+                head_line = (
+                    f"<b style='font-size:1.05em;'>{sid}</b> {nm} "
+                    f"<span style='color:#888;font-size:0.85em;'>({mk})</span>"
+                )
+                price_line = "<span style='color:#888;'>抓不到即時股價</span>"
+
+            cardA, cardB = st.columns([7, 3])
+            with cardA:
+                st.markdown(
+                    f"<div style='background:{bg}; padding:10px 14px; border-radius:6px; "
+                    f"border-left:5px solid {border}; margin-bottom:8px;'>"
+                    f"<div style='color:#222;'>{head_line}</div>"
+                    f"<div style='color:#333; margin-top:3px;'>{price_line}</div>"
+                    f"<div style='color:#888; font-size:0.82em; margin-top:3px;'>{sub_str}</div>"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+            with cardB:
+                bcol1, bcol2 = st.columns(2)
+                with bcol1:
                     if st.button("重設基準", key=f"reset_{sid}",
                                  help="清掉目前 base，下次監控用當前價或入場價重設"):
                         watchlist_alerts.reset_watchlist_baseline(sid)
-                        st.toast(f"已重設 {sid} 基準價，下次 cron 會重新設定", icon="✅")
+                        st.toast(f"已重設 {sid} 基準價", icon="✅")
                         st.rerun()
-                with cR3:
+                with bcol2:
                     if st.button("刪除", key=f"del_{sid}"):
                         watchlist_store.remove_from_watchlist(sid)
                         st.rerun()
