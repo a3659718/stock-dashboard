@@ -48,10 +48,17 @@ def fetch_chip_data(stock_id: str, days: int = 30) -> Dict:
         inst_df["net"] = inst_df["buy"].astype(float) - inst_df["sell"].astype(float)
         for name, group in inst_df.groupby("name"):
             g = group.sort_values("date")
+            def _safe_int(v, default=0):
+                try:
+                    if pd.isna(v):
+                        return default
+                    return int(v)
+                except Exception:
+                    return default
             inst_summary[name] = {
-                "30d_total": int(g["net"].sum()),
-                "5d_total": int(g.tail(5)["net"].sum()),
-                "today": int(g.iloc[-1]["net"]) if len(g) else 0,
+                "30d_total": _safe_int(g["net"].sum()),
+                "5d_total": _safe_int(g.tail(5)["net"].sum()),
+                "today": _safe_int(g.iloc[-1]["net"]) if len(g) else 0,
                 "consecutive_days": _count_consecutive(g["net"].tolist()),
             }
 

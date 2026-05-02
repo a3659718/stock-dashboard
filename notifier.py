@@ -85,7 +85,7 @@ def fmt_tw_combined(combined_df, latest_date_str: str, market_label: str, max_n:
         labels = row.get("hits_label", "")
 
         # 第 1 行：代號 名稱 (n項)
-        lines.append(f"{i+1}. <code>{sid}</code> {name} <b>({hits}項)</b>")
+        lines.append(f"{i+1}. <b><code>{sid}</code></b> {name} <b>({hits}項)</b>")
 
         # 第 2 行：價量
         price_part = []
@@ -131,7 +131,7 @@ def fmt_us_top_picks(df, fg: dict) -> str:
     lines = [f"<b>🇺🇸 美股 Top 5 推薦</b> · {fg_line}", ""]
     for i, row in df.head(5).iterrows():
         lines.append(
-            f"{i+1}. <code>{row['symbol']}</code>  日 {row.get('daily_%')}% / 20d {row.get('20d_%')}% · 分數 {row['score']}"
+            f"{i+1}. <b><code>{row['symbol']}</code></b>  日 {row.get('daily_%')}% / 20d {row.get('20d_%')}% · 分數 {row['score']}"
             + (f"\n   題材: {row['題材']}" if row.get("題材") else "")
         )
     return "\n".join(lines)
@@ -222,7 +222,7 @@ def _fmt_laggards_block(laggards: dict, laggards_ai: dict, market: str = "TW") -
                 "低": "低",
             }.get(chance, "—")
 
-            out.append(f"  <code>{sid}</code> {nm}  今日 {tp}% / 量比 {ratio}x")
+            out.append(f"  <b><code>{sid}</code></b> {nm}  今日 {tp}% / 量比 {ratio}x")
             out.append(f"     跟漲機會: {chance_label}")
             if reason:
                 out.append(f"     {reason}")
@@ -369,7 +369,7 @@ def fmt_tw_open_picks(data: dict, ai_text: str = "") -> str:
                 ratio = s.get("量比")
                 five = s.get("5日%")
                 lines.append(
-                    f"  • <code>{sid}</code> {nm}  今日 {today}% · 量比 {ratio}x · 5d {five}%"
+                    f"  • <b><code>{sid}</code></b> {nm}  今日 {today}% · 量比 {ratio}x · 5d {five}%"
                 )
                 cat = catalysts.get(str(sid))
                 if cat:
@@ -469,16 +469,34 @@ def fmt_monitor_alerts(watchlist_alerts: list, index_alerts: list, crypto_alerts
         lines.append("")
 
     if crypto_alerts:
-        lines.append("------ 加密貨幣警報 ------")
+        # 加密貨幣 — 排程制 (台北 12:00 / 23:00), 顯示跟上次推播的差異
+        slot_zh = crypto_alerts[0].get("slot_label_zh", "")
+        header = f"------ 加密貨幣定期更新 ({slot_zh}) ------" if slot_zh else "------ 加密貨幣定期更新 ------"
+        lines.append(header)
         for a in crypto_alerts:
             name = a.get("name", "")
             cur = a.get("current", 0)
+            prev = a.get("prev_price")
+            prev_time = a.get("prev_time", "")
             pct = a.get("change_pct", 0)
-            bucket = a.get("threshold_bucket", 0)
+            abs_chg = a.get("change_abs", 0)
             direction = a.get("direction", "")
+            is_first = a.get("is_first", False)
+
             sign = "+" if pct > 0 else ""
-            lines.append(f"  {name}: ${cur:,.0f} (24h {sign}{pct:.2f}%)")
-            lines.append(f"     觸發 {direction} {abs(int(bucket))}% 門檻")
+            sign_abs = "+" if abs_chg > 0 else ""
+            lines.append(f"  <b>{name}</b>: ${cur:,.0f}")
+            if is_first or prev is None:
+                lines.append(f"     首次紀錄, 下次將顯示比對")
+            else:
+                lines.append(
+                    f"     {direction} (上次 ${prev:,.0f} → 本次 ${cur:,.0f})"
+                )
+                lines.append(
+                    f"     變動: {sign_abs}{abs_chg:,.0f} ({sign}{pct:.2f}%)"
+                )
+                if prev_time:
+                    lines.append(f"     上次推播: {prev_time}")
         lines.append("")
 
     out = "\n".join(lines)
@@ -645,7 +663,7 @@ def fmt_us_close_analysis(data: dict) -> str:
                 sid = p["stock_id"]
                 nm = p["name"]
                 reason = reasons.get(sid, "")
-                lines.append(f"  <code>{sid}</code> {nm}")
+                lines.append(f"  <b><code>{sid}</code></b> {nm}")
                 if reason:
                     lines.append(f"     {reason}")
 
@@ -758,7 +776,7 @@ def fmt_us_open_picks(data: dict, ai_text: str = "") -> str:
                 ratio = s.get("量比")
                 twenty = s.get("20日%")
                 lines.append(
-                    f"  • <code>{sym}</code>  今日 {today}% · 量比 {ratio}x · 20d {twenty}%"
+                    f"  • <b><code>{sym}</code></b>  今日 {today}% · 量比 {ratio}x · 20d {twenty}%"
                 )
                 cat = catalysts.get(str(sym))
                 if cat:
@@ -778,7 +796,7 @@ def fmt_us_open_picks(data: dict, ai_text: str = "") -> str:
             ratio = s.get("量比")
             score = s.get("growth_score")
             lines.append(
-                f"  • <code>{sym}</code>  今日 {today}% · 20d {twenty}% · 量比 {ratio}x · {score}/10"
+                f"  • <b><code>{sym}</code></b>  今日 {today}% · 20d {twenty}% · 量比 {ratio}x · {score}/10"
             )
             cat = catalysts.get(str(sym))
             if cat:
@@ -847,7 +865,7 @@ def fmt_stealth_picks(stealth_df, hot_themes_df=None) -> str:
         today = row.get("今日%", "—")
         five = row.get("5日%", "—")
         ratio = row.get("量比", "—")
-        lines.append(f"{i+1}. <code>{sid}</code> {name}  [{theme}]")
+        lines.append(f"{i+1}. <b><code>{sid}</code></b> {name}  [{theme}]")
         lines.append(f"   今日 {today}% / 5d {five}% / 量比 {ratio}x")
     return "\n".join(lines)
 
@@ -857,7 +875,7 @@ def fmt_growth_picks(picks_df) -> str:
         return "🌱 成長動能 Top 10：今日無符合條件的標的。"
     lines = ["<b>🌱 成長動能 Top 10 (消息面 + K 線健康度)</b>", ""]
     for i, r in picks_df.iterrows():
-        lines.append(f"{i+1}. <code>{r['代號']}</code> {r['名稱']} · {r.get('題材','')} · {r['score']}/10")
+        lines.append(f"{i+1}. <b><code>{r['代號']}</code></b> {r['名稱']} · {r.get('題材','')} · {r['score']}/10")
         if r.get("理由"):
             lines.append(f"   {r['理由']}")
     return "\n".join(lines)

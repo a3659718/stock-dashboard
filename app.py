@@ -275,14 +275,16 @@ with tab_wl:
     st.subheader("自選股管理")
     st.caption(
         "新增最多 15 檔自選股 (台股+美股)。"
-        "盤中監控每 30 分檢查，累計漲跌每超過 5% 就跳 TG 通知 (基準 = 入場價或開始監控時的價格)。"
+        "盤中監控每 30 分檢查，累計漲跌達到門檻就跳 TG 通知 — "
+        "TW 每 ±2.5%、US 每 ±5%。基準價可選「自動抓當前股價」或「自訂入場價」。"
     )
 
     import watchlist_store
     import watchlist_alerts
 
-    # 載入現有清單
+    # 載入現有清單 + monitor state (用來顯示目前 base / 累計%)
     current_wl = watchlist_store.load_watchlist()
+    _wl_state = watchlist_store.load_monitor_state().get("watchlist_alerts", {})
 
     cWL1, cWL2 = st.columns(2)
 
@@ -291,17 +293,34 @@ with tab_wl:
         new_sid = st.text_input("代號", placeholder="例 2330 / NVDA / 8082", key="wl_sid")
         new_name = st.text_input("名稱 (可選)", placeholder="例 台積電 / NVIDIA", key="wl_name")
         new_market = st.selectbox("市場", options=["TW", "US"], key="wl_market")
-        new_entry = st.number_input("入場價 (可選, 0 = 用當前價當基準)",
-                                       min_value=0.0, value=0.0, step=0.5, key="wl_entry")
+        base_mode = st.radio(
+            "基準價來源",
+            options=["自動抓當前股價", "自訂入場價"],
+            horizontal=True,
+            key="wl_base_mode",
+            help="自動: 第一次監控時的市價當基準。自訂: 您實際買進的成本價。",
+        )
+        new_entry: float | None = None
+        if base_mode == "自訂入場價":
+            new_entry = st.number_input(
+                "入場價",
+                min_value=0.01,
+                value=100.0,
+                step=0.5,
+                key="wl_entry",
+                help="您實際買進的成本價 (例如 580.5)。漲跌 % 將以此價計算。",
+            )
         if st.button("新增", use_container_width=True, type="primary",
                       key="wl_add", disabled=len(current_wl) >= 15):
             if new_sid.strip():
-                ep = float(new_entry) if new_entry > 0 else None
+                ep = float(new_entry) if (new_entry and new_entry > 0) else None
                 ok = watchlist_store.add_to_watchlist(
                     new_sid.strip().upper(), new_name.strip(), new_market, ep
                 )
                 if ok:
-                    st.success(f"已新增 {new_sid}")
+                    st.success(
+                        f"已新增 {new_sid}" + (f" (入場 {ep})" if ep else " (用當前價當基準)")
+                    )
                     st.rerun()
                 else:
                     st.error("新增失敗 (可能已達 15 檔上限或代號為空)")
@@ -319,18 +338,36 @@ with tab_wl:
                 mk = item.get("market", "TW")
                 ep = item.get("entry_price")
                 added = item.get("added_date", "")
+
+                # 從 monitor state 取目前 base + 上次觸發 bucket
+                sid_state = _wl_state.get(sid, {})
+                base_p = sid_state.get("base_price")
+                base_src = sid_state.get("base_source", "—")
+                last_b = sid_state.get("last_pct", 0)
+
                 cR1, cR2, cR3 = st.columns([5, 2, 2])
                 with cR1:
-                    info_str = f"**{sid}** {nm} ({mk})"
-                    if ep:
-                        info_str += f"  入場 {ep}"
+                    head = f"**{sid}** {nm} ({mk})"
                     if added:
-                        info_str += f"  · {added}"
-                    st.markdown(info_str)
+                        head += f"  · 加入 {added}"
+                    sub_parts = []
+                    if ep:
+                        sub_parts.append(f"入場 {ep}")
+                    if base_p:
+                        src_zh = "入場" if base_src == "entry" else ("自動" if base_src == "auto" else "—")
+                        sub_parts.append(f"基準 {round(float(base_p), 2)} ({src_zh})")
+                    if last_b:
+                        sub_parts.append(f"上次觸發 {last_b:+.1f}%")
+                    if not base_p:
+                        sub_parts.append("(尚未開始監控)")
+                    sub_str = " · ".join(sub_parts) if sub_parts else ""
+                    st.markdown(head + ("\n\n" + f"<span style='color:#888;font-size:0.9em'>{sub_str}</span>" if sub_str else ""), unsafe_allow_html=True)
                 with cR2:
-                    if st.button("重設基準", key=f"reset_{sid}", help="重設警報基準價"):
+                    if st.button("重設基準", key=f"reset_{sid}",
+                                 help="清掉目前 base，下次監控用當前價或入場價重設"):
                         watchlist_alerts.reset_watchlist_baseline(sid)
-                        st.toast(f"已重設 {sid} 基準價", icon="✅")
+                        st.toast(f"已重設 {sid} 基準價，下次 cron 會重新設定", icon="✅")
+                        st.rerun()
                 with cR3:
                     if st.button("刪除", key=f"del_{sid}"):
                         watchlist_store.remove_from_watchlist(sid)
@@ -339,12 +376,17 @@ with tab_wl:
     st.divider()
     st.markdown("**警報設定**")
     st.markdown("""
-- 自選股: 每 5% 累計漲跌跳通知 (5%、10%、15%...)
-- 大盤監控:
+- 自選股 (基準 = 入場價或第一次監控時的市價):
+  - 台股 (TW) 每 ±2.5% 跳通知 (±2.5%、±5%、±7.5%…)
+  - 美股 (US) 每 ±5% 跳通知 (±5%、±10%、±15%…)
+  - 訊息會顯示 上次門檻 → 本次門檻 + 差異
+- 大盤監控 (該市場休市/閉市時段自動跳過):
   - 日經 225 每 ±150 點
   - 韓國 KOSPI 每 ±50 點
   - 台灣加權 每 ±100 點
-- 加密貨幣: BTC / ETH 每 ±2.5% (24h)
+  - 費城半導體 SOX 每 ±100 點 (~1.7%, 台股 leading)
+  - 那斯達克 IXIC 每 ±200 點 (~1%)
+- 加密貨幣 (BTC / ETH): 一天兩次定期推播 (台北 12:00 / 23:00), 顯示「跟上次推播相比」漲跌
 - 連續同方向觸發 → 加上 [連續警示]，提醒台股可能要減碼
 
 cron 每 30 分執行一次 (24x7)。

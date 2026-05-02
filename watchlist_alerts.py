@@ -88,10 +88,26 @@ def check_watchlist_alerts() -> List[Dict]:
         if current is None:
             continue
 
-        # 第一次監控: 設 base_price，跳過警報
         sid_state = wl_state.setdefault(sid, {})
-        if "base_price" not in sid_state:
-            sid_state["base_price"] = float(entry_price) if entry_price else current
+
+        # 偵測 entry_price 是否變動 (使用者在 UI 改了入場價)
+        # 同時把 None / 0 / float 都正規化, 避免比較失敗
+        try:
+            ep_now = float(entry_price) if entry_price not in (None, "", 0, 0.0) else None
+        except Exception:
+            ep_now = None
+        ep_snapshot = sid_state.get("entry_price_snapshot")
+        try:
+            ep_snapshot = float(ep_snapshot) if ep_snapshot not in (None, "", 0, 0.0) else None
+        except Exception:
+            ep_snapshot = None
+
+        # 第一次監控 OR entry_price 被改了 → 重設 base
+        if "base_price" not in sid_state or ep_now != ep_snapshot:
+            sid_state["base_price"] = float(ep_now) if ep_now else current
+            sid_state["entry_price_snapshot"] = ep_now
+            sid_state["base_source"] = "entry" if ep_now else "auto"
+            sid_state["base_set_date"] = dt.date.today().strftime("%Y-%m-%d")
             sid_state["last_pct"] = 0.0
             sid_state["threshold"] = threshold
             continue
