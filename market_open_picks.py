@@ -425,6 +425,20 @@ def get_tw_close_analysis() -> Dict:
         twii_close = float(c.iloc[-1])
         twii_pct = (float(c.iloc[-1]) / float(c.iloc[-2]) - 1) * 100
 
+    # 盤後新增: 外資出貨嫌疑 + 隔日上漲機率高 top 3
+    foreign_dumping = []
+    next_day_picks = []
+    try:
+        import closing_analyzer
+        foreign_dumping = closing_analyzer.analyze_foreign_dumping(top_n=5, max_scan=80)
+    except Exception as e:
+        print(f"[market_open_picks] foreign_dumping failed: {e}", flush=True)
+    try:
+        import closing_analyzer
+        next_day_picks = closing_analyzer.pick_next_day_breakout(top_n=3, max_scan=150)
+    except Exception as e:
+        print(f"[market_open_picks] next_day_breakout failed: {e}", flush=True)
+
     return {
         "themes": themes_df,
         "twii_close": round(twii_close, 2),
@@ -434,6 +448,8 @@ def get_tw_close_analysis() -> Dict:
         "jp_kr_sectors": jp_kr_sectors,
         "theme_to_asia_map": TW_TO_ASIA_SECTOR_MAP,
         "ai_text": ai_text,
+        "foreign_dumping": foreign_dumping,
+        "next_day_picks": next_day_picks,
     }
 
 

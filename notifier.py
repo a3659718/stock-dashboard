@@ -783,6 +783,42 @@ def fmt_tw_close_analysis(data: dict) -> str:
             else:
                 lines.append(ln)
 
+    # 外資出貨嫌疑 top 5
+    foreign_dumping = data.get("foreign_dumping") or []
+    if foreign_dumping:
+        lines.append("")
+        lines.append("------ 盤後外資出貨嫌疑 (Top 5) ------")
+        for d in foreign_dumping[:5]:
+            sid = d.get("stock_id", "")
+            name = d.get("name", "")
+            conf = d.get("confidence", 0)
+            reason = d.get("reason", "")
+            lines.append(f"  <b><code>{sid}</code></b> {name}  信心 {conf}%")
+            if reason:
+                lines.append(f"     {reason}")
+
+    # 隔日上漲機率高 top 3
+    next_day = data.get("next_day_picks") or []
+    if next_day:
+        lines.append("")
+        lines.append("------ 隔日上漲機率高 (Top 3) ------")
+        for d in next_day[:3]:
+            sid = d.get("stock_id", "")
+            name = d.get("name", "")
+            cur = d.get("current")
+            today = d.get("today_pct")
+            up_prob = d.get("up_prob", 0)
+            target = d.get("target_pct", 0)
+            reason = d.get("reason", "")
+            head = f"  <b><code>{sid}</code></b> {name}"
+            if cur is not None:
+                sign = "+" if (today or 0) > 0 else ""
+                head += f"  {cur} ({sign}{today}%)"
+            lines.append(head)
+            lines.append(f"     上漲機率 <b>{up_prob}%</b> · 預期 +{target:.1f}%")
+            if reason:
+                lines.append(f"     {reason}")
+
     out = "\n".join(lines)
     if len(out) > 3900:
         out = out[:3900] + "\n…(節錄)"

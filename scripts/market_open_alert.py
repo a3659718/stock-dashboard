@@ -222,15 +222,34 @@ def main() -> int:
             import google.generativeai as genai
             genai.configure(api_key=os.environ["GEMINI_API_KEY"])
             test_model = genai.GenerativeModel("gemini-2.5-flash")
+            # 帶 safety_settings 避免 finish_reason=2 (SAFETY) 假警報
+            try:
+                safety = ai_analyzer.get_safety_settings()
+            except Exception:
+                safety = None
             test_resp = test_model.generate_content(
-                "Reply with exactly the word: OK",
-                generation_config={"max_output_tokens": 10, "temperature": 0},
+                "What is 2 plus 3? Answer with just the number.",
+                generation_config={"max_output_tokens": 20, "temperature": 0},
+                safety_settings=safety,
             )
-            test_text = (test_resp.text or "").strip()
-            if test_text:
-                print(f"✓ Gemini test call OK: {test_text[:50]}")
+            # 不直接用 .text (會 raise), 改檢查 candidates
+            cands = getattr(test_resp, "candidates", []) or []
+            if cands:
+                cand = cands[0]
+                fr = getattr(cand, "finish_reason", None)
+                # finish_reason: 1=STOP, 2=SAFETY, 3=MAX_TOKENS, 4=RECITATION
+                if fr in (1, "STOP", None):
+                    try:
+                        text = test_resp.text.strip()
+                        print(f"✓ Gemini test call OK: {text[:50]}")
+                    except Exception:
+                        print(f"✓ Gemini API 回應正常 (finish={fr}, 但 text 取不到, 可忽略)")
+                elif fr == 2 or fr == "SAFETY":
+                    print(f"⚠️ Gemini 測試被 safety filter 擋 (finish=2), API key 仍有效, 推播功能不受影響")
+                else:
+                    print(f"⚠️ Gemini finish_reason={fr}, 可能 quota 或其他, 但 key 有效")
             else:
-                print(f"✗ Gemini returned empty (可能 safety filter)")
+                print(f"⚠️ Gemini 無 candidate 回應 — key 可能有問題")
         except Exception as e:
             print(f"✗ Gemini test failed: {type(e).__name__}: {e}")
             print(f"  → 可能是 key 無效、quota 用光、或網路問題")
@@ -270,7 +289,22 @@ def main() -> int:
     if market in ("tw_open", "tw_mid"):
         label = "開盤後 30 分鐘 (09:30)" if market == "tw_open" else "中盤更新 (11:00)"
         print(f"Running TW {label}...")
-        data = market_open_picks.get_tw_open_picks()
+        try:
+            data = market_open_picks.get_tw_open_picks()
+        except Exception as e:
+            print(f"get_tw_open_picks fatal failure: {e}", flush=True)
+            err_msg = (
+                f"<b>台股 {label} 推播失敗</b>\n\n"
+                f"原因: <code>{type(e).__name__}: {str(e)[:200]}</code>\n\n"
+                f"建議檢查:\n"
+                f"  • FinMind Token 是否有效 (常見: 過期/重新生成)\n"
+                f"  • GitHub Actions log 看詳細 stack trace"
+            )
+            try:
+                notifier.send_message(err_msg)
+            except Exception:
+                pass
+            return 1
         if data.get("error"):
             print(f"data error: {data['error']}")
         else:
@@ -279,12 +313,16 @@ def main() -> int:
         ai_text = ""
         if ai_analyzer.gemini_available():
             print("Calling Gemini...")
-            ok, ai_text = ai_analyzer.analyze_open_picks("TW", _summarize_tw_for_ai(data))
-            if not ok:
-                print(f"AI failed: {ai_text}")
+            try:
+                ok, ai_text = ai_analyzer.analyze_open_picks("TW", _summarize_tw_for_ai(data))
+                if not ok:
+                    print(f"AI failed: {ai_text}")
+                    ai_text = ""
+                else:
+                    print(f"Gemini returned {len(ai_text)} chars")
+            except Exception as e:
+                print(f"Gemini exception: {e}")
                 ai_text = ""
-            else:
-                print(f"Gemini returned {len(ai_text)} chars")
         else:
             print("Gemini not available - skipping AI section")
         msg = notifier.fmt_tw_open_picks(data, ai_text=ai_text)
@@ -293,7 +331,19 @@ def main() -> int:
             msg = msg.replace("台股開盤後 30 分鐘 · 資金流向", "台股中盤更新 11:00 · 資金流向")
     elif market == "tw_close":
         print("Running TW market close analysis (15:00)...")
-        data = market_open_picks.get_tw_close_analysis()
+        try:
+            data = market_open_picks.get_tw_close_analysis()
+        except Exception as e:
+            print(f"get_tw_close_analysis fatal failure: {e}", flush=True)
+            err_msg = (
+                f"<b>台股盤後分析推播失敗</b>\n\n"
+                f"原因: <code>{type(e).__name__}: {str(e)[:200]}</code>"
+            )
+            try:
+                notifier.send_message(err_msg)
+            except Exception:
+                pass
+            return 1
         if data.get("ai_text"):
             print(f"Gemini reasoning: {len(data['ai_text'])} chars")
         msg = notifier.fmt_tw_close_analysis(data)
@@ -356,11 +406,27 @@ def main() -> int:
         print(f"Got {len(data.get('news', []))} news items")
         msg = notifier.fmt_holiday_news(data)
     elif market == "monitor":
-        # 盤中監控: 自選股 5% / 大盤 ±150/50 / 加密 ±2.5%
+        # 盤中監控: 自選股 / 大盤點數 / 加密貨幣
         print("Running monitor mode (intraday alerts)...")
         try:
             import watchlist_alerts
             import index_alerts
+            # 診斷: 印出當前 active session + 各市場 in_session 狀態
+            try:
+                active = index_alerts.get_active_session()
+                in_session = {
+                    c: index_alerts._is_market_in_session(c) for c in ["TW", "JP", "KR", "US"]
+                }
+                print(f"Active session: {active}, per-market in_session: {in_session}")
+                # 假日狀態
+                try:
+                    import holiday_check
+                    print(f"Market holiday status: {holiday_check.market_status_summary()}")
+                except Exception as _e:
+                    print(f"  (holiday_check unavailable: {_e})")
+            except Exception as _e:
+                print(f"  (session debug failed: {_e})")
+
             wl = watchlist_alerts.check_watchlist_alerts()
             idx = index_alerts.check_index_alerts()
             cry = index_alerts.check_crypto_alerts()
