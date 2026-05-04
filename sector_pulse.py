@@ -155,9 +155,14 @@ def compute_hot_themes() -> dict:
     """回傳:
        - themes: DataFrame (題材熱度排行)
        - leaders: dict[題材 -> DataFrame (該題材 Top 5 強勢股)]
+    FinMind 失敗時 graceful return 空 dict, 不 raise.
     """
-    info = ds.get_taiwan_stock_info()
-    if info.empty:
+    try:
+        info = ds.get_taiwan_stock_info()
+    except Exception as e:
+        print(f"[sector_pulse] FinMind get_taiwan_stock_info failed: {e}", flush=True)
+        return {"themes": pd.DataFrame(), "leaders": {}}
+    if info is None or info.empty:
         return {"themes": pd.DataFrame(), "leaders": {}}
     market_map = info.set_index("stock_id")["type"].to_dict()
     name_map = info.set_index("stock_id")["stock_name"].to_dict() if "stock_name" in info.columns else {}

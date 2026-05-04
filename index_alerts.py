@@ -262,31 +262,50 @@ CRYPTO_SCHEDULE_UTC_HOURS = {
 
 def check_crypto_alerts() -> List[Dict]:
     """加密貨幣排程警報.
-    - 一天兩次: 台北 12:00 / 23:00
-    - 都比對「跟上次推播相比」: 顯示上次價、本次價、漲跌 %, 漲跌絕對值
-    - 第一次推播沒有 prev → 顯示 "首次紀錄, 無比對基準"
-    - 同一個 slot 內 (例如 04:15 跟 04:45 都觸發) 只發一次, 用 last_slot dedup
+
+    每 slot (台北 12:00 / 23:00) 最多 2 次:
+    - First push (minute 15): 固定發, 比對「上一個 slot 的最後一次推播」
+    - Second push (minute 45): 只在跟 first push 相比漲跌絕對值 >= threshold (2.5%)
+                                才發, 訊息標記為「盤中變動」
+
+    State 結構 (crypto_alerts[symbol]):
+      last_slot              — dedup key, 例 "2026-05-02_night"
+      first_alert_price      — 該 slot 第一次推播的價, 用來算 second push 是否觸發
+      first_alert_time       — 該 slot 第一次推播的時間
+      prev_alert_price       — 最近一次推播的價 (跨 slot, 給下個 slot 比對用)
+      prev_alert_time        — 最近一次推播的時間
     """
     now_utc = dt.datetime.utcnow()
     cur_hour = now_utc.hour
+    cur_minute = now_utc.minute
 
-    # 不在排定時段 → 直接 return
+    # 不在排定 hour → 直接 return
     if cur_hour not in CRYPTO_SCHEDULE_UTC_HOURS:
         return []
 
+    is_first_tick = cur_minute < 30  # cron 15,45 → 第一個 tick 在前半小時
+
     slot_label = CRYPTO_SCHEDULE_UTC_HOURS[cur_hour]
     today_str = now_utc.strftime("%Y-%m-%d")
-    slot_key = f"{today_str}_{slot_label}"  # dedup key
+    slot_key = f"{today_str}_{slot_label}"
 
     state = watchlist_store.load_monitor_state()
     crypto_state = state.setdefault("crypto_alerts", {})
 
+    print(
+        f"[crypto] slot={slot_key} tick={'first' if is_first_tick else 'second'} "
+        f"min={cur_minute}, state has {len(crypto_state)} symbols",
+        flush=True,
+    )
+
     alerts: List[Dict] = []
+    now_str = now_utc.strftime("%Y-%m-%d %H:%M UTC")
 
     for sym, cfg in CRYPTO_CONFIG.items():
-        # 抓即時價 (1h 線取最後一根)
+        # 抓即時價
         df = ds.fetch_yf_history(sym, period="2d", interval="1h")
         if df.empty:
+            print(f"[crypto] {sym} no data, skip", flush=True)
             continue
         try:
             current = float(df["Close"].astype(float).iloc[-1])
@@ -294,47 +313,99 @@ def check_crypto_alerts() -> List[Dict]:
             continue
 
         sid_state = crypto_state.setdefault(sym, {})
+        already_first = (sid_state.get("last_slot") == slot_key)
+        threshold = float(cfg.get("threshold_pct", 2.5))
 
-        # 同一個 slot 已發過 → 跳過 (dedup, 避免 04:15 跟 04:45 都跑)
-        if sid_state.get("last_slot") == slot_key:
-            continue
+        # ===== Case A: 該 slot 還沒發過 first push =====
+        if not already_first:
+            # 必發 — 比對上一個 slot 的 prev_alert_price (cross-slot)
+            prev_price = sid_state.get("prev_alert_price")
+            prev_time = sid_state.get("prev_alert_time", "")
+            try:
+                prev_price = float(prev_price) if prev_price not in (None, "") else None
+            except Exception:
+                prev_price = None
 
-        prev_price = sid_state.get("prev_alert_price")
-        prev_time = sid_state.get("prev_alert_time", "")
-        try:
-            prev_price = float(prev_price) if prev_price not in (None, "") else None
-        except Exception:
-            prev_price = None
+            if prev_price and prev_price > 0:
+                change_pct = (current / prev_price - 1) * 100
+                change_abs = current - prev_price
+                direction = "上漲" if change_pct > 0.05 else ("下跌" if change_pct < -0.05 else "持平")
+                is_first_global = False
+            else:
+                change_pct = 0.0
+                change_abs = 0.0
+                direction = "首次紀錄"
+                is_first_global = True
 
-        if prev_price and prev_price > 0:
-            change_pct = (current / prev_price - 1) * 100
-            change_abs = current - prev_price
-            direction = "上漲" if change_pct > 0.05 else ("下跌" if change_pct < -0.05 else "持平")
-            is_first = False
+            alerts.append({
+                "symbol": sym,
+                "name": cfg["name"],
+                "current": round(current, 2),
+                "prev_price": round(prev_price, 2) if prev_price else None,
+                "prev_time": prev_time,
+                "change_pct": round(change_pct, 2),
+                "change_abs": round(change_abs, 2),
+                "direction": direction,
+                "slot": slot_label,
+                "slot_label_zh": "中午 12:00" if slot_label == "noon" else "晚上 23:00",
+                "is_first": is_first_global,
+                "alert_type": "scheduled",  # 固定排程推播
+            })
+
+            # 更新 state — 紀錄 first push 資訊 + cross-slot prev
+            sid_state["last_slot"] = slot_key
+            sid_state["first_alert_price"] = current
+            sid_state["first_alert_time"] = now_str
+            sid_state["prev_alert_price"] = current
+            sid_state["prev_alert_time"] = now_str
+            print(f"[crypto] {sym} FIRST push: {prev_price} → {current} ({change_pct:+.2f}%)", flush=True)
+
+        # ===== Case B: 該 slot 已發過 first push, 檢查是否要發 second =====
         else:
-            change_pct = 0.0
-            change_abs = 0.0
-            direction = "首次紀錄"
-            is_first = True
+            # second push 只在第二個 tick (minute >= 30) 評估
+            if is_first_tick:
+                # 同 slot 同 tick 已發過 → skip
+                print(f"[crypto] {sym} already alerted for {slot_key} (first tick), skip", flush=True)
+                continue
 
-        alerts.append({
-            "symbol": sym,
-            "name": cfg["name"],
-            "current": round(current, 2),
-            "prev_price": round(prev_price, 2) if prev_price else None,
-            "prev_time": prev_time,
-            "change_pct": round(change_pct, 2),
-            "change_abs": round(change_abs, 2),
-            "direction": direction,
-            "slot": slot_label,
-            "slot_label_zh": "中午 12:00" if slot_label == "noon" else "晚上 23:00",
-            "is_first": is_first,
-        })
+            first_price = sid_state.get("first_alert_price")
+            try:
+                first_price = float(first_price) if first_price not in (None, "") else None
+            except Exception:
+                first_price = None
 
-        # 更新 state — current 變成下次的 prev
-        sid_state["prev_alert_price"] = current
-        sid_state["prev_alert_time"] = now_utc.strftime("%Y-%m-%d %H:%M UTC")
-        sid_state["last_slot"] = slot_key
+            if not first_price or first_price <= 0:
+                print(f"[crypto] {sym} no first_price recorded, skip", flush=True)
+                continue
+
+            change_pct = (current / first_price - 1) * 100
+            change_abs = current - first_price
+
+            # 變動不夠大 → 不發
+            if abs(change_pct) < threshold:
+                print(f"[crypto] {sym} 2nd-tick change {change_pct:+.2f}% < {threshold}%, skip", flush=True)
+                continue
+
+            direction = "急漲" if change_pct > 0 else "急跌"
+            alerts.append({
+                "symbol": sym,
+                "name": cfg["name"],
+                "current": round(current, 2),
+                "prev_price": round(first_price, 2),
+                "prev_time": sid_state.get("first_alert_time", ""),
+                "change_pct": round(change_pct, 2),
+                "change_abs": round(change_abs, 2),
+                "direction": direction,
+                "slot": slot_label,
+                "slot_label_zh": "中午 12:00" if slot_label == "noon" else "晚上 23:00",
+                "is_first": False,
+                "alert_type": "intra_slot",  # 盤中變動警報
+                "threshold_pct": threshold,
+            })
+
+            sid_state["prev_alert_price"] = current
+            sid_state["prev_alert_time"] = now_str
+            print(f"[crypto] {sym} SECOND push: {first_price} → {current} ({change_pct:+.2f}%) >= {threshold}%", flush=True)
 
     state["crypto_alerts"] = crypto_state
     watchlist_store.save_monitor_state(state)

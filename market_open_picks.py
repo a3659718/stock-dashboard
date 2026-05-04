@@ -155,6 +155,62 @@ def _score_stock_momentum(metrics: Dict) -> float:
 
 
 # ---------------------------------------------------------------------------
+# 加權指數即時 (盤中)
+# ---------------------------------------------------------------------------
+def _fetch_twii_intraday() -> Dict:
+    """抓盤中加權指數即時資料.
+    回傳: {current, prev_close, today_open, change_pct, change_pts, day_range_pct}
+    抓不到時 → 各欄位 None.
+    """
+    out = {
+        "current": None, "prev_close": None, "today_open": None,
+        "change_pct": None, "change_pts": None, "day_high": None, "day_low": None,
+    }
+    # 1) 5m 線 (盤中即時) — 取最後一根當 current, 同日第一根當 today_open
+    df = ds.fetch_yf_history("^TWII", period="2d", interval="5m")
+    if df is not None and not df.empty:
+        try:
+            df = df.copy()
+            date_col = "Datetime" if "Datetime" in df.columns else df.columns[0]
+            df["_dt"] = pd.to_datetime(df[date_col])
+            df["_d"] = df["_dt"].dt.date
+            today = df["_d"].max()
+            today_bars = df[df["_d"] == today].sort_values("_dt")
+            if not today_bars.empty:
+                out["current"] = float(today_bars["Close"].iloc[-1])
+                out["today_open"] = float(today_bars["Open"].iloc[0])
+                out["day_high"] = float(today_bars["High"].max())
+                out["day_low"] = float(today_bars["Low"].min())
+        except Exception:
+            pass
+    # 2) 抓昨收 (用 daily 線取倒數第二根)
+    df_d = ds.fetch_yf_history("^TWII", period="5d", interval="1d")
+    if df_d is not None and not df_d.empty and len(df_d) >= 2:
+        try:
+            close_d = df_d["Close"].astype(float)
+            out["prev_close"] = float(close_d.iloc[-2])
+            # 如果 5m 抓不到 current, 就用 daily 最後一根當 current
+            if out["current"] is None:
+                out["current"] = float(close_d.iloc[-1])
+                out["today_open"] = float(df_d["Open"].astype(float).iloc[-1])
+        except Exception:
+            pass
+    # 3) 算 change vs 昨收
+    if out["current"] and out["prev_close"]:
+        out["change_pts"] = round(out["current"] - out["prev_close"], 2)
+        out["change_pct"] = round((out["current"] / out["prev_close"] - 1) * 100, 2)
+        out["current"] = round(out["current"], 2)
+        out["prev_close"] = round(out["prev_close"], 2)
+    if out["today_open"]:
+        out["today_open"] = round(out["today_open"], 2)
+    if out["day_high"]:
+        out["day_high"] = round(out["day_high"], 2)
+    if out["day_low"]:
+        out["day_low"] = round(out["day_low"], 2)
+    return out
+
+
+# ---------------------------------------------------------------------------
 # 台股開盤分析
 # ---------------------------------------------------------------------------
 def get_tw_open_picks(top_themes_n: int = 3, picks_per_theme: int = 3) -> Dict:
@@ -228,6 +284,9 @@ def get_tw_open_picks(top_themes_n: int = 3, picks_per_theme: int = 3) -> Dict:
     # 美股隔夜行情 (給 AI 跨市場推理用)
     us_overnight = get_us_overnight_summary()
 
+    # 加權指數即時 (盤中 5m 線取最後一根, 比對昨收)
+    twii_info = _fetch_twii_intraday()
+
     return {
         "themes": themes_df.head(top_themes_n),
         "picks": picks,
@@ -236,6 +295,7 @@ def get_tw_open_picks(top_themes_n: int = 3, picks_per_theme: int = 3) -> Dict:
         "catalysts": catalysts,
         "events": events,
         "asia": asia,
+        "twii": twii_info,
         "laggards": laggards,
         "laggards_ai": laggards_ai,
         "us_overnight": us_overnight,

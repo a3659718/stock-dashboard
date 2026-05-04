@@ -307,6 +307,34 @@ def fmt_tw_open_picks(data: dict, ai_text: str = "") -> str:
     if data.get("error"):
         return f"🇹🇼 台股開盤分析：{data['error']}"
     lines = [f"<b>台股開盤後 30 分鐘 · 資金流向</b>"]
+
+    # 加權指數即時 (盤中)
+    twii = data.get("twii") or {}
+    if twii and twii.get("current") is not None and twii.get("change_pct") is not None:
+        cur = twii["current"]
+        pct = twii["change_pct"]
+        pts = twii.get("change_pts", 0) or 0
+        prev = twii.get("prev_close")
+        op = twii.get("today_open")
+        hi = twii.get("day_high")
+        lo = twii.get("day_low")
+        sign = "+" if pct > 0 else ""
+        sign_p = "+" if pts > 0 else ""
+        direction = "紅" if pct > 0 else ("黑" if pct < 0 else "平")
+        lines.append("")
+        lines.append(f"<b>加權指數</b>  {cur:,.2f}  <b>{sign_p}{pts} 點 ({sign}{pct:.2f}%)</b>  {direction}盤")
+        sub_parts = []
+        if op is not None:
+            sub_parts.append(f"開 {op:,.2f}")
+        if hi is not None:
+            sub_parts.append(f"高 {hi:,.2f}")
+        if lo is not None:
+            sub_parts.append(f"低 {lo:,.2f}")
+        if prev is not None:
+            sub_parts.append(f"昨收 {prev:,.2f}")
+        if sub_parts:
+            lines.append("  " + " · ".join(sub_parts))
+
     # 大盤預測
     lines.extend(_fmt_prediction_block(data.get("prediction"), data.get("accuracy")))
     # 美股隔夜行情 (給 reference)
@@ -469,10 +497,18 @@ def fmt_monitor_alerts(watchlist_alerts: list, index_alerts: list, crypto_alerts
         lines.append("")
 
     if crypto_alerts:
-        # 加密貨幣 — 排程制 (台北 12:00 / 23:00), 顯示跟上次推播的差異
+        # 加密貨幣 — 分兩種 alert_type:
+        #   scheduled  → 固定排程 (台北 12:00 / 23:00), 比對上一個 slot
+        #   intra_slot → 同 slot 內變動 >= 2.5% 才發 (盤中急漲急跌)
         slot_zh = crypto_alerts[0].get("slot_label_zh", "")
-        header = f"------ 加密貨幣定期更新 ({slot_zh}) ------" if slot_zh else "------ 加密貨幣定期更新 ------"
+        alert_type = crypto_alerts[0].get("alert_type", "scheduled")
+
+        if alert_type == "intra_slot":
+            header = f"------ 加密貨幣盤中變動警報 ({slot_zh}) ------"
+        else:
+            header = f"------ 加密貨幣定期更新 ({slot_zh}) ------" if slot_zh else "------ 加密貨幣定期更新 ------"
         lines.append(header)
+
         for a in crypto_alerts:
             name = a.get("name", "")
             cur = a.get("current", 0)
@@ -482,11 +518,24 @@ def fmt_monitor_alerts(watchlist_alerts: list, index_alerts: list, crypto_alerts
             abs_chg = a.get("change_abs", 0)
             direction = a.get("direction", "")
             is_first = a.get("is_first", False)
+            a_type = a.get("alert_type", "scheduled")
+            thr = a.get("threshold_pct", 2.5)
 
             sign = "+" if pct > 0 else ""
             sign_abs = "+" if abs_chg > 0 else ""
             lines.append(f"  <b>{name}</b>: ${cur:,.0f}")
-            if is_first or prev is None:
+
+            if a_type == "intra_slot":
+                # 同 slot 內急漲急跌警報
+                lines.append(
+                    f"     <b>{direction}</b> 跟今天{slot_zh}首次推播 ${prev:,.0f} 比"
+                )
+                lines.append(
+                    f"     變動: {sign_abs}{abs_chg:,.0f} ({sign}{pct:.2f}%, 超過 ±{thr}%)"
+                )
+                if prev_time:
+                    lines.append(f"     首次推播: {prev_time}")
+            elif is_first or prev is None:
                 lines.append(f"     首次紀錄, 下次將顯示比對")
             else:
                 lines.append(
