@@ -831,6 +831,157 @@ def fmt_tw_close_analysis(data: dict) -> str:
     return out
 
 
+def fmt_stop_loss_alerts(breaches: list) -> str:
+    """停損警報訊息 (給 tw_open / tw_mid / monitor 用)."""
+    if not breaches:
+        return ""
+    lines = ["<b>持倉停損警報</b>", ""]
+    for b in breaches:
+        sid = b.get("stock_id", "")
+        name = b.get("name", "")
+        cur = b.get("current", 0)
+        sl = b.get("stop_loss", 0)
+        pct = b.get("breach_pct", 0)
+        sign = "+" if pct > 0 else ""
+        lines.append(
+            f"<b><code>{sid}</code></b> {name} {cur} 跌破停損 {sl} "
+            f"({sign}{pct:.2f}%)"
+        )
+        sd = b.get("set_date", "")
+        if sd:
+            lines.append(f"  停損設定日: {sd}")
+    return "\n".join(lines)
+
+
+def fmt_holdings_accuracy(acc: dict) -> str:
+    """持倉預測準確率摘要 (附在 tw_close 推播末)."""
+    if not acc or not acc.get("total"):
+        return ""
+    lines = []
+    lines.append(
+        f"<b>過去 {acc.get('lookback_days',30)} 天預測準確率</b>: "
+        f"{acc['correct']}/{acc['total']} ({acc['accuracy_pct']}%)"
+    )
+    by_prob = acc.get("by_prob_range") or {}
+    parts = []
+    for k in [">=70%", "50-70%", "<50%"]:
+        v = by_prob.get(k, {})
+        if v.get("total"):
+            pct = round(v["correct"] / v["total"] * 100, 1)
+            parts.append(f"{k}: {v['correct']}/{v['total']} ({pct}%)")
+    if parts:
+        lines.append("  分機率區間: " + " · ".join(parts))
+    return "\n".join(lines)
+
+
+def fmt_holdings_daily(holdings: list) -> str:
+    """持倉清單盤後日報 — 每檔一段, 含技術/籌碼/Gemini 建議."""
+    if not holdings:
+        return ""
+    lines = [f"<b>持倉日報 · {len(holdings)} 檔</b>", ""]
+
+    # 摘要表
+    summary_lines = []
+    for h in holdings:
+        sid = h.get("stock_id", "")
+        name = h.get("name", "")
+        tech = h.get("tech", {}) or {}
+        adv = h.get("advice", {}) or {}
+        cur = tech.get("current", 0)
+        today = tech.get("today_pct", 0)
+        action = adv.get("action", "—")
+        prob = adv.get("next_day_up_prob", 50)
+        sign = "+" if today > 0 else ""
+        summary_lines.append(
+            f"  <code>{sid}</code> {name} {cur} ({sign}{today:.2f}%) → <b>{action}</b> 隔日{prob}%"
+        )
+    if summary_lines:
+        lines.append("<b>摘要</b>")
+        lines.extend(summary_lines)
+        lines.append("")
+
+    # 每檔詳細
+    for h in holdings:
+        sid = h.get("stock_id", "")
+        name = h.get("name", "")
+        ep = h.get("entry_price")
+        tech = h.get("tech", {}) or {}
+        chip = h.get("chip", {}) or {}
+        adv = h.get("advice", {}) or {}
+        news = h.get("news", []) or []
+
+        cur = tech.get("current", 0)
+        today = tech.get("today_pct", 0)
+        sign = "+" if today > 0 else ""
+
+        # 標題行
+        head = f"<b>{sid} {name}</b> {cur} ({sign}{today:.2f}%)"
+        if ep:
+            roi = (cur / ep - 1) * 100 if ep > 0 else 0
+            roi_sign = "+" if roi > 0 else ""
+            head += f" · 進場{ep} ROI {roi_sign}{roi:.2f}%"
+        lines.append(head)
+
+        # 技術
+        tech_parts = []
+        if tech.get("ma_status"): tech_parts.append(tech["ma_status"])
+        if tech.get("kd_signal"): tech_parts.append(f"KD {tech['kd_signal']}")
+        if tech.get("macd_signal"): tech_parts.append(f"MACD {tech['macd_signal']}")
+        if tech.get("vol_ratio"): tech_parts.append(f"量比{tech['vol_ratio']}x")
+        if tech_parts:
+            lines.append("  技術: " + " · ".join(tech_parts))
+
+        # 籌碼 — 沒值不顯示
+        chip_parts = []
+        fi5 = chip.get("fi_5d", 0)
+        if fi5:
+            chip_parts.append(f"外資5日 {fi5:+,}張")
+        it5 = chip.get("it_5d", 0)
+        if it5:
+            chip_parts.append(f"投信5日 {it5:+,}張")
+        m30 = chip.get("margin_30d_pct", 0)
+        if m30 and abs(m30) > 5:
+            chip_parts.append(f"融資30日 {m30:+.1f}%")
+        if chip_parts:
+            lines.append("  籌碼: " + " · ".join(chip_parts))
+
+        # 建議 (核心)
+        action = adv.get("action", "持有")
+        conf = adv.get("confidence", 0)
+        ts = adv.get("target_short")
+        tm = adv.get("target_mid")
+        sl = adv.get("stop_loss")
+        prob = adv.get("next_day_up_prob", 50)
+
+        action_line = f"  建議: <b>{action}</b> (信心 {conf}%) · 隔日漲機率 {prob}%"
+        lines.append(action_line)
+        price_parts = []
+        if ts: price_parts.append(f"短期目標 {ts}")
+        if tm: price_parts.append(f"中期目標 {tm}")
+        if sl: price_parts.append(f"停損 {sl}")
+        if price_parts:
+            lines.append("  " + " · ".join(price_parts))
+
+        reason = adv.get("reason", "")
+        if reason:
+            lines.append(f"  理由: {reason}")
+        risks = adv.get("risks", "")
+        if risks and risks != "—":
+            lines.append(f"  風險: {risks}")
+
+        # 最近新聞 (最多 2 條)
+        if news:
+            for n in news[:2]:
+                lines.append(f"  - {n.get('title','')}")
+
+        lines.append("")
+
+    out = "\n".join(lines)
+    if len(out) > 3900:
+        out = out[:3900] + "\n…(節錄)"
+    return out
+
+
 def fmt_us_open_picks(data: dict, ai_text: str = "") -> str:
     """美股開盤後 30 分推播."""
     if data.get("error"):

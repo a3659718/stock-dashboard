@@ -289,6 +289,19 @@ def main() -> int:
     if market in ("tw_open", "tw_mid"):
         label = "開盤後 30 分鐘 (09:30)" if market == "tw_open" else "中盤更新 (11:00)"
         print(f"Running TW {label}...")
+
+        # 持倉停損預警 — 在主分析前先檢查, 跌破立刻另外推一封
+        try:
+            import holdings_tracker
+            sl_breaches = holdings_tracker.check_stop_loss_breaches()
+            if sl_breaches:
+                sl_msg = notifier.fmt_stop_loss_alerts(sl_breaches)
+                if sl_msg:
+                    print(f"持倉停損警報: {len(sl_breaches)} 檔跌破", flush=True)
+                    notifier.send_message(sl_msg)
+        except Exception as e:
+            print(f"停損檢查失敗 (non-fatal): {e}", flush=True)
+
         try:
             data = market_open_picks.get_tw_open_picks()
         except Exception as e:
@@ -347,6 +360,49 @@ def main() -> int:
         if data.get("ai_text"):
             print(f"Gemini reasoning: {len(data['ai_text'])} chars")
         msg = notifier.fmt_tw_close_analysis(data)
+
+        # 持倉日報 — 額外推一封
+        try:
+            import holdings_analyzer
+            import holdings_tracker
+
+            # 先驗證舊預測 (隔日已收盤 → 對昨天的預測算對錯)
+            try:
+                n_validated = holdings_tracker.evaluate_pending_predictions()
+                if n_validated:
+                    print(f"驗證 {n_validated} 筆舊預測", flush=True)
+            except Exception as _e:
+                print(f"  evaluate_pending_predictions failed: {_e}", flush=True)
+
+            # 跑今日分析
+            holdings_results = holdings_analyzer.analyze_all_holdings()
+            if holdings_results:
+                # 紀錄預測 + 同步停損
+                try:
+                    holdings_tracker.save_predictions(holdings_results)
+                    holdings_tracker.update_stop_loss_state(holdings_results)
+                except Exception as _e:
+                    print(f"  save_predictions/update_stop_loss failed: {_e}", flush=True)
+
+                holdings_msg = notifier.fmt_holdings_daily(holdings_results)
+                # 附準確率 (有歷史資料才顯示)
+                try:
+                    acc = holdings_tracker.accuracy_summary(lookback_days=30)
+                    acc_msg = notifier.fmt_holdings_accuracy(acc)
+                    if acc_msg:
+                        holdings_msg = holdings_msg.rstrip() + "\n\n" + acc_msg
+                except Exception as _e:
+                    print(f"  accuracy_summary failed: {_e}", flush=True)
+
+                if holdings_msg:
+                    print(f"Sending holdings daily report: {len(holdings_results)} stocks")
+                    notifier.send_message(holdings_msg)
+                else:
+                    print("Holdings analysis empty, skip daily report")
+            else:
+                print("No holdings configured, skip daily report")
+        except Exception as e:
+            print(f"Holdings daily report failed (non-fatal): {e}", flush=True)
     elif market in ("us_open", "us_mid"):
         label = "開盤後 30 分鐘 (10:00 EDT)" if market == "us_open" else "開盤後 2 小時 (11:30 EDT)"
         print(f"Running US {label}...")
@@ -430,8 +486,19 @@ def main() -> int:
             wl = watchlist_alerts.check_watchlist_alerts()
             idx = index_alerts.check_index_alerts()
             cry = index_alerts.check_crypto_alerts()
-            print(f"Alerts: watchlist={len(wl)} index={len(idx)} crypto={len(cry)}")
+            # 持倉停損 (盤中即時)
+            try:
+                import holdings_tracker
+                sl_breaches = holdings_tracker.check_stop_loss_breaches()
+            except Exception as _e:
+                print(f"  (停損檢查失敗: {_e})", flush=True)
+                sl_breaches = []
+            print(f"Alerts: watchlist={len(wl)} index={len(idx)} crypto={len(cry)} stop_loss={len(sl_breaches)}")
             msg = notifier.fmt_monitor_alerts(wl, idx, cry)
+            # 把停損訊息附在 monitor 最前面 (最重要)
+            if sl_breaches:
+                sl_msg = notifier.fmt_stop_loss_alerts(sl_breaches)
+                msg = sl_msg + "\n\n" + msg if msg else sl_msg
             if not msg:
                 print("無新觸發警報，跳過推播")
                 return 0

@@ -339,8 +339,8 @@ watchlist = parse_watchlist(watchlist_raw)
 # ---------------------------------------------------------------------------
 # Tabs
 # ---------------------------------------------------------------------------
-tab_wl, tab_tw, tab_pulse, tab_growth, tab_stock, tab_us, tab_mood, tab_bt, tab_track = st.tabs(
-    ["📋 自選股", "🇹🇼 台股篩選", "🚀 強勢族群", "🌱 成長動能", "🔍 個股分析",
+tab_wl, tab_hold, tab_tw, tab_pulse, tab_growth, tab_stock, tab_us, tab_mood, tab_bt, tab_track = st.tabs(
+    ["📋 自選股", "💼 持倉分析", "🇹🇼 台股篩選", "🚀 強勢族群", "🌱 成長動能", "🔍 個股分析",
      "🇺🇸 美股 Top 5", "🧭 市場情緒", "📊 回測勝率", "📈 推薦追蹤"]
 )
 
@@ -734,6 +734,177 @@ cron 每 30 分執行一次 (24x7)。
                 _send_tg(msg, "盤中警報")
         else:
             st.info("目前無新觸發警報")
+
+
+# =============================================================================
+# Tab — 持倉分析 (15 檔 TW, 每天 15:00 完整 Gemini 分析 + 推播)
+# =============================================================================
+with tab_hold:
+    st.subheader("持倉分析 (台股, 上限 15 檔)")
+    st.caption(
+        "管理已持有的台股. 盤後 15:00 cron 會對每檔做完整分析: "
+        "技術 + 籌碼 + 新聞 + Gemini 給「持有/加碼/減碼/出清」建議, "
+        "含短中期目標價 + 停損 + 隔日漲機率, 並 TG 推播."
+    )
+
+    import holdings_store
+    import holdings_analyzer
+    import holdings_tracker
+
+    current_h = holdings_store.load_holdings()
+
+    # 準確率摘要 (歷史) — 在頂端顯示
+    try:
+        acc = holdings_tracker.accuracy_summary(lookback_days=30)
+        if acc and acc.get("total"):
+            cAa, cAb, cAc = st.columns(3)
+            cAa.metric("過去 30 天預測", f"{acc['accuracy_pct']}%",
+                       delta=f"{acc['correct']}/{acc['total']} 次", delta_color="off")
+            high_prob = acc.get("by_prob_range", {}).get(">=70%", {})
+            if high_prob.get("total"):
+                hp_pct = round(high_prob["correct"] / high_prob["total"] * 100, 1)
+                cAb.metric("高信心預測 (≥70%)", f"{hp_pct}%",
+                           delta=f"{high_prob['correct']}/{high_prob['total']}",
+                           delta_color="off")
+    except Exception:
+        pass
+
+    cH1, cH2 = st.columns(2)
+    with cH1:
+        st.markdown("**新增持倉**")
+        h_sid = st.text_input("代號", placeholder="例 2330", key="h_sid")
+        h_name = st.text_input("名稱 (可選)", placeholder="例 台積電", key="h_name")
+        h_entry = st.number_input("進場價 (可選)", min_value=0.0, value=0.0, step=0.5, key="h_entry")
+        h_shares = st.number_input("持有張數 (可選)", min_value=0, value=0, step=1, key="h_shares")
+        h_note = st.text_input("備註 (可選)", placeholder="例 AI 主軸長線持有", key="h_note")
+        if st.button("加入持倉", use_container_width=True, type="primary",
+                      key="h_add", disabled=len(current_h) >= 15):
+            if h_sid.strip():
+                ep = float(h_entry) if h_entry > 0 else None
+                sh = int(h_shares) if h_shares > 0 else None
+                ok = holdings_store.add_holding(
+                    h_sid.strip().upper(), h_name.strip(), ep, sh, h_note.strip()
+                )
+                if ok:
+                    st.success(f"已加入 {h_sid}")
+                    st.rerun()
+                else:
+                    st.error("加入失敗 (可能已達 15 檔上限)")
+
+    with cH2:
+        st.markdown(f"**目前持倉 ({len(current_h)} / 15)**")
+        if not current_h:
+            st.info("還沒新增, 從左邊加入.")
+        else:
+            for it in current_h:
+                sid = it.get("stock_id", "")
+                nm = it.get("name", "")
+                ep = it.get("entry_price")
+                sh = it.get("shares")
+                note = it.get("note", "")
+                added = it.get("added_date", "")
+                cR1, cR2 = st.columns([7, 2])
+                with cR1:
+                    info_str = f"**{sid}** {nm}"
+                    sub_parts = []
+                    if ep: sub_parts.append(f"進場 {ep}")
+                    if sh: sub_parts.append(f"{sh} 張")
+                    if added: sub_parts.append(f"加入 {added}")
+                    if note: sub_parts.append(note)
+                    if sub_parts:
+                        info_str += "  \n<span style='color:#888;font-size:0.85em'>" + " · ".join(sub_parts) + "</span>"
+                    st.markdown(info_str, unsafe_allow_html=True)
+                with cR2:
+                    if st.button("移除", key=f"hdel_{sid}"):
+                        holdings_store.remove_holding(sid)
+                        st.rerun()
+
+    st.divider()
+    st.markdown("**立即執行分析**")
+    cBT1, cBT2 = st.columns([1, 1])
+    with cBT1:
+        run_analysis = st.button("跑一次 Gemini 分析", use_container_width=True, type="primary",
+                                  key="h_run_analysis", disabled=not current_h)
+    with cBT2:
+        send_h_tg = st.button("推到 TG", use_container_width=True, key="h_send_tg",
+                               disabled=not (current_h and notifier.is_configured()))
+
+    if run_analysis:
+        with st.spinner("分析中…(每檔約 5-10 秒)"):
+            try:
+                results = holdings_analyzer.analyze_all_holdings()
+                st.session_state["h_results"] = results
+            except Exception as e:
+                st.error(f"分析失敗: {e}")
+
+    h_results = st.session_state.get("h_results", [])
+    if h_results:
+        # 摘要表
+        rows = []
+        for h in h_results:
+            tech = h.get("tech", {}) or {}
+            adv = h.get("advice", {}) or {}
+            ep = h.get("entry_price")
+            cur = tech.get("current", 0)
+            roi = ((cur / ep - 1) * 100) if (ep and ep > 0) else None
+            rows.append({
+                "代號": h["stock_id"],
+                "名稱": h["name"],
+                "現價": tech.get("current"),
+                "今日%": tech.get("today_pct"),
+                "ROI%": round(roi, 2) if roi is not None else None,
+                "建議": adv.get("action"),
+                "信心%": adv.get("confidence"),
+                "隔日漲%": adv.get("next_day_up_prob"),
+                "短期目標": adv.get("target_short"),
+                "停損": adv.get("stop_loss"),
+            })
+        _show_table(pd.DataFrame(rows), market="TW")
+
+        with st.expander("詳細分析", expanded=False):
+            for h in h_results:
+                tech = h.get("tech", {}) or {}
+                chip = h.get("chip", {}) or {}
+                adv = h.get("advice", {}) or {}
+                news = h.get("news", []) or []
+                cur = tech.get("current", 0)
+                today = tech.get("today_pct", 0)
+                action = adv.get("action", "持有")
+                action_color = {
+                    "持有": "#888",
+                    "加碼": "#c62828",
+                    "減碼": "#f57c00",
+                    "出清": "#2e7d32",
+                }.get(action, "#888")
+                st.markdown(
+                    f"<div style='padding:10px; border-left:4px solid {action_color}; "
+                    f"margin-bottom:6px; background:#fafafa;'>"
+                    f"<b>{h['stock_id']} {h['name']}</b> {cur} ({today:+.2f}%) · "
+                    f"<b style='color:{action_color}'>{action}</b> "
+                    f"信心 {adv.get('confidence',0)}% · 隔日漲 {adv.get('next_day_up_prob',50)}%<br>"
+                    f"<span style='font-size:0.9em'>"
+                    f"目標: 短 {adv.get('target_short','—')} / 中 {adv.get('target_mid','—')} · "
+                    f"停損 {adv.get('stop_loss','—')}<br>"
+                    f"理由: {adv.get('reason','—')}<br>"
+                    f"風險: {adv.get('risks','—')}"
+                    f"</span>"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+                if news:
+                    for n in news[:3]:
+                        st.markdown(f"- [{n.get('title','')}]({n.get('link','')})")
+
+    if send_h_tg:
+        if not h_results:
+            with st.spinner("先跑一次分析..."):
+                try:
+                    h_results = holdings_analyzer.analyze_all_holdings()
+                    st.session_state["h_results"] = h_results
+                except Exception as e:
+                    st.error(f"分析失敗: {e}")
+        if h_results:
+            _send_tg(notifier.fmt_holdings_daily(h_results), "持倉日報")
 
 
 # =============================================================================

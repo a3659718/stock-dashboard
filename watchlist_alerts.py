@@ -133,8 +133,6 @@ def _fetch_today_status(stock_id: str, market: str = "TW") -> Optional[Dict]:
             return r
     return None
 
-        return None
-
 
 def _get_threshold_bucket(pct: float, threshold: float) -> float:
     """把漲跌幅換算成 threshold 的整數倍.
