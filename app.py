@@ -99,6 +99,83 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+# ---------------------------------------------------------------------------
+# 紅綠色 helper — 篩選表格漲跌欄位上色
+# 台股 (TW): 紅漲 / 綠跌  ; 美股 (US): 綠漲 / 紅跌
+# ---------------------------------------------------------------------------
+def _style_pct(df, market: str = "TW", pct_cols: list = None):
+    """回傳 pandas Styler, 漲跌% 欄位上紅/綠色."""
+    if df is None or (hasattr(df, "empty") and df.empty):
+        return df
+    if pct_cols is None:
+        # auto-detect 含 "%" 的欄位
+        pct_cols = [c for c in df.columns if "%" in str(c) or str(c).endswith("pct")]
+    pct_cols = [c for c in pct_cols if c in df.columns]
+    if not pct_cols:
+        return df
+
+    def _c(v):
+        try:
+            x = float(v)
+        except (TypeError, ValueError):
+            return ""
+        if pd.isna(x):
+            return ""
+        if market.upper() == "TW":
+            if x > 0:
+                return "color: #c62828; font-weight: bold"
+            if x < 0:
+                return "color: #2e7d32; font-weight: bold"
+        else:  # US 反過來
+            if x > 0:
+                return "color: #2e7d32; font-weight: bold"
+            if x < 0:
+                return "color: #c62828; font-weight: bold"
+        return ""
+
+    try:
+        return df.style.applymap(_c, subset=pct_cols)
+    except Exception:
+        return df
+
+
+def _show_table(df, market: str = "TW", pct_cols: list = None, **kwargs):
+    """st.dataframe wrapper — 漲跌自動上色."""
+    if df is None or (hasattr(df, "empty") and df.empty):
+        st.dataframe(df, **kwargs)
+        return
+    styled = _style_pct(df, market, pct_cols)
+    kwargs.setdefault("use_container_width", True)
+    kwargs.setdefault("hide_index", True)
+    st.dataframe(styled, **kwargs)
+
+
+def _send_tg(msg: str, label: str = "推播") -> bool:
+    """統一的 TG 推送 + 顯示成功/失敗 toast.
+    用在所有「Send to TG」按鈕, 確保使用者看得到結果.
+    """
+    if not msg or not msg.strip():
+        st.warning(f"{label}：沒有可推送內容")
+        return False
+    if not notifier.is_configured():
+        st.error(
+            f"{label} 失敗：TG bot 未設定。\n"
+            "請到 Streamlit Cloud → App → Settings → Secrets 補 "
+            "`TELEGRAM_BOT_TOKEN` 跟 `TELEGRAM_CHAT_ID`"
+        )
+        return False
+    try:
+        ok, info = notifier.send_message(msg)
+        if ok:
+            st.success(f"已推送到 TG：{label}")
+            return True
+        st.error(f"{label} 失敗：{info}")
+        return False
+    except Exception as e:
+        st.error(f"{label} 例外：{type(e).__name__}: {e}")
+        return False
+
+
 # 頂部日期 banner
 import pytz
 _tw_now = dt.datetime.now(pytz.timezone("Asia/Taipei"))
@@ -568,12 +645,43 @@ with tab_wl:
                         st.rerun()
 
     st.divider()
+
+    # ===== 自訂警報門檻 =====
+    with st.expander("⚙️ 警報門檻設定 (自選股)", expanded=False):
+        st.caption("設定自選股盤中觸發門檻 (跟今日開盤或昨收較極端的那個)。 一個方向 × 門檻 一天最多觸發 1 次。")
+        cur_tw = watchlist_alerts.get_thresholds_for("TW")
+        cur_us = watchlist_alerts.get_thresholds_for("US")
+        tcfg1, tcfg2 = st.columns(2)
+        with tcfg1:
+            st.markdown("**台股 (TW)**")
+            tw1 = st.number_input("第一門檻 %", min_value=0.5, max_value=30.0,
+                                   value=float(cur_tw[0] if len(cur_tw) > 0 else 5.0),
+                                   step=0.5, key="thr_tw_1")
+            tw2 = st.number_input("第二門檻 %", min_value=0.5, max_value=30.0,
+                                   value=float(cur_tw[1] if len(cur_tw) > 1 else 10.0),
+                                   step=0.5, key="thr_tw_2")
+        with tcfg2:
+            st.markdown("**美股 (US)**")
+            us1 = st.number_input("第一門檻 %", min_value=0.5, max_value=30.0,
+                                   value=float(cur_us[0] if len(cur_us) > 0 else 5.0),
+                                   step=0.5, key="thr_us_1")
+            us2 = st.number_input("第二門檻 %", min_value=0.5, max_value=30.0,
+                                   value=float(cur_us[1] if len(cur_us) > 1 else 10.0),
+                                   step=0.5, key="thr_us_2")
+        if st.button("儲存門檻", use_container_width=True, key="save_thresholds"):
+            ok1 = watchlist_alerts.save_thresholds_for("TW", [tw1, tw2])
+            ok2 = watchlist_alerts.save_thresholds_for("US", [us1, us2])
+            if ok1 and ok2:
+                st.success(f"已儲存。TW: ±{tw1}% / ±{tw2}% · US: ±{us1}% / ±{us2}%")
+            else:
+                st.error("儲存失敗 (檢查 Google Sheets 設定)")
+
     st.markdown("**警報設定**")
     st.markdown("""
-- 自選股 (基準 = 入場價或第一次監控時的市價):
-  - 台股 (TW) 每 ±2.5% 跳通知 (±2.5%、±5%、±7.5%…)
-  - 美股 (US) 每 ±5% 跳通知 (±5%、±10%、±15%…)
-  - 訊息會顯示 上次門檻 → 本次門檻 + 差異
+- 自選股 (vs 今日開盤 或 vs 昨收, 取較極端的當主):
+  - 預設兩個門檻: ±5%、±10% (可在上方自訂)
+  - 一天 4 個 bucket (5%↑、10%↑、5%↓、10%↓), 每個最多觸發 1 次
+  - 訊息含主錨點 + 對照另一個錨點
 - 大盤監控 (該市場休市/閉市時段自動跳過):
   - 日經 225 每 ±150 點
   - 韓國 KOSPI 每 ±50 點
@@ -620,15 +728,10 @@ cron 每 30 分執行一次 (24x7)。
                 st.markdown("加密貨幣觸發:")
                 for a in cry:
                     st.text(f"  {a['name']}: ${a['current']} ({a['change_pct']:+.2f}%) 觸發 {int(a['threshold_bucket'])}%")
-            if st.button("✈️ Send 警報 to TG", use_container_width=True, key="send_alerts_tg",
+            if st.button("Send 警報 to TG", use_container_width=True, key="send_alerts_tg",
                           disabled=not notifier.is_configured()):
                 msg = notifier.fmt_monitor_alerts(wl, idx, cry)
-                if msg:
-                    ok, info = notifier.send_message(msg)
-                    if ok:
-                        st.success("已送出 ✅")
-                    else:
-                        st.error(info)
+                _send_tg(msg, "盤中警報")
         else:
             st.info("目前無新觸發警報")
 
@@ -794,7 +897,7 @@ with tab_tw:
                 "stock_id": "代號", "stock_name": "名稱", "market": "市場",
                 "hit_count": "命中數", "hits_label": "命中條件",
             })
-            st.dataframe(display, use_container_width=True, hide_index=True)
+            _show_table(display, market="TW")
 
             # ===== Watchlist 命中即推送 =====
             if watchlist and auto_alert_watchlist and notifier.is_configured():
@@ -833,11 +936,7 @@ with tab_tw:
 
             if send_tg_btn:
                 msg = notifier.fmt_tw_combined(view, latest_str, market_label="台股篩選")
-                ok, info = notifier.send_message(msg)
-                if ok:
-                    st.success("已送出至 Telegram ✅")
-                else:
-                    st.error(f"送出失敗: {info}")
+                _send_tg(msg, "台股篩選")
 
 
 # =============================================================================
@@ -932,17 +1031,17 @@ with tab_pulse:
         st.markdown("#### 🇹🇼 台股 — 資金主流前 3 族群")
         themes_df = tw_open.get("themes")
         if themes_df is not None and not themes_df.empty:
-            st.dataframe(themes_df, use_container_width=True, hide_index=True)
+            _show_table(themes_df, market="TW")
         catalysts_tw = tw_open.get("catalysts", {})
         for p in tw_open.get("picks", []):
             theme = p["theme"]
             stocks = p["stocks"]
             if stocks is None or stocks.empty:
                 continue
-            with st.expander(f"📌 [{theme}] 動能潛在股 (3 檔)", expanded=True):
+            with st.expander(f"[{theme}] 動能潛在股 (3 檔)", expanded=True):
                 show_cols = [c for c in ["stock_id", "stock_name", "現價", "今日%", "5日%", "量比", "score"]
                               if c in stocks.columns]
-                st.dataframe(stocks[show_cols], use_container_width=True, hide_index=True)
+                _show_table(stocks[show_cols], market="TW")
                 # 催化劑
                 if catalysts_tw:
                     for _, row in stocks.iterrows():
@@ -965,11 +1064,7 @@ with tab_pulse:
         if st.button("✈️ Send 台股開盤分析 to TG", key="tw_open_send",
                       disabled=not notifier.is_configured(), use_container_width=True):
             ai_text = st.session_state.get("tw_open_ai", "")
-            ok, info = notifier.send_message(notifier.fmt_tw_open_picks(tw_open, ai_text=ai_text))
-            if ok:
-                st.success("已送出 ✅")
-            else:
-                st.error(info)
+            _send_tg(notifier.fmt_tw_open_picks(tw_open, ai_text=ai_text), "台股開盤分析")
 
     # 顯示美股開盤結果
     us_open = st.session_state.get("us_open_data")
@@ -986,28 +1081,28 @@ with tab_pulse:
                             delta=f"{acc['correct']}/{acc['n']} 次", delta_color="off")
             st.caption(f"{pred.get('explanation','')}  ｜ 開盤跳空 {pred.get('gap_pct',0):+.2f}%、30 分走勢 {pred.get('drift_pct',0):+.2f}%、量比 {pred.get('vol_ratio',1):.1f}x")
 
-        st.markdown("#### 🇺🇸 美股 — 板塊輪動前 3")
+        st.markdown("#### 美股 — 板塊輪動前 3")
         sectors_df = us_open.get("sectors")
         if sectors_df is not None and not sectors_df.empty:
-            st.dataframe(sectors_df, use_container_width=True, hide_index=True)
+            _show_table(sectors_df, market="US")
         catalysts_us = us_open.get("catalysts", {})
         for sp in us_open.get("sector_picks", []):
             sec = sp["sector"]
             stocks = sp["stocks"]
             if stocks is None or stocks.empty:
                 continue
-            with st.expander(f"📌 [{sec}] 動能潛在股 (3 檔)", expanded=False):
-                st.dataframe(stocks, use_container_width=True, hide_index=True)
+            with st.expander(f"[{sec}] 動能潛在股 (3 檔)", expanded=False):
+                _show_table(stocks, market="US")
                 if catalysts_us:
                     for _, row in stocks.iterrows():
                         sym = str(row.get("symbol", ""))
                         cat = catalysts_us.get(sym)
                         if cat:
-                            st.markdown(f"💡 **{sym}** — {cat}")
+                            st.markdown(f"**{sym}** — {cat}")
         growth = us_open.get("growth")
         if growth is not None and not growth.empty:
-            st.markdown("##### 🚀 成長動能極強 / 近期 IPO Top 5")
-            st.dataframe(growth, use_container_width=True, hide_index=True)
+            st.markdown("##### 成長動能極強 / 近期 IPO Top 5")
+            _show_table(growth, market="US")
             if catalysts_us:
                 for _, row in growth.iterrows():
                     sym = str(row.get("symbol", ""))
@@ -1029,11 +1124,7 @@ with tab_pulse:
         if st.button("✈️ Send 美股開盤分析 to TG", key="us_open_send",
                       disabled=not notifier.is_configured(), use_container_width=True):
             ai_text = st.session_state.get("us_open_ai", "")
-            ok, info = notifier.send_message(notifier.fmt_us_open_picks(us_open, ai_text=ai_text))
-            if ok:
-                st.success("已送出 ✅")
-            else:
-                st.error(info)
+            _send_tg(notifier.fmt_us_open_picks(us_open, ai_text=ai_text), "美股開盤分析")
 
     # === 潛伏題材股 ===
     stealth_data = st.session_state.get("stealth", {})
@@ -1055,13 +1146,10 @@ with tab_pulse:
             disabled=not notifier.is_configured()
         )
         if send_stealth_tg and notifier.is_configured():
-            ok, info = notifier.send_message(
-                notifier.fmt_stealth_picks(stealth_df, stealth_data.get("hot_themes"))
+            _send_tg(
+                notifier.fmt_stealth_picks(stealth_df, stealth_data.get("hot_themes")),
+                "潛伏題材股",
             )
-            if ok:
-                st.success("已送出 ✅")
-            else:
-                st.error(info)
 
     # === 熱門題材區塊 ===
     themes_data = st.session_state.get("themes", {})
@@ -1076,30 +1164,30 @@ with tab_pulse:
             df = leaders_map.get(theme)
             if df is None or df.empty:
                 continue
-            with st.expander(f"📌 {theme}", expanded=(themes_df.iloc[0]["題材"] == theme)):
+            with st.expander(f"{theme}", expanded=(themes_df.iloc[0]["題材"] == theme)):
                 show = df[["stock_id", "stock_name", "現價", "今日%", "振幅%", "量比", "5日%"]].copy()
                 show = show.rename(columns={"stock_id": "代號", "stock_name": "名稱"})
-                st.dataframe(show, use_container_width=True, hide_index=True)
+                _show_table(show, market="TW")
 
     # === 證交所產業分類區塊 ===
     pulse = st.session_state.get("pulse", {})
     sectors = pulse.get("sectors")
     leaders = pulse.get("leaders")
     if sectors is not None and not sectors.empty:
-        st.markdown("### 🏢 證交所產業分類 Top 5")
+        st.markdown("### 證交所產業分類 Top 5")
         first_col = sectors.columns[0]
         top5 = sectors.head(5).copy()
-        st.dataframe(
+        _show_table(
             top5.rename(columns={first_col: "產業", "avg_change": "平均%", "median_change": "中位%",
                                  "up_count": "上漲家數", "n": "樣本數", "up_ratio": "上漲比率"}),
-            use_container_width=True, hide_index=True,
+            market="TW",
         )
         if leaders is not None and not leaders.empty:
             with st.expander("各產業龍頭 (前 5 名 + 盤中資訊)"):
                 show_cols = [c for c in ["industry_category", "stock_id", "stock_name",
                                           "現價", "今日%", "振幅%", "量比", "5日%"]
                              if c in leaders.columns]
-                st.dataframe(leaders[show_cols], use_container_width=True, hide_index=True)
+                _show_table(leaders[show_cols], market="TW")
 
         # 異常觸發推播
         if auto_send_on_alert and notifier.is_configured():
@@ -1116,11 +1204,7 @@ with tab_pulse:
         st.info("按上方按鈕開始分析 (盤前/休市時 yfinance 資料可能尚未更新)。")
 
     if send_pulse_tg and (sectors is not None and not sectors.empty):
-        ok, info = notifier.send_message(notifier.fmt_strong_sectors(sectors))
-        if ok:
-            st.success("已送出 ✅")
-        else:
-            st.error(info)
+        _send_tg(notifier.fmt_strong_sectors(sectors), "強勢族群")
 
 
 # =============================================================================
@@ -1163,12 +1247,8 @@ with tab_growth:
                     cat = row.get("催化劑", "")
                     if cat:
                         st.markdown(f"- **{code} {nm}** — {cat}")
-        if send_growth_tg and notifier.is_configured():
-            ok, info = notifier.send_message(notifier.fmt_growth_picks(picks))
-            if ok:
-                st.success("已送出 ✅")
-            else:
-                st.error(info)
+        if send_growth_tg:
+            _send_tg(notifier.fmt_growth_picks(picks), "成長動能 Top 10")
 
 
 # =============================================================================
@@ -1426,14 +1506,11 @@ with tab_stock:
         # 推送 AI 到 TG
         last_ai = st.session_state.get("last_ai")
         if last_ai and last_ai.get("sid") == sid and notifier.is_configured():
-            if st.button("✈️ Send AI 分析 to TG", key="send_ai_tg", use_container_width=True):
-                ok, info = notifier.send_message(
-                    notifier.fmt_ai_analysis(sid, full["name"] or "", last_ai["text"])
+            if st.button("Send AI 分析 to TG", key="send_ai_tg", use_container_width=True):
+                _send_tg(
+                    notifier.fmt_ai_analysis(sid, full["name"] or "", last_ai["text"]),
+                    f"AI 分析 {sid}",
                 )
-                if ok:
-                    st.success("AI 分析已推送 ✅")
-                else:
-                    st.error(info)
 
     # ================== 🖼️ 上傳 K 線圖讓 Gemini 分析 ==================
     st.divider()
@@ -1486,14 +1563,11 @@ with tab_stock:
         with st.expander("🤖 上次圖片分析", expanded=False):
             st.markdown(last_img)
 
-    if send_image_tg and last_img and notifier.is_configured():
-        ok, info = notifier.send_message(
-            notifier.fmt_ai_analysis("圖片分析", "上傳圖片", last_img)
+    if send_image_tg and last_img:
+        _send_tg(
+            notifier.fmt_ai_analysis("圖片分析", "上傳圖片", last_img),
+            "圖片 AI 分析",
         )
-        if ok:
-            st.success("已送出 ✅")
-        else:
-            st.error(info)
 
 
 with tab_us:
@@ -1533,7 +1607,7 @@ with tab_us:
         st.info("資料抓取中或無命中標的，請稍後再試。")
     else:
         show_df = top_picks.drop(columns=["近期新聞"], errors="ignore")
-        st.dataframe(show_df, use_container_width=True, hide_index=True)
+        _show_table(show_df, market="US")
         # 催化劑顯示
         if "催化劑" in top_picks.columns and top_picks["催化劑"].astype(str).str.len().sum() > 0:
             with st.expander("💡 各檔上漲原因 / 催化劑", expanded=True):
@@ -1553,11 +1627,7 @@ with tab_us:
                 st.markdown("---")
 
         if send_us_tg:
-            ok, info = notifier.send_message(notifier.fmt_us_top_picks(top_picks, fg))
-            if ok:
-                st.success("已送出 ✅")
-            else:
-                st.error(info)
+            _send_tg(notifier.fmt_us_top_picks(top_picks, fg), "美股 Top 5")
 
 
 # =============================================================================

@@ -246,3 +246,6 @@ def find_picks_for_holiday(macro_context: str = "", top_n: int = 5) -> List[Dict
     except Exception as e:
         print(f"[potential_picker] find_picks_for_holiday failed: {e}", flush=True)
         return []
+
+# 註: 已拿掉 _exclude_messy_chip — 籌碼資料 T+1 落後, 容易錯過外資出貨後反彈動能
+# 如將來要恢復可參考 chip_filter.fetch_messy_map()

@@ -213,6 +213,8 @@ def check_index_alerts() -> List[Dict]:
             sym_state.clear()
             sym_state["date"] = today_str
             sym_state["last_bucket"] = 0
+            sym_state["last_alert_diff"] = 0.0
+            sym_state["last_alert_price"] = round(today_open, 2)
             sym_state["consecutive_count"] = 0
             sym_state["last_direction"] = "none"
 
@@ -220,15 +222,19 @@ def check_index_alerts() -> List[Dict]:
         if bucket != last_bucket and abs(bucket) >= threshold:
             # 觸發新門檻
             direction = "漲" if diff > 0 else "跌"
-            # 統計連續同方向
             last_direction = sym_state.get("last_direction", "none")
             if direction == last_direction:
                 sym_state["consecutive_count"] = sym_state.get("consecutive_count", 0) + 1
             else:
                 sym_state["consecutive_count"] = 1
                 sym_state["last_direction"] = direction
-
             consecutive = sym_state["consecutive_count"]
+
+            # 上次警報資訊 (給「自上次」對比用)
+            last_alert_diff = float(sym_state.get("last_alert_diff", 0))
+            last_alert_price = float(sym_state.get("last_alert_price", today_open))
+            leg_pts = round(diff - last_alert_diff, 2)
+
             alerts.append({
                 "symbol": sym,
                 "name": cfg["name"],
@@ -236,12 +242,17 @@ def check_index_alerts() -> List[Dict]:
                 "today_open": round(today_open, 2),
                 "current": round(current, 2),
                 "diff": round(diff, 2),
+                "last_alert_price": round(last_alert_price, 2),
+                "last_alert_diff": round(last_alert_diff, 2),
+                "leg_pts": leg_pts,
                 "direction": direction,
                 "threshold_bucket": bucket,
                 "consecutive": consecutive,
-                "warning": consecutive >= 2,  # 連續 2 次以上加警示
+                "warning": consecutive >= 2,
             })
             sym_state["last_bucket"] = bucket
+            sym_state["last_alert_diff"] = round(diff, 2)
+            sym_state["last_alert_price"] = round(current, 2)
 
     state["index_alerts"] = idx_state
     watchlist_store.save_monitor_state(state)

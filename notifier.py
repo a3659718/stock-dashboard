@@ -68,15 +68,29 @@ def _fmt_num(v, suffix: str = "") -> str:
 def fmt_tw_combined(combined_df, latest_date_str: str, market_label: str, max_n: int = 25) -> str:
     """台股篩選結果訊息（含現價、今日%、投信張數、投本比、量比）。"""
     if combined_df is None or combined_df.empty:
-        return f"<b>📊 {market_label} 台股篩選 ({latest_date_str})</b>\n今日無符合條件的標的。"
+        return f"<b>{market_label} 台股篩選 ({latest_date_str})</b>\n今日無符合條件的標的。"
 
     # 表頭
     n_show = min(max_n, len(combined_df))
     lines = [
-        f"<b>📊 {market_label} 台股篩選 ({latest_date_str})</b>",
+        f"<b>{market_label} 台股篩選 ({latest_date_str})</b>",
         f"共 <b>{len(combined_df)}</b> 檔符合，顯示前 {n_show} 檔",
         "",
     ]
+
+    def _is_meaningful(v) -> bool:
+        """判斷欄位是否有意義 — 0 / NaN / None / '' 視為「沒命中」, 不顯示."""
+        if v is None or v == "":
+            return False
+        try:
+            f = float(v)
+            if f != f:  # NaN
+                return False
+            if f == 0:
+                return False
+            return True
+        except (TypeError, ValueError):
+            return bool(str(v).strip())
 
     for i, row in combined_df.head(max_n).iterrows():
         sid = row.get("stock_id", "")
@@ -87,36 +101,37 @@ def fmt_tw_combined(combined_df, latest_date_str: str, market_label: str, max_n:
         # 第 1 行：代號 名稱 (n項)
         lines.append(f"{i+1}. <b><code>{sid}</code></b> {name} <b>({hits}項)</b>")
 
-        # 第 2 行：價量
+        # 第 2 行：價量 — 只顯示有意義的欄位
         price_part = []
-        if "現價" in combined_df.columns and row.get("現價") is not None:
-            price_part.append(f"💰{_fmt_num(row.get('現價'))}")
-        if "今日%" in combined_df.columns and row.get("今日%") is not None:
+        if _is_meaningful(row.get("現價")):
+            price_part.append(f"{_fmt_num(row.get('現價'))}")
+        if _is_meaningful(row.get("今日%")):
             v = row.get("今日%")
-            arrow = "🔺" if (isinstance(v, (int, float)) and v > 0) else ("🔻" if (isinstance(v, (int, float)) and v < 0) else "▪")
-            price_part.append(f"{arrow}{_fmt_num(v, '%')}")
-        if "量比" in combined_df.columns and row.get("量比") is not None:
-            price_part.append(f"📊量比{_fmt_num(row.get('量比'), 'x')}")
+            sign = "+" if isinstance(v, (int, float)) and v > 0 else ""
+            price_part.append(f"{sign}{_fmt_num(v, '%')}")
+        if _is_meaningful(row.get("量比")):
+            price_part.append(f"量比{_fmt_num(row.get('量比'), 'x')}")
         if price_part:
             lines.append(f"   {' · '.join(price_part)}")
 
-        # 第 3 行：法人
+        # 第 3 行：法人 — 只顯示有買賣超的
         inst_part = []
-        if "投信今日(張)" in combined_df.columns and row.get("投信今日(張)") is not None:
+        if _is_meaningful(row.get("投信今日(張)")):
             v = row.get("投信今日(張)")
             sign = "+" if isinstance(v, (int, float)) and v > 0 else ""
             inst_part.append(f"投信今日 {sign}{_fmt_num(v)}張")
-        if "投信5日(張)" in combined_df.columns and row.get("投信5日(張)") is not None:
+        if _is_meaningful(row.get("投信5日(張)")):
             v = row.get("投信5日(張)")
             sign = "+" if isinstance(v, (int, float)) and v > 0 else ""
             inst_part.append(f"5日累計 {sign}{_fmt_num(v)}張")
-        if "投本比%" in combined_df.columns and row.get("投本比%") is not None:
+        if _is_meaningful(row.get("投本比%")):
             inst_part.append(f"投本比 {_fmt_num(row.get('投本比%'), '%')}")
         if inst_part:
-            lines.append(f"   🏛️ {' · '.join(inst_part)}")
+            lines.append(f"   {' · '.join(inst_part)}")
 
-        # 第 4 行：命中條件
-        lines.append(f"   ✅ {labels}")
+        # 第 4 行：命中條件 (一定顯示, 因為這是篩選的核心)
+        if labels:
+            lines.append(f"   {labels}")
         lines.append("")
 
     return "\n".join(lines)
@@ -124,11 +139,11 @@ def fmt_tw_combined(combined_df, latest_date_str: str, market_label: str, max_n:
 
 def fmt_us_top_picks(df, fg: dict) -> str:
     if df is None or df.empty:
-        return "🇺🇸 美股 Top 5 推薦：今日無符合篩選條件的標的。"
+        return "美股 Top 5 推薦：今日無符合篩選條件的標的。"
     score = fg.get("score") if fg else None
     rating = fg.get("rating") if fg else None
     fg_line = f"恐慌指數 {round(score,1)} ({rating})" if score else "恐慌指數 N/A"
-    lines = [f"<b>🇺🇸 美股 Top 5 推薦</b> · {fg_line}", ""]
+    lines = [f"<b>美股 Top 5 推薦</b> · {fg_line}", ""]
     for i, row in df.head(5).iterrows():
         lines.append(
             f"{i+1}. <b><code>{row['symbol']}</code></b>  日 {row.get('daily_%')}% / 20d {row.get('20d_%')}% · 分數 {row['score']}"
@@ -139,8 +154,8 @@ def fmt_us_top_picks(df, fg: dict) -> str:
 
 def fmt_strong_sectors(sectors_df) -> str:
     if sectors_df is None or sectors_df.empty:
-        return "🇹🇼 即時強勢族群：尚未取得即時資料。"
-    lines = ["<b>🇹🇼 即時強勢族群 Top 5</b>", ""]
+        return "即時強勢族群：尚未取得即時資料。"
+    lines = ["<b>即時強勢族群 Top 5</b>", ""]
     for _, row in sectors_df.head(5).iterrows():
         lines.append(
             f"• {row.iloc[0]}  平均 {row['avg_change']:.2f}%  上漲 {int(row['up_count'])}/{int(row['n'])}"
@@ -245,7 +260,7 @@ def _fmt_asia_markets_block(asia: dict) -> list:
             name = s.get("market", "")
             last = s.get("last", 0)
             dp = s.get("daily_pct", 0)
-            arrow = "🔺" if dp > 0 else ("🔻" if dp < 0 else "▪")
+            arrow = "+" if dp > 0 else ("-" if dp < 0 else "▪")
             out.append(f"  {country} {name}: {last:,.0f}  {arrow}{dp:+.2f}%")
 
     if events:
@@ -259,7 +274,7 @@ def _fmt_asia_markets_block(asia: dict) -> list:
             name = ev.get("market", "")
             event_name = ev.get("event", "")
             msg = ev.get("msg", "")
-            severity_icon = "🚨" if ev.get("severity") == "high" else ("⚠️" if ev.get("severity") == "medium" else "💡")
+            severity_icon = "🚨" if ev.get("severity") == "high" else ("⚠️" if ev.get("severity") == "medium" else "")
             out.append(f"  {severity_icon} {country} {name} <b>[{event_name}]</b> {msg}")
     return out
 
@@ -305,7 +320,7 @@ def _fmt_external_signals_block() -> list:
 def fmt_tw_open_picks(data: dict, ai_text: str = "") -> str:
     """台股開盤後 30 分推播."""
     if data.get("error"):
-        return f"🇹🇼 台股開盤分析：{data['error']}"
+        return f"台股開盤分析：{data['error']}"
     lines = [f"<b>台股開盤後 30 分鐘 · 資金流向</b>"]
 
     # 加權指數即時 (盤中)
@@ -441,111 +456,102 @@ def fmt_tw_open_picks(data: dict, ai_text: str = "") -> str:
 
 
 def fmt_monitor_alerts(watchlist_alerts: list, index_alerts: list, crypto_alerts: list) -> str:
-    """盤中監控警報推播 (簡潔風格少 emoji)."""
+    """盤中監控警報推播 (極簡風格, 無 emoji)."""
     if not (watchlist_alerts or index_alerts or crypto_alerts):
         return ""
 
-    lines = ["<b>盤中監控警報</b>", ""]
+    lines = ["<b>盤中警報</b>", ""]
 
     if watchlist_alerts:
-        lines.append("------ 自選股價格警報 ------")
+        lines.append("<b>自選股</b>")
         for a in watchlist_alerts:
             sid = a.get("stock_id", "")
             name = a.get("name", "")
-            market = a.get("market", "")
             cur = a.get("current", 0)
-            base = a.get("base_price", 0)
-            prev_price = a.get("previous_price", base)
-            pct = a.get("current_pct", 0)
-            bucket = a.get("threshold_bucket", 0)
-            prev_bucket = a.get("previous_bucket", 0)
-            diff = a.get("diff_bucket", 0)
-            direction = a.get("direction", "")
-            step = a.get("threshold_step", 5)
+            d = a.get("direction", "")
+            thr = a.get("threshold", 0)
+            anchor_label = a.get("primary_anchor_label", "")
+            anchor_price = a.get("primary_anchor_price", 0)
+            primary_pct = a.get("primary_pct", 0)
+            today_pct = a.get("today_pct")
+            day_pct = a.get("day_pct")
 
-            sign_b = "+" if bucket > 0 else ""
-            sign_p = "+" if prev_bucket > 0 else ""
-            sign_d = "+" if diff > 0 else ""
-
-            lines.append(f"\n  <b>{sid} {name}</b> ({market})  {direction}")
-            lines.append(f"     現價 {cur} (基準 {base}, 累計 {pct:+.2f}%)")
-            lines.append(f"     本次門檻 {sign_b}{bucket}%  (上次 {sign_p}{prev_bucket}%)")
-            lines.append(f"     自上次警報變動: {sign_d}{diff}% ({prev_price} → {cur})")
-            lines.append(f"     [{market} 每 {step}% 一次]")
+            sign = "+" if primary_pct > 0 else ""
+            # 主行 (取較極端那個錨點)
+            lines.append(
+                f"<b><code>{sid}</code></b> {name} {cur} <b>{d}{int(thr)}%</b> "
+                f"{sign}{primary_pct:.2f}% vs {anchor_label} {anchor_price}"
+            )
+            # 次行 — 顯示另一個錨點對照 (如果兩個都有)
+            other_parts = []
+            if today_pct is not None and a.get("primary_anchor") != "open":
+                s2 = "+" if today_pct > 0 else ""
+                other_parts.append(f"開盤 {s2}{today_pct:.2f}%")
+            if day_pct is not None and a.get("primary_anchor") != "close":
+                s2 = "+" if day_pct > 0 else ""
+                other_parts.append(f"昨收 {s2}{day_pct:.2f}%")
+            if other_parts:
+                lines.append(f"  ({' · '.join(other_parts)})")
         lines.append("")
 
     if index_alerts:
-        lines.append("------ 大盤點數警報 ------")
+        lines.append("<b>大盤</b>")
         for a in index_alerts:
             country = a.get("country", "")
             name = a.get("name", "")
             diff = a.get("diff", 0)
             cur = a.get("current", 0)
-            direction = a.get("direction", "")
+            today_open = a.get("today_open", 0)
+            last_p = a.get("last_alert_price", today_open)
+            last_diff = a.get("last_alert_diff", 0)
+            leg = a.get("leg_pts", 0)
             consecutive = a.get("consecutive", 1)
-            warning = a.get("warning", False)
-            sign = "+" if diff > 0 else ""
-            lines.append(
-                f"  [{country}] {name}: {cur} ({sign}{int(diff)} 點 vs 開盤)"
-            )
-            if warning:
+
+            sign_t = "+" if diff > 0 else ""
+            sign_l = "+" if leg > 0 else ""
+
+            if abs(last_diff) < 0.01:
                 lines.append(
-                    f"     <b>連續 {consecutive} 次同方向{direction}</b>，注意趨勢延續"
+                    f"[{country}] {name} {cur:,.0f} "
+                    f"開盤至今 {sign_t}{int(diff)}點"
                 )
-                if direction == "跌":
-                    lines.append(f"     建議: 評估台股相關部位是否減碼")
+            else:
+                lines.append(
+                    f"[{country}] {name} {cur:,.0f} "
+                    f"自上次 {sign_l}{int(leg)}點 ({last_p:,.0f}→{cur:,.0f}, 開盤累計 {sign_t}{int(diff)}點)"
+                )
+            if consecutive >= 2:
+                d = a.get("direction", "")
+                lines.append(f"  連{consecutive}次同方向{d}")
         lines.append("")
 
     if crypto_alerts:
-        # 加密貨幣 — 分兩種 alert_type:
-        #   scheduled  → 固定排程 (台北 12:00 / 23:00), 比對上一個 slot
-        #   intra_slot → 同 slot 內變動 >= 2.5% 才發 (盤中急漲急跌)
         slot_zh = crypto_alerts[0].get("slot_label_zh", "")
         alert_type = crypto_alerts[0].get("alert_type", "scheduled")
-
         if alert_type == "intra_slot":
-            header = f"------ 加密貨幣盤中變動警報 ({slot_zh}) ------"
+            lines.append(f"<b>幣 ({slot_zh} 盤中變動)</b>")
         else:
-            header = f"------ 加密貨幣定期更新 ({slot_zh}) ------" if slot_zh else "------ 加密貨幣定期更新 ------"
-        lines.append(header)
+            lines.append(f"<b>幣 ({slot_zh})</b>" if slot_zh else "<b>幣</b>")
 
         for a in crypto_alerts:
             name = a.get("name", "")
             cur = a.get("current", 0)
             prev = a.get("prev_price")
-            prev_time = a.get("prev_time", "")
             pct = a.get("change_pct", 0)
-            abs_chg = a.get("change_abs", 0)
-            direction = a.get("direction", "")
             is_first = a.get("is_first", False)
             a_type = a.get("alert_type", "scheduled")
-            thr = a.get("threshold_pct", 2.5)
 
             sign = "+" if pct > 0 else ""
-            sign_abs = "+" if abs_chg > 0 else ""
-            lines.append(f"  <b>{name}</b>: ${cur:,.0f}")
-
             if a_type == "intra_slot":
-                # 同 slot 內急漲急跌警報
                 lines.append(
-                    f"     <b>{direction}</b> 跟今天{slot_zh}首次推播 ${prev:,.0f} 比"
+                    f"{name} {cur:,.0f} 自{slot_zh}首推 ${prev:,.0f} {sign}{pct:.2f}%"
                 )
-                lines.append(
-                    f"     變動: {sign_abs}{abs_chg:,.0f} ({sign}{pct:.2f}%, 超過 ±{thr}%)"
-                )
-                if prev_time:
-                    lines.append(f"     首次推播: {prev_time}")
             elif is_first or prev is None:
-                lines.append(f"     首次紀錄, 下次將顯示比對")
+                lines.append(f"{name} {cur:,.0f} (首次紀錄)")
             else:
                 lines.append(
-                    f"     {direction} (上次 ${prev:,.0f} → 本次 ${cur:,.0f})"
+                    f"{name} {cur:,.0f} 自上次 ${prev:,.0f} {sign}{pct:.2f}%"
                 )
-                lines.append(
-                    f"     變動: {sign_abs}{abs_chg:,.0f} ({sign}{pct:.2f}%)"
-                )
-                if prev_time:
-                    lines.append(f"     上次推播: {prev_time}")
         lines.append("")
 
     out = "\n".join(lines)
@@ -557,7 +563,7 @@ def fmt_monitor_alerts(watchlist_alerts: list, index_alerts: list, crypto_alerts
 def fmt_holiday_news(data: dict) -> str:
     """假日 22:00 重大消息推播."""
     if not data:
-        return "📅 假日重大消息: 資料不足"
+        return "假日重大消息: 資料不足"
 
     spy_pct = data.get("spy_pct", 0)
     qqq_pct = data.get("qqq_pct", 0)
@@ -664,7 +670,7 @@ def _fmt_potential_picks_block(picks: list) -> list:
 def fmt_us_close_analysis(data: dict) -> str:
     """美股收盤 +2h 推播 — 全日板塊 + 對台股次日開盤推理."""
     if not data:
-        return "🇺🇸 美股盤後分析：資料不足"
+        return "美股盤後分析：資料不足"
 
     spy_pct = data.get("spy_pct", 0)
     qqq_pct = data.get("qqq_pct", 0)
@@ -734,7 +740,7 @@ def fmt_us_close_analysis(data: dict) -> str:
 def fmt_tw_close_analysis(data: dict) -> str:
     """台股盤後 15:00 推播 — 全日表現 + 日韓比對 + AI 推理."""
     if not data:
-        return "🇹🇼 台股盤後分析：資料不足"
+        return "台股盤後分析：資料不足"
 
     twii_close = data.get("twii_close", 0)
     twii_pct = data.get("twii_pct", 0)
@@ -828,7 +834,7 @@ def fmt_tw_close_analysis(data: dict) -> str:
 def fmt_us_open_picks(data: dict, ai_text: str = "") -> str:
     """美股開盤後 30 分推播."""
     if data.get("error"):
-        return f"🇺🇸 美股開盤分析：{data['error']}"
+        return f"美股開盤分析：{data['error']}"
     lines = [f"<b>美股開盤後 30 分鐘 · 資金流向</b>"]
     # 大盤預測
     lines.extend(_fmt_prediction_block(data.get("prediction"), data.get("accuracy")))
@@ -841,14 +847,14 @@ def fmt_us_open_picks(data: dict, ai_text: str = "") -> str:
             sym = row.get("symbol")
             sname = row.get("sector", "")
             r1 = row.get("1d_%")
-            lines.append(f"🔥 <b>{sym} {sname}</b>  1d {r1:.2f}%")
+            lines.append(f"<b>{sym} {sname}</b>  1d {r1:.2f}%")
 
     sector_picks = data.get("sector_picks", [])
     catalysts = data.get("catalysts", {})
     events = data.get("events", {})
     if sector_picks:
         lines.append("")
-        lines.append("<b>📌 各板塊動能潛在股 (3 檔)</b>")
+        lines.append("<b>各板塊動能潛在股 (3 檔)</b>")
         for sp in sector_picks:
             sec = sp["sector"]
             stocks = sp["stocks"]
@@ -975,7 +981,7 @@ def fmt_watchlist_alert(stock_id: str, name: str, hits: list, latest_date: str,
         if row.get("現價") is not None:
             arrow = ""
             if isinstance(row.get("今日%"), (int, float)):
-                arrow = "🔺" if row["今日%"] > 0 else ("🔻" if row["今日%"] < 0 else "")
+                arrow = "+" if row["今日%"] > 0 else ("-" if row["今日%"] < 0 else "")
             body.append(f"現價 {_fmt_num(row.get('現價'))} {arrow}{_fmt_num(row.get('今日%'), '%')}")
         if row.get("量比") is not None:
             body.append(f"量比 {_fmt_num(row.get('量比'), 'x')}")
@@ -991,8 +997,8 @@ def fmt_watchlist_alert(stock_id: str, name: str, hits: list, latest_date: str,
         if row.get("投本比%") is not None:
             inst_parts.append(f"投本比 {_fmt_num(row.get('投本比%'), '%')}")
         if inst_parts:
-            body.append("🏛️ " + " · ".join(inst_parts))
-    body.append("✅ 命中: " + ", ".join(hits))
+            body.append(" " + " · ".join(inst_parts))
+    body.append("命中: " + ", ".join(hits))
     return "\n".join(body)
 
 

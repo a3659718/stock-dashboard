@@ -248,6 +248,10 @@ def get_tw_open_picks(top_themes_n: int = 3, picks_per_theme: int = 3) -> Dict:
         seen_sids.update(df["stock_id"].tolist())
         picks.append({"theme": theme, "stocks": df})
 
+    # 註: 之前有套籌碼過濾 (外資出貨/散戶接刀剔除), 但籌碼資料 T+1 落後,
+    # 容易錯過「外資賣完反彈」的動能股 (台玻 1802 案例), 已拿掉自動排除。
+    # 如要恢復可呼叫 chip_filter.fetch_messy_map() 標註 (不剔除).
+
     # 大盤盤型預測 + 評估歷史準確率
     prediction = market_predictor.predict_tw_pattern()
     if not prediction.get("error"):

@@ -363,6 +363,7 @@ def pick_next_day_breakout(top_n: int = 3, max_scan: int = 150) -> List[Dict]:
     if not top10:
         return []
 
+    # 註: 已拿掉自動籌碼過濾 — 籌碼 T+1 落後, 易錯過反彈動能 (台玻案例)
     return _gemini_finalize_breakout(top10, top_n)
 
 
