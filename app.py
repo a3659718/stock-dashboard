@@ -1414,27 +1414,38 @@ with tab_pulse:
                              if c in leaders.columns]
                 _show_table(leaders[show_cols], market="TW")
 
-        # 異常觸發推播
+        # 異常觸發推播 (任何格式化錯誤都不能炸掉整個 app)
         if auto_send_on_alert and notifier.is_configured():
-            top1 = sectors.iloc[0]
-            avg = float(top1["avg_change"])
-            if avg >= 1.5:
-                today_key = dt.date.today().isoformat()
-                pulse_fp = f"strong_sector_{today_key}_{top1[first_col]}"
-                if _should_send_once(pulse_fp):
-                    notifier.send_message(notifier.fmt_strong_sectors(
-                        sectors, leaders_map=leaders, themes_df=themes_df, theme_leaders=leaders_map,
-                    ))
-                    st.toast("已推送強勢族群通知", icon="🚀")
+            try:
+                top1 = sectors.iloc[0]
+                avg = float(top1.get("avg_change", 0) or 0)
+                if pd.isna(avg):
+                    avg = 0.0
+                if avg >= 1.5:
+                    today_key = dt.date.today().isoformat()
+                    pulse_fp = f"strong_sector_{today_key}_{top1[first_col]}"
+                    if _should_send_once(pulse_fp):
+                        msg = notifier.fmt_strong_sectors(
+                            sectors, leaders_map=leaders,
+                            themes_df=themes_df, theme_leaders=leaders_map,
+                        )
+                        if msg:
+                            notifier.send_message(msg)
+                            st.toast("已推送強勢族群通知", icon="🚀")
+            except Exception as _e:
+                st.warning(f"強勢族群自動推播失敗 (略過): {type(_e).__name__}: {_e}")
 
     if (sectors is None or sectors.empty) and (themes_df is None or themes_df.empty):
         st.info("按上方按鈕開始分析 (盤前/休市時 yfinance 資料可能尚未更新)。")
 
     if send_pulse_tg and (sectors is not None and not sectors.empty):
-        msg = notifier.fmt_strong_sectors(
-            sectors, leaders_map=leaders, themes_df=themes_df, theme_leaders=leaders_map,
-        )
-        _send_tg(msg, "強勢族群")
+        try:
+            msg = notifier.fmt_strong_sectors(
+                sectors, leaders_map=leaders, themes_df=themes_df, theme_leaders=leaders_map,
+            )
+            _send_tg(msg, "強勢族群")
+        except Exception as _e:
+            st.error(f"強勢族群推播失敗: {type(_e).__name__}: {_e}")
 
 
 # =============================================================================
@@ -2185,16 +2196,12 @@ with tab_track:
 
         show_cols = [c for c in
                      ["snapshot_date", "stock_id", "stock_name", "hits_label",
-                      "base_price", "current_price", "return%", "持有天"]
+                     "base_price", "current_price", "return%",
+                      "vol_ratio", "today_pct", "持有天"]
                      if c in perf.columns]
-        st.dataframe(perf[show_cols], use_container_width=True, hide_index=True)
+        if show_cols:
+            _show_table(perf[show_cols], market="TW")
+        else:
+            _show_table(perf, market="TW")
     elif perf is not None:
-        st.info(f"近 {track_window} 天內無 snapshot 紀錄。先到台股篩選分頁跑一次掃描。")
-
-
-st.markdown(
-    "<div style='text-align:center;color:#888;font-size:12px;margin-top:24px'>"
-    "本網站由 Streamlit + FinMind + yfinance 建構，僅供研究參考，非投資建議。"
-    "</div>",
-    unsafe_allow_html=True,
-)
+        st.info("無歷史快照資料（請先在台股篩選頁存一筆快照）。")
