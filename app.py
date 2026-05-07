@@ -139,12 +139,53 @@ def _style_pct(df, market: str = "TW", pct_cols: list = None):
         return df
 
 
+def _fmt_num(v):
+    """格式化數值: 最多顯示 2 位小數, 無小數值時顯示整數.
+    例: 100.0 -> "100", 100.5 -> "100.5", 100.567 -> "100.57"
+    """
+    if v is None:
+        return ""
+    try:
+        if pd.isna(v):
+            return ""
+    except (TypeError, ValueError):
+        return str(v)
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return str(v)
+    rounded = round(f, 2)
+    # 浮點誤差判斷: 接近整數視為整數
+    if abs(rounded - round(rounded)) < 1e-9:
+        return f"{int(round(rounded))}"
+    # 兩位小數, 去掉尾隨 0 (例: 100.50 -> 100.5)
+    return f"{rounded:.2f}".rstrip("0").rstrip(".")
+
+
 def _show_table(df, market: str = "TW", pct_cols: list = None, **kwargs):
-    """st.dataframe wrapper — 漲跌自動上色."""
+    """st.dataframe wrapper — 漲跌自動上色 + 數值最多 2 位小數 (整數時不顯示小數)."""
     if df is None or (hasattr(df, "empty") and df.empty):
         st.dataframe(df, **kwargs)
         return
+    # 統一數值欄位四捨五入到 2 位 (保留 int 欄位)
+    try:
+        df = df.copy()
+        for col in df.columns:
+            ser = df[col]
+            # 不動 dtype object / int (張數那類); 只 round float
+            if pd.api.types.is_float_dtype(ser):
+                df[col] = ser.round(2)
+    except Exception:
+        pass
     styled = _style_pct(df, market, pct_cols)
+    if hasattr(styled, "format"):
+        try:
+            # 用自訂 formatter: 最多 2 位小數, 整數則顯示為整數
+            float_cols = [c for c in df.columns if pd.api.types.is_float_dtype(df[c])]
+            if float_cols:
+                styled = styled.format({c: _fmt_num for c in float_cols})
+        except Exception:
+            pass
     kwargs.setdefault("use_container_width", True)
     kwargs.setdefault("hide_index", True)
     st.dataframe(styled, **kwargs)
@@ -181,7 +222,7 @@ import pytz
 _tw_now = dt.datetime.now(pytz.timezone("Asia/Taipei"))
 _us_now = dt.datetime.now(pytz.timezone("America/New_York"))
 _weekday = ["週一","週二","週三","週四","週五","週六","週日"][_tw_now.weekday()]
-_tw_state = "✅ 開盤中" if (1 <= _tw_now.weekday() <= 5 - 1 or (_tw_now.weekday() <= 4)) and (9 <= _tw_now.hour < 14 or (_tw_now.hour == 13 and _tw_now.minute <= 30)) else "🔴 休市"
+_tw_state = "✅ 開盤中" if (_tw_now.weekday() <= 4) and ((9 <= _tw_now.hour < 13) or (_tw_now.hour == 13 and _tw_now.minute <= 30)) else "🔴 休市"
 _us_state = "✅ 開盤中" if (_us_now.weekday() <= 4) and ((_us_now.hour == 9 and _us_now.minute >= 30) or (10 <= _us_now.hour < 16)) else "🔴 休市"
 st.markdown(
     f"<div class='date-banner'>"
@@ -719,7 +760,7 @@ cron 每 30 分執行一次 (24x7)。
             if wl:
                 st.markdown("自選股觸發:")
                 for a in wl:
-                    st.text(f"  {a['stock_id']} {a['name']}: {a['current']} ({a['current_pct']:+.2f}%) 觸發 {int(a['threshold_bucket'])}%")
+                    st.text(f"  {a['stock_id']} {a['name']}: {a['current']} ({a['primary_pct']:+.2f}%) 觸發 {int(a['threshold'])}%")
             if idx:
                 st.markdown("大盤觸發:")
                 for a in idx:
@@ -727,7 +768,7 @@ cron 每 30 分執行一次 (24x7)。
             if cry:
                 st.markdown("加密貨幣觸發:")
                 for a in cry:
-                    st.text(f"  {a['name']}: ${a['current']} ({a['change_pct']:+.2f}%) 觸發 {int(a['threshold_bucket'])}%")
+                    st.text(f"  {a['name']}: ${a['current']} ({a['change_pct']:+.2f}%) 觸發 {a.get('threshold_pct', 2.5)}%")
             if st.button("Send 警報 to TG", use_container_width=True, key="send_alerts_tg",
                           disabled=not notifier.is_configured()):
                 msg = notifier.fmt_monitor_alerts(wl, idx, cry)
@@ -1330,14 +1371,27 @@ with tab_pulse:
         st.markdown("### 🔥 熱門題材熱度排行")
         st.dataframe(themes_df, use_container_width=True, hide_index=True)
 
-        st.markdown("### 🎯 題材龍頭 Top 5 強勢股 (含盤中資訊)")
+        st.markdown("### 🎯 題材龍頭強勢股 (跨題材去重, 一檔只顯示一次)")
+        seen_sids: set = set()
         for theme in themes_df["題材"].head(8):
             df = leaders_map.get(theme)
             if df is None or df.empty:
                 continue
-            with st.expander(f"{theme}", expanded=(themes_df.iloc[0]["題材"] == theme)):
-                show = df[["stock_id", "stock_name", "現價", "今日%", "振幅%", "量比", "5日%"]].copy()
+            # 把已在其他題材出現的去掉
+            df_dedup = df[~df["stock_id"].astype(str).isin(seen_sids)].copy()
+            if df_dedup.empty:
+                continue  # 此題材的股票全都已在其他題材顯示過
+            seen_sids.update(df_dedup["stock_id"].astype(str).tolist())
+            with st.expander(f"{theme} ({len(df_dedup)} 檔)",
+                              expanded=(themes_df.iloc[0]["題材"] == theme)):
+                cols_want = ["stock_id", "stock_name", "現價", "今日%", "振幅%", "量比", "5日%"]
+                cols_have = [c for c in cols_want if c in df_dedup.columns]
+                show = df_dedup[cols_have].copy()
                 show = show.rename(columns={"stock_id": "代號", "stock_name": "名稱"})
+                # 數值欄位四捨五入到 2 位
+                for num_col in ["現價", "今日%", "振幅%", "量比", "5日%"]:
+                    if num_col in show.columns:
+                        show[num_col] = pd.to_numeric(show[num_col], errors="coerce").round(2)
                 _show_table(show, market="TW")
 
     # === 證交所產業分類區塊 ===
@@ -1368,14 +1422,19 @@ with tab_pulse:
                 today_key = dt.date.today().isoformat()
                 pulse_fp = f"strong_sector_{today_key}_{top1[first_col]}"
                 if _should_send_once(pulse_fp):
-                    notifier.send_message(notifier.fmt_strong_sectors(sectors))
+                    notifier.send_message(notifier.fmt_strong_sectors(
+                        sectors, leaders_map=leaders, themes_df=themes_df, theme_leaders=leaders_map,
+                    ))
                     st.toast("已推送強勢族群通知", icon="🚀")
 
     if (sectors is None or sectors.empty) and (themes_df is None or themes_df.empty):
         st.info("按上方按鈕開始分析 (盤前/休市時 yfinance 資料可能尚未更新)。")
 
     if send_pulse_tg and (sectors is not None and not sectors.empty):
-        _send_tg(notifier.fmt_strong_sectors(sectors), "強勢族群")
+        msg = notifier.fmt_strong_sectors(
+            sectors, leaders_map=leaders, themes_df=themes_df, theme_leaders=leaders_map,
+        )
+        _send_tg(msg, "強勢族群")
 
 
 # =============================================================================

@@ -330,11 +330,15 @@ def screen_above_ma_uptrend(daily: pd.DataFrame, params: TWParams) -> pd.DataFra
 # 9) KD 黃金交叉 (9 日 KD)
 # ---------------------------------------------------------------------------
 def _kd_series(close: pd.Series, high: pd.Series, low: pd.Series, n: int = 9) -> tuple:
-    """回傳 (K, D) Series。標準台灣 9 日 KD。"""
+    """回傳 (K, D) Series。標準台灣 9 日 KD。
+    若連續 n 日 high == low (極罕見, 但會出現在停牌或無量股), 此時
+    分母為 0 會產生 inf/-inf, 需先 replace 再 fillna 以避免污染後續迭代.
+    """
     ll = low.rolling(n).min()
     hh = high.rolling(n).max()
-    rsv = (close - ll) / (hh - ll) * 100
-    rsv = rsv.fillna(50)
+    denom = (hh - ll).replace(0, np.nan)  # 避免除以 0
+    rsv = (close - ll) / denom * 100
+    rsv = rsv.replace([np.inf, -np.inf], np.nan).fillna(50)
     k = [50.0]
     for v in rsv.iloc[1:]:
         k.append(k[-1] * 2 / 3 + (v if pd.notna(v) else 50) / 3)
@@ -526,7 +530,7 @@ def run_all_screens(
 
     # 合併
     name_map = info.set_index("stock_id")["stock_name"].to_dict() if "stock_name" in info.columns else {}
-    market_map = info.set_index("stock_id")["type"].to_dict()
+    market_map = info.set_index("stock_id")["type"].to_dict() if "type" in info.columns else {}
 
     def annotate(df: pd.DataFrame, hit: str) -> pd.DataFrame:
         if df is None or df.empty:

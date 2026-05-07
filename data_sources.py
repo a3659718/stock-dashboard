@@ -98,12 +98,14 @@ def _finmind_get(dataset: str, **params) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_taiwan_stock_info() -> pd.DataFrame:
-    """全台股清單 (含 twse / tpex / 排除 ETF/權證/全額)."""
+    """全台股清單 (twse / tpex)。只做基本清洗 (限 4 碼數字),
+    是否排除 ETF/權證/TDR/全額交割等交給 filter_tradeable_stocks 決定,
+    不在這裡寫死, 避免 caller 想保留 ETF 時被靜默過濾.
+    """
     df = _finmind_get("TaiwanStockInfo")
     if df.empty:
         return df
     df = df[df["stock_id"].astype(str).str.fullmatch(r"\d{4}")]
-    df = df[~df["stock_id"].str.startswith("00")]
     return df.reset_index(drop=True)
 
 

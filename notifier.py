@@ -142,7 +142,7 @@ def fmt_us_top_picks(df, fg: dict) -> str:
         return "美股 Top 5 推薦：今日無符合篩選條件的標的。"
     score = fg.get("score") if fg else None
     rating = fg.get("rating") if fg else None
-    fg_line = f"恐慌指數 {round(score,1)} ({rating})" if score else "恐慌指數 N/A"
+    fg_line = f"恐慌指數 {round(score,1)} ({rating})" if score is not None else "恐慌指數 N/A"
     lines = [f"<b>美股 Top 5 推薦</b> · {fg_line}", ""]
     for i, row in df.head(5).iterrows():
         lines.append(
@@ -152,15 +152,113 @@ def fmt_us_top_picks(df, fg: dict) -> str:
     return "\n".join(lines)
 
 
-def fmt_strong_sectors(sectors_df) -> str:
-    if sectors_df is None or sectors_df.empty:
-        return "即時強勢族群：尚未取得即時資料。"
-    lines = ["<b>即時強勢族群 Top 5</b>", ""]
-    for _, row in sectors_df.head(5).iterrows():
-        lines.append(
-            f"• {row.iloc[0]}  平均 {row['avg_change']:.2f}%  上漲 {int(row['up_count'])}/{int(row['n'])}"
-        )
-    return "\n".join(lines)
+def fmt_strong_sectors(sectors_df, leaders_map: dict = None, themes_df=None,
+                       theme_leaders: dict = None) -> str:
+    """強勢族群 TG 推播 — 包含族群排名 + 每族群推薦股票.
+
+    參數:
+      sectors_df: 證交所產業分類熱度 (compute_strong_sectors 的 sectors)
+      leaders_map: 對應的各產業 leaders DataFrame (compute_strong_sectors 的 stocks/leaders)
+      themes_df: 熱門題材熱度 (compute_hot_themes 的 themes)
+      theme_leaders: 各題材的 leaders (compute_hot_themes 的 leaders)
+    """
+    lines = []
+    seen_stocks: set = set()  # 跨族群/題材 dedup, 同一支股一份就好
+
+    if sectors_df is not None and not sectors_df.empty:
+        lines.append("<b>強勢族群 (證交所分類) Top 5</b>")
+        for _, row in sectors_df.head(5).iterrows():
+            sec_name = row.iloc[0]
+            avg = float(row.get("avg_change", 0))
+            up = int(row.get("up_count", 0) or 0)
+            n = int(row.get("n", 0) or 0)
+            lines.append(f"<b>{sec_name}</b> 平均 {avg:.2f}% · 上漲 {up}/{n}")
+            # 該族群龍頭股 (從 leaders_map 過濾)
+            if leaders_map is not None and hasattr(leaders_map, "empty") and not leaders_map.empty:
+                # leaders_map 是 single DataFrame, filter by industry
+                ind_col = "industry_category" if "industry_category" in leaders_map.columns else None
+                sub = leaders_map[leaders_map[ind_col] == sec_name] if ind_col else leaders_map
+                if sub is not None and not sub.empty:
+                    for _, sr in sub.head(3).iterrows():
+                        sid = str(sr.get("stock_id", "")).strip()
+                        if not sid or sid in seen_stocks:
+                            continue
+                        seen_stocks.add(sid)
+                        nm = str(sr.get("stock_name", ""))
+                        cur = sr.get("現價")
+                        pct = sr.get("今日%")
+                        ratio = sr.get("量比")
+                        parts = []
+                        if cur is not None:
+                            try:
+                                parts.append(f"{float(cur):.2f}")
+                            except Exception:
+                                pass
+                        if pct is not None:
+                            try:
+                                p = float(pct)
+                                sign = "+" if p > 0 else ""
+                                parts.append(f"{sign}{p:.2f}%")
+                            except Exception:
+                                pass
+                        if ratio is not None:
+                            try:
+                                parts.append(f"量比{float(ratio):.2f}x")
+                            except Exception:
+                                pass
+                        details = " · ".join(parts) if parts else ""
+                        lines.append(f"  <code>{sid}</code> {nm}  {details}")
+        lines.append("")
+
+    if themes_df is not None and not themes_df.empty:
+        lines.append("<b>熱門題材 Top 5</b>")
+        for _, row in themes_df.head(5).iterrows():
+            theme = row.get("題材", "")
+            avg = float(row.get("平均%", 0) or 0)
+            up = int(row.get("上漲家數", 0) or 0)
+            n = int(row.get("樣本數", 0) or 0)
+            lines.append(f"<b>{theme}</b> 平均 {avg:.2f}% · 上漲 {up}/{n}")
+            if theme_leaders:
+                ldf = theme_leaders.get(theme)
+                if ldf is not None and not ldf.empty:
+                    shown_in_theme = 0
+                    for _, sr in ldf.iterrows():
+                        sid = str(sr.get("stock_id", "")).strip()
+                        if not sid or sid in seen_stocks:
+                            continue  # 整個訊息都去重 (一檔只出現一次)
+                        seen_stocks.add(sid)
+                        nm = str(sr.get("stock_name", ""))
+                        cur = sr.get("現價")
+                        pct = sr.get("今日%")
+                        ratio = sr.get("量比")
+                        parts = []
+                        if cur is not None:
+                            try:
+                                parts.append(f"{float(cur):.2f}")
+                            except Exception:
+                                pass
+                        if pct is not None:
+                            try:
+                                p = float(pct)
+                                sign = "+" if p > 0 else ""
+                                parts.append(f"{sign}{p:.2f}%")
+                            except Exception:
+                                pass
+                        if ratio is not None:
+                            try:
+                                parts.append(f"量比{float(ratio):.2f}x")
+                            except Exception:
+                                pass
+                        details = " · ".join(parts) if parts else ""
+                        lines.append(f"  <code>{sid}</code> {nm}  {details}")
+                        shown_in_theme += 1
+                        if shown_in_theme >= 3:
+                            break
+        lines.append("")
+
+    if not lines:
+        return "強勢族群: 尚未取得資料"
+    return "\n".join(lines).rstrip()
 
 
 def _fmt_prediction_block(prediction: dict, accuracy: dict) -> list:
