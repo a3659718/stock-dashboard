@@ -409,6 +409,17 @@ def _should_send_once(key: str) -> bool:
     return True
 
 
+def _release_send_once(key: str) -> None:
+    """回滾 _should_send_once 紀錄. 推送失敗時用 — 讓下次 rerun 還能重試."""
+    try:
+        state = _alert_dedup_state()
+        if key in state:
+            del state[key]
+            _save_dedup_state(state)
+    except Exception:
+        pass
+
+
 tw_params = tw_screener.TWParams(
     vol_min_ratio=float(vol_min),
     vol_max_ratio=float(vol_max),
@@ -433,9 +444,9 @@ watchlist = parse_watchlist(watchlist_raw)
 # ---------------------------------------------------------------------------
 # Tabs
 # ---------------------------------------------------------------------------
-(tab_actionable, tab_wl, tab_hold, tab_tw, tab_pulse, tab_growth, tab_stock,
+(tab_wl, tab_actionable, tab_hold, tab_tw, tab_pulse, tab_growth, tab_stock,
  tab_us, tab_mood, tab_bt, tab_track) = st.tabs(
-    ["🎯 今日可行動", "📋 自選股", "💼 持倉分析", "🇹🇼 台股篩選", "🚀 強勢族群",
+    ["📋 自選股", "🎯 今日可行動", "💼 持倉分析", "🇹🇼 台股篩選", "🚀 強勢族群",
      "🌱 成長動能", "🔍 個股分析", "🇺🇸 美股 Top 5", "🧭 市場情緒",
      "📊 回測勝率", "📈 推薦追蹤"]
 )
@@ -454,106 +465,151 @@ with tab_actionable:
     cA1, cA2, cA3 = st.columns([1, 1, 2])
     with cA1:
         load_actionable = st.button("🔄 重抓 Top 5", use_container_width=True,
-                                      key="actionable_load")
+                                      key="actionable_load", type="primary")
     with cA2:
         send_actionable_tg = st.button("✈️ 推 Top 5 到 TG", use_container_width=True,
                                          key="actionable_tg")
+    with cA3:
+        # 顯示上次抓的時間 (從 cache timestamp)
+        last_ts = st.session_state.get("actionable_picks_ts")
+        if last_ts:
+            st.caption(f"上次更新: {last_ts}")
 
-    if load_actionable or "actionable_picks_cache" not in st.session_state:
+    # 只有按按鈕才 trigger — 不再「第一次進 tab 就自動跑」浪費 Gemini quota
+    if load_actionable:
         with st.spinner("整合所有訊號中… (這需要呼叫 Gemini + yfinance, 30-60 秒)"):
             try:
                 import actionable_picks as _ap
                 st.session_state["actionable_picks_cache"] = _ap.compute_actionable_picks(top_n=5)
+                st.session_state["actionable_picks_ts"] = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
             except Exception as e:
                 st.error(f"整合失敗: {type(e).__name__}: {e}")
                 st.session_state["actionable_picks_cache"] = []
+                st.session_state["actionable_picks_ts"] = dt.datetime.now().strftime("%Y-%m-%d %H:%M") + " (失敗)"
 
-    picks = st.session_state.get("actionable_picks_cache", []) or []
+    # raw_picks 是「沒被空頭邏輯改過的原始結果」, 用於 TG 推播
+    raw_picks = st.session_state.get("actionable_picks_cache", None)
 
-    # Regime banner — 取第 1 筆 attach 的
-    first = picks[0] if picks else {}
-    regime = first.get("_regime") if first else None
-    if regime:
-        rg_label = regime.get("regime_label", "")
-        rg_score = regime.get("score", 0)
-        rg_guidance = regime.get("guidance", "")
-        rg = regime.get("regime", "")
-        rg_icon = {"bull":"🟢","bull_weak":"🟡","range":"⚪","bear_weak":"🟠","bear":"🔴"}.get(rg, "")
-        if rg in ("bull", "bull_weak"):
-            st.success(f"{rg_icon} **大盤狀態: {rg_label}** (score {rg_score}) · {rg_guidance}")
-        elif rg == "range":
-            st.warning(f"{rg_icon} **大盤狀態: {rg_label}** (score {rg_score}) · {rg_guidance}")
-        else:
-            st.error(f"{rg_icon} **大盤狀態: {rg_label}** (score {rg_score}) · {rg_guidance}")
-
-    # 空頭 regime: picks 第 1 筆是 dummy (沒 stock_id)
-    if first.get("_no_picks_reason") and not first.get("stock_id"):
-        st.error(f"⚠ {first['_no_picks_reason']}")
-        st.info("保護資金優先, 觀察空頭結束後再進場.")
-        picks = []  # 強制不 render 任何 card
-
-    if not picks:
-        if not regime:
-            st.info("尚未取得可行動清單 (盤前 / Gemini 失效 / 資料源全部失敗?). 按「重抓」試試.")
+    # 還沒按過按鈕 — 直接顯示提示, 不要自動跑
+    if raw_picks is None:
+        st.info(
+            "👆 按「重抓 Top 5」開始整合訊號. \n\n"
+            "這個分析會跑:\n"
+            "- compute_hot_themes (族群熱度 + 催化劑 Gemini)\n"
+            "- find_emerging_themes (萌芽族群 + 法人卡位)\n"
+            "- pick_next_day_breakout (隔日突破篩選)\n"
+            "- regime_detector (大盤狀態判定)\n"
+            "首次跑大概 30-60 秒, 之後會 cache 直到你重新按."
+        )
     else:
-        for i, p in enumerate(picks, 1):
-            rr = p.get("rr") or 0
-            rr_emoji = "⭐⭐" if rr >= 3 else ("⭐" if rr >= 2 else "")
-            score = p.get("score", 0)
-            score_color = "🟢" if score >= 6 else ("🟡" if score >= 4 else "🔴")
-            with st.container(border=True):
-                cH1, cH2 = st.columns([3, 1])
-                with cH1:
-                    st.markdown(
-                        f"### {i}. `{p.get('stock_id')}` {p.get('name', '')} "
-                        f"{score_color}"
-                    )
-                    if p.get("theme"):
-                        st.caption(f"族群: {p.get('theme')} · R:R {rr} {rr_emoji} · 綜合分數 {score}")
-                with cH2:
-                    if p.get("current") is not None:
-                        st.metric("現價", f"{p['current']}")
-                cBody1, cBody2 = st.columns(2)
-                with cBody1:
-                    if p.get("entry_low") and p.get("entry_high"):
-                        st.write(f"**進場區間**: {p['entry_low']} ~ {p['entry_high']}")
-                    if p.get("target") and p.get("stop"):
-                        st.write(f"**目標**: {p['target']} · **停損**: {p['stop']}")
-                    if p.get("win_prob"):
-                        st.write(f"**上漲機率**: {p['win_prob']} · 持有 {p.get('hold_period', '—')}")
-                    pos = p.get("position") or {}
-                    if pos and pos.get("shares", 0) > 0:
-                        try:
-                            import position_sizer
-                            advice = position_sizer.fmt_position_advice(pos, market="TW")
-                            if advice:
-                                st.success(f"💰 {advice}")
-                        except Exception:
-                            pass
-                with cBody2:
-                    if p.get("reasons"):
-                        st.write("**訊號交叉驗證**:")
-                        for r in p["reasons"]:
-                            st.write(f"  ✓ {r}")
-                    if p.get("warnings"):
-                        st.write("**警示**:")
-                        for w in p["warnings"]:
-                            st.write(f"  ⚠ {w}")
-                    if p.get("catalyst"):
-                        st.info(f"🔥 催化劑: {p['catalyst']}")
+        picks = list(raw_picks) or []  # copy 一份用於 dashboard render
+        first = picks[0] if picks else {}
+        regime = first.get("_regime") if first else None
 
-    if send_actionable_tg and picks:
-        try:
-            import actionable_picks as _ap
-            tg_msg = _ap.fmt_actionable_picks_tg(picks)
-            if tg_msg:
-                ok, info = notifier.send_message(tg_msg)
-                if ok:
-                    st.toast("已推送 Top 5 到 Telegram", icon="✅")
+        # Regime banner — 取第 1 筆 attach 的
+        if regime:
+            rg_label = regime.get("regime_label", "")
+            rg_score = regime.get("score", 0)
+            rg_guidance = regime.get("guidance", "")
+            rg = regime.get("regime", "")
+            rg_icon = {"bull":"🟢","bull_weak":"🟡","range":"⚪","bear_weak":"🟠","bear":"🔴"}.get(rg, "")
+            if rg in ("bull", "bull_weak"):
+                st.success(f"{rg_icon} **大盤狀態: {rg_label}** (score {rg_score}) · {rg_guidance}")
+            elif rg == "range":
+                st.warning(f"{rg_icon} **大盤狀態: {rg_label}** (score {rg_score}) · {rg_guidance}")
+            else:
+                st.error(f"{rg_icon} **大盤狀態: {rg_label}** (score {rg_score}) · {rg_guidance}")
+
+        # 空頭 regime: picks 第 1 筆是 dummy (沒 stock_id)
+        is_bear_dummy = first.get("_no_picks_reason") and not first.get("stock_id")
+        if is_bear_dummy:
+            st.error(f"⚠ {first['_no_picks_reason']}")
+            st.info("保護資金優先, 觀察空頭結束後再進場.")
+            picks = []  # 強制不 render 任何 card (但 raw_picks 仍保留給 TG 用)
+
+        if not picks:
+            if not regime and not is_bear_dummy:
+                # 真的沒結果 — 可能是 yfinance 全失敗 / Gemini quota 滿
+                st.warning(
+                    "⚠ 沒抓到可行動清單. 可能原因:\n"
+                    "- 盤前 / 休市時資料還沒更新\n"
+                    "- Gemini quota 已滿 (檢查 Google Cloud console)\n"
+                    "- yfinance / FinMind 暫時失效\n\n"
+                    "再按一次「重抓 Top 5」試試, 或檢查 sidebar 的設定狀態."
+                )
+        else:
+            for i, p in enumerate(picks, 1):
+                rr = p.get("rr") or 0
+                rr_emoji = "⭐⭐" if rr >= 3 else ("⭐" if rr >= 2 else "")
+                score = p.get("score", 0)
+                score_color = "🟢" if score >= 6 else ("🟡" if score >= 4 else "🔴")
+                with st.container(border=True):
+                    cH1, cH2 = st.columns([3, 1])
+                    with cH1:
+                        st.markdown(
+                            f"### {i}. `{p.get('stock_id')}` {p.get('name', '')} "
+                            f"{score_color}"
+                        )
+                        if p.get("theme"):
+                            st.caption(f"族群: {p.get('theme')} · R:R {rr} {rr_emoji} · 綜合分數 {score}")
+                    with cH2:
+                        if p.get("current") is not None:
+                            st.metric("現價", f"{p['current']}")
+                    cBody1, cBody2 = st.columns(2)
+                    with cBody1:
+                        if p.get("entry_low") and p.get("entry_high"):
+                            st.write(f"**進場區間**: {p['entry_low']} ~ {p['entry_high']}")
+                        if p.get("target") and p.get("stop"):
+                            st.write(f"**目標**: {p['target']} · **停損**: {p['stop']}")
+                        if p.get("win_prob"):
+                            st.write(f"**上漲機率**: {p['win_prob']} · 持有 {p.get('hold_period', '—')}")
+                        # 部位建議: 顯示所有 sizing (包含 shares=0 的 note 提示)
+                        pos = p.get("position") or {}
+                        if pos:
+                            try:
+                                import position_sizer
+                                advice = position_sizer.fmt_position_advice(pos, market="TW")
+                                if advice:
+                                    if pos.get("shares", 0) > 0:
+                                        regime_note = " 🛡 已依 regime 降部位" if pos.get("regime_adjusted") else ""
+                                        st.success(f"💰 {advice}{regime_note}")
+                                    else:
+                                        # shares=0 (停損距離過大) — 用 warning 顯示原因
+                                        st.warning(f"⚠ {advice}")
+                            except Exception:
+                                pass
+                    with cBody2:
+                        if p.get("reasons"):
+                            st.write("**訊號交叉驗證**:")
+                            for r in p["reasons"]:
+                                st.write(f"  ✓ {r}")
+                        if p.get("warnings"):
+                            st.write("**警示**:")
+                            for w in p["warnings"]:
+                                st.write(f"  ⚠ {w}")
+                        if p.get("catalyst"):
+                            st.info(f"🔥 催化劑: {p['catalyst']}")
+
+    # TG 推送 — 用 raw_picks (含空頭 dummy), 確保空頭 banner 也能推到 TG
+    if send_actionable_tg:
+        if raw_picks is None:
+            st.warning("還沒抓資料, 請先按「重抓 Top 5」")
+        elif not raw_picks:
+            st.warning("沒可推送內容 (compute 回空)")
+        else:
+            try:
+                import actionable_picks as _ap
+                tg_msg = _ap.fmt_actionable_picks_tg(raw_picks)
+                if tg_msg:
+                    ok, info = notifier.send_message(tg_msg)
+                    if ok:
+                        st.toast("已推送 Top 5 到 Telegram", icon="✅")
+                    else:
+                        st.error(f"推送失敗: {info}")
                 else:
-                    st.error(f"推送失敗: {info}")
-        except Exception as e:
-            st.error(f"推送異常: {e}")
+                    st.warning("fmt 回空訊息, 不推送")
+            except Exception as e:
+                st.error(f"推送異常: {e}")
 
 
 # =============================================================================
@@ -1107,15 +1163,23 @@ with tab_hold:
                         st.markdown(f"- [{n.get('title','')}]({n.get('link','')})")
 
     if send_h_tg:
-        if not h_results:
-            with st.spinner("先跑一次分析..."):
-                try:
-                    h_results = holdings_analyzer.analyze_all_holdings()
-                    st.session_state["h_results"] = h_results
-                except Exception as e:
-                    st.error(f"分析失敗: {e}")
-        if h_results:
-            _send_tg(notifier.fmt_holdings_daily(h_results), "持倉日報")
+        # Reentrancy guard: 避免使用者在 spinner 期間連點兩次, 同分析跑兩遍 + 推兩封
+        if st.session_state.get("h_sending"):
+            st.info("推播作業進行中, 請稍候…")
+        else:
+            st.session_state["h_sending"] = True
+            try:
+                if not h_results:
+                    with st.spinner("先跑一次分析..."):
+                        try:
+                            h_results = holdings_analyzer.analyze_all_holdings()
+                            st.session_state["h_results"] = h_results
+                        except Exception as e:
+                            st.error(f"分析失敗: {e}")
+                if h_results:
+                    _send_tg(notifier.fmt_holdings_daily(h_results), "持倉日報")
+            finally:
+                st.session_state["h_sending"] = False
 
 
 # =============================================================================
@@ -1142,15 +1206,26 @@ with tab_tw:
             f"</div>",
             unsafe_allow_html=True,
         )
-        # 異常推播 (每天最多一次，跨 session 共享)
+        # 異常推播 (每天最多一次，跨 session 共享; 假日不推, 推送失敗回滾去重)
         if auto_send_on_alert and notifier.is_configured():
-            alert = notifier.fmt_tw_pulse_alert(tw_pulse)
-            if alert:
-                today_key = dt.date.today().isoformat()
-                direction = "low" if s <= 25 else "high"
-                dedup_key = f"tw_pulse_{today_key}_{direction}"
-                if _should_send_once(dedup_key):
-                    notifier.send_message(alert)
+            _is_tw_closed = False
+            try:
+                import holiday_check
+                _is_tw_closed = holiday_check.is_market_closed_today("TW")
+            except Exception:
+                pass
+            if dt.date.today().weekday() >= 5:
+                _is_tw_closed = True
+            if not _is_tw_closed:
+                alert = notifier.fmt_tw_pulse_alert(tw_pulse)
+                if alert:
+                    today_key = dt.date.today().isoformat()
+                    direction = "low" if s <= 25 else "high"
+                    dedup_key = f"tw_pulse_{today_key}_{direction}"
+                    if _should_send_once(dedup_key):
+                        ok, info = notifier.send_message(alert)
+                        if not ok:
+                            _release_send_once(dedup_key)
 
     # 8 個條件 checkbox（分兩列）
     cond_keys = list(tw_screener.CONDITION_LABELS.keys())
@@ -1295,8 +1370,13 @@ with tab_tw:
                                 row.get("hit", []), latest_str,
                                 row=row.to_dict(),
                             ))
-                        notifier.send_message("\n\n".join(msgs))
-                        st.toast(f"✈️ Watchlist 命中 {len(hit_in_wl)} 檔已推送", icon="🔔")
+                        ok, info = notifier.send_message("\n\n".join(msgs))
+                        if ok:
+                            st.toast(f"✈️ Watchlist 命中 {len(hit_in_wl)} 檔已推送", icon="🔔")
+                        else:
+                            # 推送失敗 → 回滾去重 key, 下次 rerun 還可重試
+                            _release_send_once(wl_fp)
+                            st.warning(f"Watchlist 推送失敗 (已回滾去重, 下次可重試): {info}")
 
             with st.expander("📁 各條件原始明細"):
                 tab_keys = list(results_dict.keys())
@@ -1585,13 +1665,24 @@ with tab_pulse:
                 _show_table(leaders[show_cols], market="TW")
 
         # 異常觸發推播 (任何格式化錯誤都不能炸掉整個 app)
+        # 加假日/週末 guard: 避免在台股休市時推前一交易日的舊資料
         if auto_send_on_alert and notifier.is_configured():
             try:
+                # 假日 / 週末 → skip 自動推播 (但保留 dashboard 顯示)
+                _is_tw_closed = False
+                try:
+                    import holiday_check
+                    _is_tw_closed = holiday_check.is_market_closed_today("TW")
+                except Exception:
+                    pass
+                if dt.date.today().weekday() >= 5:  # 週末
+                    _is_tw_closed = True
+
                 top1 = sectors.iloc[0]
                 avg = float(top1.get("avg_change", 0) or 0)
                 if pd.isna(avg):
                     avg = 0.0
-                if avg >= 1.5:
+                if not _is_tw_closed and avg >= 1.5:
                     today_key = dt.date.today().isoformat()
                     pulse_fp = f"strong_sector_{today_key}_{top1[first_col]}"
                     if _should_send_once(pulse_fp):
@@ -1600,8 +1691,13 @@ with tab_pulse:
                             themes_df=themes_df, theme_leaders=leaders_map,
                         )
                         if msg:
-                            notifier.send_message(msg)
-                            st.toast("已推送強勢族群通知", icon="🚀")
+                            ok, info = notifier.send_message(msg)
+                            if ok:
+                                st.toast("已推送強勢族群通知", icon="🚀")
+                            else:
+                                # 失敗 → 回滾 send_once 紀錄, 下次 rerun 還可以重試
+                                _release_send_once(pulse_fp)
+                                st.warning(f"強勢族群推播失敗 (已回滾去重): {info}")
             except Exception as _e:
                 st.warning(f"強勢族群自動推播失敗 (略過): {type(_e).__name__}: {_e}")
 
@@ -1931,19 +2027,31 @@ with tab_stock:
     st.caption("拍/截圖任意股票走勢圖丟上來，Gemini 會結合恐慌指數和市場新聞做綜合判讀。")
 
     uploaded = st.file_uploader(
-        "選擇圖片 (PNG / JPG)", type=["png", "jpg", "jpeg"],
+        "選擇圖片 (PNG / JPG, ≤ 5 MB)", type=["png", "jpg", "jpeg"],
         key="chart_upload",
     )
     extra_note = st.text_input(
-        "備註 (可選 — 例如：這是 NVDA 日 K，您想知道現在能不能進場)",
+        "備註 (可選 — 例如：這是 NVDA 日 K,您想知道現在能不能進場)",
         value="", key="chart_note",
     )
+
+    # 檔案大小檢查 — 太大會撞 Gemini payload 上限或 OOM
+    MAX_IMAGE_SIZE_BYTES = 5 * 1024 * 1024  # 5 MB
+    image_too_big = False
+    if uploaded is not None:
+        size = len(uploaded.getvalue())
+        if size > MAX_IMAGE_SIZE_BYTES:
+            image_too_big = True
+            st.error(
+                f"⚠ 圖片過大 ({size / 1024 / 1024:.1f} MB > 5 MB), Gemini 可能 OOM. "
+                "請縮圖再上傳 (建議寬度 ≤ 1200px, 用 jpg 壓 80% 品質)."
+            )
 
     cI1, cI2 = st.columns([1, 1])
     with cI1:
         analyze_image_btn = st.button(
             "🤖 用 Gemini 分析這張圖", use_container_width=True, type="primary",
-            disabled=(not ai_analyzer.gemini_available()) or uploaded is None,
+            disabled=(not ai_analyzer.gemini_available()) or uploaded is None or image_too_big,
         )
     with cI2:
         send_image_tg = st.button(
@@ -1951,10 +2059,10 @@ with tab_stock:
             disabled=not notifier.is_configured(), key="send_image_tg",
         )
 
-    if uploaded is not None:
+    if uploaded is not None and not image_too_big:
         st.image(uploaded, caption="上傳的圖片", use_column_width=True)
 
-    if analyze_image_btn and uploaded is not None:
+    if analyze_image_btn and uploaded is not None and not image_too_big:
         # 抓最新市場 context
         fg = ds.fetch_fear_greed()
         market_news = ds.fetch_market_news_themes()
@@ -2053,10 +2161,12 @@ with tab_mood:
     if mood_btn:
         try:
             with st.spinner("抓取市場情緒資料…"):
-                st.session_state["us_result"] = us_screener.run_us_recommendation(top_n=5)
+                # 用獨立 key, 不覆蓋 tab_us 的 us_result
+                st.session_state["us_result_mood"] = us_screener.run_us_recommendation(top_n=5)
         except Exception as e:
             st.error(f"抓取失敗：{e}")
-    us = st.session_state.get("us_result", {})
+    # 優先用 mood 自己的, 沒按過時 fallback 拿 tab_us 的 (避免重抓燒 quota)
+    us = st.session_state.get("us_result_mood") or st.session_state.get("us_result", {}) or {}
     fg = us.get("fear_greed", {})
     sectors_us = us.get("sectors")
     news_pool: List = us.get("news") or []
@@ -2104,11 +2214,18 @@ with tab_mood:
                 if _should_send_once(dedup_key):
                     notifier.send_message(alert_msg)
 
-    # 台股 F&G 異常觸發
+    # 台股 F&G 異常觸發 (跟美股對稱: 自動推播 + 跨日去重)
     if tw_pulse and tw_pulse.get("score") is not None:
         tw_alert = notifier.fmt_tw_pulse_alert(tw_pulse)
         if tw_alert:
             st.warning(tw_alert, icon="⚠️")
+            if auto_send_on_alert and notifier.is_configured():
+                today_key = dt.date.today().isoformat()
+                s_tw = float(tw_pulse["score"])
+                direction = "low" if s_tw <= 25 else "high"
+                dedup_key = f"tw_pulse_{today_key}_{direction}"
+                if _should_send_once(dedup_key):
+                    notifier.send_message(tw_alert)
 
     if sectors_us is not None and not sectors_us.empty:
         st.markdown("#### S&P SPDR 板塊輪動 (5 日 %)")
@@ -2229,102 +2346,61 @@ with tab_mood:
                 card_html += f"<a href='{link}' target='_blank' style='color:inherit;text-decoration:none'>{display_title}</a>"
             else:
                 card_html += display_title
-            card_html += f"{kw_html}</div>"
-            # 副標題顯示原文 (如果有翻譯)
-            if has_translation:
-                card_html += f"<div style='margin-top:4px;color:#aaa;font-size:11px;font-style:italic'>{title_orig}</div>"
-            if summary and summary != title_orig and summary != title_zh:
-                card_html += f"<div style='margin-top:6px;color:#888;font-size:12px'>{summary}</div>"
-            card_html += "</div>"
+            if kw_html:
+                card_html += kw_html
+            card_html += "</div></div>"
             st.markdown(card_html, unsafe_allow_html=True)
-    elif refresh_news_btn:
-        st.info("目前抓不到任何新聞，可能是 RSS 來源暫時無回應，請稍後再試。")
-    else:
-        st.info("按上方「🔄 更新所有新聞」開始抓取。")
+
 
 # =============================================================================
 # Tab — 回測勝率
 # =============================================================================
 with tab_bt:
-    st.subheader("📊 條件回測 (過去 60 個交易日勝率)")
-    st.caption(
-        "對選中的條件，用 walk-forward 方式跑歷史：每天用截至那天為止的資料判斷命中，"
-        "再算後續 +5d / +10d / +20d 報酬。**只支援價量類條件**（法人/融資融券資料每天打 API 太貴）。"
-    )
-
-    bt_cond_keys = list(backtest.BACKTESTABLE_CONDITIONS.keys())
-    cb_cols = st.columns(3)
-    bt_enabled = []
-    for i, k in enumerate(bt_cond_keys):
-        with cb_cols[i % 3]:
-            if st.checkbox(backtest.BACKTESTABLE_CONDITIONS[k], value=True, key=f"bt_{k}"):
-                bt_enabled.append(k)
-
-    cBT1, cBT2, cBT3 = st.columns([1, 1, 1])
+    st.subheader("📊 回測勝率")
+    st.caption("基於歷史資料模擬篩選器表現,評估訊號的歷史命中率與報酬分佈.")
+    cBT1, cBT2 = st.columns([1, 1])
     with cBT1:
-        bt_days = st.number_input("回測天數", 30, 120, 60, step=10, key="bt_days")
+        bt_market = st.selectbox("市場", options=["TW", "US"], key="bt_market")
     with cBT2:
-        bt_universe_n = st.number_input("回測 universe 檔數", 50, 300, 150, step=50, key="bt_universe",
-                                          help="檔數 × 條件 × 60 天。FinMind 配額會吃滿一小時")
-    with cBT3:
-        bt_combo = st.checkbox("組合回測 (同時命中所有勾選)", value=False, key="bt_combo")
-
-    bt_run = st.button("🔄 開始回測", use_container_width=True, type="primary",
-                        disabled=not bt_enabled, key="bt_run_btn")
-
-    if bt_run:
-        info = ds.get_taiwan_stock_info()
-        info = ds.filter_tradeable_stocks(info)
-        universe = info["stock_id"].head(int(bt_universe_n)).tolist()
+        bt_lookback = st.slider("回測天數", 30, 365, 90, step=30, key="bt_lookback")
+    bt_btn = st.button("🚀 跑回測", use_container_width=True, type="primary", key="bt_run")
+    if bt_btn:
         try:
-            with st.spinner(f"回測中…約需 1–3 分鐘 ({int(bt_universe_n)} 檔 × {int(bt_days)} 天)"):
-                if bt_combo:
-                    bt_res = backtest.run_combo_backtest(
-                        universe, bt_enabled, days_back=int(bt_days), params=tw_params,
-                    )
+            with st.spinner("回測中..."):
+                import backtest
+                bt_res = backtest.run_backtest(market=bt_market, days=bt_lookback)
+            if bt_res.get("error"):
+                st.error(f"回測失敗: {bt_res['error']}")
+            else:
+                df_bt = bt_res.get("trades")
+                if df_bt is not None and not df_bt.empty:
+                    cMA, cMB, cMC = st.columns(3)
+                    with cMA:
+                        st.metric("總交易數", len(df_bt))
+                    with cMB:
+                        if "return%" in df_bt.columns:
+                            wr = (df_bt["return%"] > 0).mean() * 100
+                            st.metric("勝率", f"{wr:.1f}%")
+                    with cMC:
+                        if "return%" in df_bt.columns:
+                            avg = df_bt["return%"].mean()
+                            st.metric("平均報酬", f"{avg:+.2f}%")
+                    st.dataframe(df_bt, use_container_width=True, hide_index=True)
                 else:
-                    bt_res = backtest.run_backtest(
-                        universe, bt_enabled, days_back=int(bt_days), params=tw_params,
-                    )
-            st.session_state["bt_result"] = bt_res
+                    st.info("沒有回測結果")
+        except ImportError:
+            st.warning("尚未安裝 backtest 模組")
         except Exception as e:
-            st.error(f"回測失敗：{e}")
-
-    bt_res = st.session_state.get("bt_result")
-    if bt_res:
-        if bt_res.get("error"):
-            st.warning(bt_res["error"])
-        else:
-            st.markdown("### 結果摘要")
-            st.dataframe(bt_res["summary"], use_container_width=True, hide_index=True)
-
-            with st.expander("📁 原始命中明細"):
-                st.dataframe(bt_res["raw"], use_container_width=True, hide_index=True)
-
-            st.caption(
-                "💡 解讀：勝率 > 55% 且平均報酬 > 1.5% 的條件，相對「比擲銅板好」。"
-                "命中次數太少 (<30) 的統計意義不大。"
-            )
+            st.error(f"回測異常: {type(e).__name__}: {e}")
 
 
 # =============================================================================
 # Tab — 推薦追蹤
 # =============================================================================
 with tab_track:
-    st.subheader("📈 推薦股追蹤")
-    st.caption(
-        "每次台股篩選掃描完，自動存 snapshot 到追蹤庫。"
-        "幾天/幾週後回頭看「當時推薦股」現在表現如何，淘汰沒用的條件組合。"
-    )
-
-    if tracker.has_gsheets_config():
-        st.success("✅ 已設定 Google Sheets，資料持久保存")
-    else:
-        st.info(
-            "⚠️ 目前用 Local CSV (Streamlit Cloud 重啟會清空)。"
-            "若要持久化請設定 GOOGLE_SHEETS_ID 與 GCP_SERVICE_ACCOUNT_JSON。"
-        )
-
+    st.subheader("📈 推薦追蹤")
+    st.caption("追蹤過往推送過的標的後續表現. 自動跑每筆「推送日 vs 現價」的報酬計算.")
+    import tracker
     cT1, cT2, cT3 = st.columns([1, 1, 1])
     with cT1:
         track_window = st.number_input("追蹤天數", 7, 90, 30, step=7, key="track_window")
@@ -2342,10 +2418,9 @@ with tab_track:
     if upload is not None:
         res = tracker.import_history_from_csv(upload.getvalue())
         if res.get("ok"):
-            st.success(f"已匯入 {res['rows']} 筆")
+            st.success(f"已匯入 {res['rows']} 筆 (encoding: {res.get('encoding_detected', '?')})")
         else:
             st.error(f"匯入失敗：{res.get('msg')}")
-
 
     if track_btn:
         try:
@@ -2356,15 +2431,24 @@ with tab_track:
                 st.info("尚無追蹤紀錄. 進入「強勢族群」/「美股 Top 5」tab 推送過後, 會自動加進追蹤. 或從本 tab 上方匯入歷史 CSV.")
             else:
                 st.dataframe(perf, use_container_width=True, hide_index=True)
-                if "報酬%" in perf.columns:
-                    avg = perf["報酬%"].mean()
-                    win_rate = (perf["報酬%"] > 0).mean() * 100
-                    cM1, cM2, cM3 = st.columns(3)
-                    with cM1:
-                        st.metric("平均報酬", f"{avg:+.2f}%")
-                    with cM2:
-                        st.metric("勝率", f"{win_rate:.1f}%")
-                    with cM3:
-                        st.metric("追蹤檔數", f"{len(perf)}")
+                # tracker.evaluate_history_performance 寫入欄位 "return%" (英文),
+                # 同時相容舊資料 (可能是 "報酬%" 中文)
+                ret_col = None
+                for c in ("return%", "報酬%"):
+                    if c in perf.columns:
+                        ret_col = c
+                        break
+                if ret_col:
+                    valid = perf[perf[ret_col].notna()]
+                    if len(valid) > 0:
+                        avg = float(valid[ret_col].mean())
+                        win_rate = float((valid[ret_col] > 0).mean() * 100)
+                        cM1, cM2, cM3 = st.columns(3)
+                        with cM1:
+                            st.metric("平均報酬", f"{avg:+.2f}%")
+                        with cM2:
+                            st.metric("勝率", f"{win_rate:.1f}%")
+                        with cM3:
+                            st.metric("追蹤檔數", f"{len(valid)}")
         except Exception as e:
             st.error(f"追蹤計算失敗: {type(e).__name__}: {e}")

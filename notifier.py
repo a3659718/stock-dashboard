@@ -290,10 +290,14 @@ def fmt_us_top_picks(df, fg: dict) -> str:
         fg_line = "恐慌指數 N/A"
     lines = [f"<b>美股 Top 5 推薦</b> · {fg_line}", ""]
     for i, row in df.head(5).iterrows():
+        # 改 .get + fallback "—" 避免 KeyError 炸整封推播
+        sym = row.get("symbol") if hasattr(row, "get") else row["symbol"] if "symbol" in row else "—"
+        sc = row.get("score") if hasattr(row, "get") else (row["score"] if "score" in row else "—")
+        theme_v = row.get("題材") if hasattr(row, "get") else None
         lines.append(
-            f"{i+1}. <b><code>{_esc(row['symbol'])}</code></b>  "
-            f"日 {_esc(row.get('daily_%'))}% / 20d {_esc(row.get('20d_%'))}% · 分數 {_esc(row['score'])}"
-            + (f"\n   題材: {_esc(row['題材'])}" if row.get("題材") else "")
+            f"{i+1}. <b><code>{_esc(sym)}</code></b>  "
+            f"日 {_esc(row.get('daily_%'))}% / 20d {_esc(row.get('20d_%'))}% · 分數 {_esc(sc)}"
+            + (f"\n   題材: {_esc(theme_v)}" if theme_v else "")
         )
     return "\n".join(lines)
 
@@ -1722,12 +1726,19 @@ def fmt_growth_picks(picks_df) -> str:
         return "🌱 成長動能 Top 10：今日無符合條件的標的。"
     lines = ["<b>🌱 成長動能 Top 10 (消息面 + K 線健康度)</b>", ""]
     for i, r in picks_df.iterrows():
+        # 改 .get + fallback "—" 避免 KeyError 炸整封推播
+        # (上游 news_picks Gemini 失敗時可能缺欄)
+        sid = r.get("代號") if hasattr(r, "get") else "—"
+        nm = r.get("名稱") if hasattr(r, "get") else "—"
+        sc = r.get("score") if hasattr(r, "get") else "—"
+        if not sid:
+            continue  # 沒代號 skip
         lines.append(
-            f"{i+1}. <b><code>{_esc(r['代號'])}</code></b> {_esc(r['名稱'])} · "
-            f"{_esc(r.get('題材',''))} · {_esc(r['score'])}/10"
+            f"{i+1}. <b><code>{_esc(sid)}</code></b> {_esc(nm)} · "
+            f"{_esc(r.get('題材',''))} · {_esc(sc)}/10"
         )
         if r.get("理由"):
-            lines.append(f"   {_esc(r['理由'])}")
+            lines.append(f"   {_esc(r.get('理由'))}")
     return "\n".join(lines)
 
 
@@ -1782,7 +1793,9 @@ def fmt_fear_greed_alert(fg: dict, threshold_low: int = 25, threshold_high: int 
     return None
 
 
+
 def fmt_tw_pulse_alert(pulse: dict, threshold_low: int = 25, threshold_high: int = 75) -> Optional[str]:
+    """台股市場情緒指數極值警報. 中性區間回 None."""
     if not pulse or pulse.get("score") is None:
         return None
     s = pulse["score"]

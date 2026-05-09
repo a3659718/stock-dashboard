@@ -147,13 +147,25 @@ def load_history() -> pd.DataFrame:
 
 
 def import_history_from_csv(file_bytes: bytes) -> dict:
-    """讓使用者從電腦上傳之前下載的 CSV 還原歷史。"""
-    try:
-        df = pd.read_csv(io.BytesIO(file_bytes))
-        df.to_csv(LOCAL_CSV, index=False)
-        return {"ok": True, "rows": len(df)}
-    except Exception as e:
-        return {"ok": False, "msg": str(e)}
+    """讓使用者從電腦上傳之前下載的 CSV 還原歷史.
+
+    自動 fallback 多種 encoding (utf-8-sig / utf-8 / big5 / cp950 / gb18030)
+    以容忍 Excel 另存的 CSV (Excel 中文預設 cp950 / Big5).
+    """
+    encodings_to_try = ["utf-8-sig", "utf-8", "big5", "cp950", "gb18030"]
+    last_err = None
+    for enc in encodings_to_try:
+        try:
+            df = pd.read_csv(io.BytesIO(file_bytes), encoding=enc)
+            # 內部統一寫 utf-8 (沒 BOM)
+            df.to_csv(LOCAL_CSV, index=False, encoding="utf-8")
+            return {"ok": True, "rows": len(df), "encoding_detected": enc}
+        except UnicodeDecodeError as e:
+            last_err = e
+            continue
+        except Exception as e:
+            return {"ok": False, "msg": f"{type(e).__name__}: {e}"}
+    return {"ok": False, "msg": f"所有 encoding 都失敗 (試過 {encodings_to_try}): {last_err}"}
 
 
 # ---------------------------------------------------------------------------
@@ -222,6 +234,9 @@ def history_summary(perf_df: pd.DataFrame) -> dict:
 
 
 def csv_for_download() -> bytes:
-    """產生目前 history CSV bytes 供下載。"""
+    """產生目前 history CSV bytes 供下載.
+
+    用 utf-8-sig (含 BOM), Excel 開繁中 CSV 才不會亂碼.
+    """
     df = load_history()
-    return df.to_csv(index=False).encode("utf-8")
+    return df.to_csv(index=False).encode("utf-8-sig")
