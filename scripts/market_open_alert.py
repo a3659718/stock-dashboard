@@ -509,11 +509,22 @@ def main() -> int:
         print(f"Unknown market: {market}", file=sys.stderr)
         return 1
 
+    # 訊息為空 → 不視為錯誤 (例如 monitor 模式無觸發警報已 early return, 但雙重保險)
+    if not msg or not str(msg).strip():
+        print("⚠️  訊息為空，跳過 Telegram 推播 (return 0)")
+        return 0
+
+    print(f"=== Telegram Send ===")
+    print(f"訊息長度: {len(msg)} 字 / 約 {len(msg.encode('utf-8'))} bytes")
+    print(f"訊息預覽 (前 200 字): {msg[:200]!r}")
     ok, info = notifier.send_message(msg)
     if ok:
-        print("Telegram sent OK")
+        print(f"✓ Telegram sent OK ({info})")
         return 0
-    print(f"Telegram failed: {info}", file=sys.stderr)
+    # 失敗 — 同時印 stdout (workflow log 可見) + stderr
+    fail_line = f"✗ Telegram failed: {info}"
+    print(fail_line)
+    print(fail_line, file=sys.stderr)
     return 2
 
 

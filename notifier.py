@@ -5,6 +5,7 @@ Telegram 通知封裝。同步呼叫 Bot HTTP API (sendMessage)，避免 streaml
 
 from __future__ import annotations
 
+import math
 from typing import List, Optional
 
 import requests
@@ -13,25 +14,69 @@ import streamlit as st
 import data_sources as ds
 
 
+def _safe_int(v, default: int = 0) -> int:
+    """把 v 轉成 int, 失敗 (None/NaN/字串)時回傳 default."""
+    if v is None:
+        return default
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return default
+    if math.isnan(f) or math.isinf(f):
+        return default
+    return int(f)
+
+
+def _safe_float(v, default: float = 0.0) -> float:
+    """把 v 轉成 float, 失敗或 NaN 時回傳 default."""
+    if v is None:
+        return default
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return default
+    if math.isnan(f) or math.isinf(f):
+        return default
+    return f
+
+
 def _bot_token() -> str:
-    return ds._secret("TELEGRAM_BOT_TOKEN")
+    # strip 避免 secret 前後空白導致 401
+    return (ds._secret("TELEGRAM_BOT_TOKEN") or "").strip()
 
 
 def _chat_id() -> str:
-    return ds._secret("TELEGRAM_CHAT_ID")
+    return (ds._secret("TELEGRAM_CHAT_ID") or "").strip()
 
 
 def is_configured() -> bool:
     return bool(_bot_token() and _chat_id())
 
 
+def _looks_like_html_parse_error(resp_text: str) -> bool:
+    """偵測 Telegram parse_mode=HTML 解析失敗的字串特徵."""
+    s = (resp_text or "").lower()
+    return ("can't parse entities" in s or "parse_entities" in s
+            or "unsupported start tag" in s or "tag" in s and "entities" in s)
+
+
 def send_message(text: str, disable_preview: bool = True) -> tuple[bool, str]:
-    """直接呼叫 Bot API。回傳 (成功, 訊息)."""
+    """直接呼叫 Bot API。回傳 (成功, 訊息).
+
+    強化點:
+      1. token / chat_id 自動 strip 前後空白
+      2. HTML parse 失敗 → 自動 retry 一次純文字 (避免單一字元擋住整則推播)
+      3. 失敗時把更多診斷資訊 (chat_id 長度、message 前 80 字) 包進 info
+    """
     token = _bot_token()
     chat_id = _chat_id()
     if not (token and chat_id):
         return False, "尚未設定 TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID"
     url = f"https://api.telegram.org/bot{token}/sendMessage"
+
+    def _post(payload: dict) -> requests.Response:
+        return requests.post(url, data=payload, timeout=15)
+
     payload = {
         "chat_id": chat_id,
         "text": text,
@@ -39,12 +84,36 @@ def send_message(text: str, disable_preview: bool = True) -> tuple[bool, str]:
         "disable_web_page_preview": disable_preview,
     }
     try:
-        r = requests.post(url, data=payload, timeout=15)
+        r = _post(payload)
         if r.status_code == 200:
             return True, "已送出"
-        return False, f"HTTP {r.status_code}: {r.text[:200]}"
+
+        # HTTP 400 + parse error → 退回純文字再試一次
+        if r.status_code == 400 and _looks_like_html_parse_error(r.text):
+            import re as _re
+            plain = _re.sub(r"</?[a-zA-Z][^>]*>", "", text)
+            payload2 = {
+                "chat_id": chat_id,
+                "text": plain,
+                "disable_web_page_preview": disable_preview,
+            }
+            try:
+                r2 = _post(payload2)
+                if r2.status_code == 200:
+                    return True, f"已送出 (HTML parse 失敗→純文字 retry 成功; 原因: {r.text[:120]})"
+                return False, (f"HTTP {r.status_code} (HTML): {r.text[:160]} | "
+                               f"retry HTTP {r2.status_code}: {r2.text[:160]}")
+            except Exception as e2:
+                return False, f"HTTP {r.status_code}: {r.text[:160]} | retry exception: {e2}"
+
+        # 其他錯誤 — 帶上更多診斷
+        diag = (
+            f"HTTP {r.status_code}: {r.text[:200]} "
+            f"| chat_id_len={len(chat_id)} token_len={len(token)} msg_preview={text[:80]!r}"
+        )
+        return False, diag
     except Exception as e:
-        return False, str(e)
+        return False, f"{type(e).__name__}: {e}"
 
 
 # ---------------------------------------------------------------------------
@@ -169,9 +238,9 @@ def fmt_strong_sectors(sectors_df, leaders_map: dict = None, themes_df=None,
         lines.append("<b>強勢族群 (證交所分類) Top 5</b>")
         for _, row in sectors_df.head(5).iterrows():
             sec_name = row.iloc[0]
-            avg = float(row.get("avg_change", 0))
-            up = int(row.get("up_count", 0) or 0)
-            n = int(row.get("n", 0) or 0)
+            avg = _safe_float(row.get("avg_change"))
+            up = _safe_int(row.get("up_count"))
+            n = _safe_int(row.get("n"))
             lines.append(f"<b>{sec_name}</b> 平均 {avg:.2f}% · 上漲 {up}/{n}")
             # 該族群龍頭股 (從 leaders_map 過濾)
             if leaders_map is not None and hasattr(leaders_map, "empty") and not leaders_map.empty:
@@ -214,9 +283,9 @@ def fmt_strong_sectors(sectors_df, leaders_map: dict = None, themes_df=None,
         lines.append("<b>熱門題材 Top 5</b>")
         for _, row in themes_df.head(5).iterrows():
             theme = row.get("題材", "")
-            avg = float(row.get("平均%", 0) or 0)
-            up = int(row.get("上漲家數", 0) or 0)
-            n = int(row.get("樣本數", 0) or 0)
+            avg = _safe_float(row.get("平均%"))
+            up = _safe_int(row.get("上漲家數"))
+            n = _safe_int(row.get("樣本數"))
             lines.append(f"<b>{theme}</b> 平均 {avg:.2f}% · 上漲 {up}/{n}")
             if theme_leaders:
                 ldf = theme_leaders.get(theme)
@@ -1264,16 +1333,5 @@ def fmt_tw_pulse_alert(pulse: dict, threshold_low: int = 25, threshold_high: int
         return (f"⚠️ <b>台股市場極度貪婪</b>\n台股情緒指數: {s} ({pulse.get('rating_zh')})\n"
                 f"加權: {pulse['raw'].get('TWII')} · 5日 {pulse['raw'].get('5日%')}% · "
                 f"距 MA60 {pulse['raw'].get('距 MA60 %')}%\n"
-                "注意風控、避免追高。")
-    return None
-
-
-def fmt_fear_greed_alert(fg: dict, threshold_low: int = 25, threshold_high: int = 75) -> Optional[str]:
-    if not fg or fg.get("score") is None:
-        return None
-    s = fg["score"]
-    if s <= threshold_low:
-        return f"⚠️ <b>市場極度恐慌</b>\nFear & Greed 指數: {round(s,1)} ({fg.get('rating')})\n通常為逢低布局訊號，請保持紀律。"
-    if s >= threshold_high:
-        return f"⚠️ <b>市場極度貪婪</b>\nFear & Greed 指數: {round(s,1)} ({fg.get('rating')})\n注意風控、避免追高。"
+                "歷史經驗為短期回檔風險偏高訊號，建議分批減碼或停利。")
     return None
