@@ -493,12 +493,26 @@ def main() -> int:
             except Exception as _e:
                 print(f"  (停損檢查失敗: {_e})", flush=True)
                 sl_breaches = []
-            print(f"Alerts: watchlist={len(wl)} index={len(idx)} crypto={len(cry)} stop_loss={len(sl_breaches)}")
+            # 自選股條件觸發 (價格穿越 / KD / MACD / MA 突破)
+            try:
+                import watchlist_triggers
+                fired_triggers = watchlist_triggers.check_triggers()
+            except Exception as _e:
+                print(f"  (條件觸發檢查失敗: {_e})", flush=True)
+                fired_triggers = []
+            print(
+                f"Alerts: watchlist={len(wl)} index={len(idx)} crypto={len(cry)} "
+                f"stop_loss={len(sl_breaches)} triggers={len(fired_triggers)}"
+            )
             msg = notifier.fmt_monitor_alerts(wl, idx, cry)
             # 把停損訊息附在 monitor 最前面 (最重要)
             if sl_breaches:
                 sl_msg = notifier.fmt_stop_loss_alerts(sl_breaches)
                 msg = sl_msg + "\n\n" + msg if msg else sl_msg
+            # 把條件觸發訊息也附前面
+            if fired_triggers:
+                tr_msg = watchlist_triggers.fmt_trigger_alerts(fired_triggers)
+                msg = tr_msg + "\n\n" + msg if msg else tr_msg
             if not msg:
                 print("無新觸發警報，跳過推播")
                 return 0

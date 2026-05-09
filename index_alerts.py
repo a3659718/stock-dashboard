@@ -77,23 +77,38 @@ def _is_market_in_session(country: str) -> bool:
     週末一律不在 session.
     """
     now_utc = dt.datetime.utcnow()
-    # 週六/週日 一律不算交易時段 (避免抓週五 stale data 觸發假警報)
-    if now_utc.weekday() >= 5:
-        return False
     cur = now_utc.hour + now_utc.minute / 60.0
     c = country.upper()
+    if c == "US":
+        # 美股 weekend 邊界要用「美東日期」, 不能用 UTC 日期 —
+        # 例: UTC Sat 02:00 = ET Fri 22:00 (理論上盤後), 美股還是「週五」, 不算週末.
+        # 但實務上美股 16:00 ET (= 20:00/21:00 UTC) 就收盤, 之後不在 session, 所以
+        # 加上 weekday 判斷 (對 ET 日期判) 就足夠安全.
+        # DST 切換邊界: 11/3、3 月第二週日, 在 UTC 跨 ET-day 那 4-5 小時可能誤判 1 hr,
+        # 用 ET-date 算 DST 才完全乾淨.
+        # 估算 ET 偏移 (DST 期 -4h, 否則 -5h). 先用 UTC 日期粗估 DST, 再以該偏移
+        # 反推 ET 日期, 用 ET 日期重算 DST (二次校正 — 邊界處才會生效).
+        is_dst = _is_us_in_dst(now_utc.date())
+        et_offset_hr = -4 if is_dst else -5
+        et_now = now_utc + dt.timedelta(hours=et_offset_hr)
+        if et_now.weekday() >= 5:  # 美東週末
+            return False
+        is_dst = _is_us_in_dst(et_now.date())
+        # 切換完 DST 後, et_offset 也要重算 (極少數 case 跨日)
+        et_offset_hr = -4 if is_dst else -5
+        et_now = now_utc + dt.timedelta(hours=et_offset_hr)
+        # 09:30 ~ 16:00 ET
+        et_cur = et_now.hour + et_now.minute / 60.0
+        return 9.5 <= et_cur < 16.0
+    # 亞股 — UTC weekend 一律不算 (TW/JP/KR 時區只比 UTC 早 8-9 hr, 週末邊界不會誤判)
+    if now_utc.weekday() >= 5:
+        return False
     if c == "TW":
         return 1.0 <= cur < 5.5
     elif c == "JP":
         return 0.0 <= cur < 6.0
     elif c == "KR":
         return 0.0 <= cur < 6.5
-    elif c == "US":
-        is_dst = _is_us_in_dst(now_utc.date())
-        if is_dst:
-            return 13.5 <= cur < 20.0   # EDT
-        else:
-            return 14.5 <= cur < 21.0   # EST
     return False
 
 
@@ -115,6 +130,29 @@ CRYPTO_CONFIG = {
     "BTC-USD": {"name": "BTC",  "threshold_pct": 2.5},
     "ETH-USD": {"name": "ETH",  "threshold_pct": 2.5},
 }
+
+
+# ---------------------------------------------------------------------------
+# ATR helper (給動態門檻用)
+# ---------------------------------------------------------------------------
+def _compute_atr(symbol: str, period_days: str = "2mo", n: int = 14) -> Optional[float]:
+    """抓 daily K 線算 ATR(14). 失敗回 None."""
+    try:
+        import pandas as pd
+        df = ds.fetch_yf_history(symbol, period=period_days, interval="1d")
+        if df is None or df.empty or len(df) < n + 1:
+            return None
+        high = df["High"].astype(float)
+        low = df["Low"].astype(float)
+        close = df["Close"].astype(float)
+        tr = pd.concat([
+            high - low,
+            (high - close.shift()).abs(),
+            (low - close.shift()).abs(),
+        ], axis=1).max(axis=1)
+        return float(tr.tail(n).mean())
+    except Exception:
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -199,7 +237,19 @@ def check_index_alerts() -> List[Dict]:
         today_open = info["open"]
         current = info["current"]
         diff = current - today_open  # 點數變化
+        # ATR 動態門檻: 基準 = max(static threshold, ATR(14) × 0.3)
+        # 高波動期門檻適度拉高, 避免一直推; 但設上限 = static × 2 防爆衝
+        # (例: TWII ATR 約 330, ×0.5=165 太敏感; ×0.3≈100 接近 static, 偶爾拉高 1.5x)
         threshold = cfg["threshold"]
+        try:
+            atr14 = _compute_atr(sym, period_days="2mo", n=14)
+            if atr14 is not None:
+                dyn = atr14 * 0.3
+                upper_cap = threshold * 2  # 門檻最多翻倍, 避免完全沒警報
+                if dyn > threshold * 1.2:
+                    threshold = round(min(dyn, upper_cap), 1)
+        except Exception:
+            pass
 
         # 取 bucket: -300, -150, 0, 150, 300, ...
         if diff >= 0:
@@ -385,6 +435,7 @@ def check_crypto_alerts() -> List[Dict]:
             except Exception:
                 first_price = None
 
+
             if not first_price or first_price <= 0:
                 print(f"[crypto] {sym} no first_price recorded, skip", flush=True)
                 continue
@@ -410,13 +461,13 @@ def check_crypto_alerts() -> List[Dict]:
                 "slot": slot_label,
                 "slot_label_zh": "中午 12:00" if slot_label == "noon" else "晚上 23:00",
                 "is_first": False,
-                "alert_type": "intra_slot",  # 盤中變動警報
+                "alert_type": "intra_slot",
                 "threshold_pct": threshold,
             })
 
             sid_state["prev_alert_price"] = current
             sid_state["prev_alert_time"] = now_str
-            print(f"[crypto] {sym} SECOND push: {first_price} → {current} ({change_pct:+.2f}%) >= {threshold}%", flush=True)
+            print(f"[crypto] {sym} SECOND push: {first_price} -> {current} ({change_pct:+.2f}%) >= {threshold}%", flush=True)
 
     state["crypto_alerts"] = crypto_state
     watchlist_store.save_monitor_state(state)

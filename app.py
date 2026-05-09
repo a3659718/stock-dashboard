@@ -9,7 +9,7 @@ app.py — 台美股盤前盤後雷達網站
 from __future__ import annotations
 
 import datetime as dt
-from typing import List
+from typing import List, Optional
 
 import pandas as pd
 import streamlit as st
@@ -191,9 +191,12 @@ def _show_table(df, market: str = "TW", pct_cols: list = None, **kwargs):
     st.dataframe(styled, **kwargs)
 
 
-def _send_tg(msg: str, label: str = "推播") -> bool:
+def _send_tg(msg: str, label: str = "推播",
+              stock_id: Optional[str] = None, market: str = "TW") -> bool:
     """統一的 TG 推送 + 顯示成功/失敗 toast.
     用在所有「Send to TG」按鈕, 確保使用者看得到結果.
+
+    若提供 stock_id, 會附加 inline keyboard (➕加自選 / 🤖AI / 🛡️停損 / 📊 看圖).
     """
     if not msg or not msg.strip():
         st.warning(f"{label}：沒有可推送內容")
@@ -206,7 +209,10 @@ def _send_tg(msg: str, label: str = "推播") -> bool:
         )
         return False
     try:
-        ok, info = notifier.send_message(msg)
+        reply_markup = None
+        if stock_id:
+            reply_markup = notifier.build_stock_action_keyboard(stock_id, market=market)
+        ok, info = notifier.send_message(msg, reply_markup=reply_markup)
         if ok:
             st.success(f"已推送到 TG：{label}")
             return True
@@ -240,6 +246,53 @@ st.markdown(
 with st.sidebar:
     st.title("⚙️ 設定")
     st.caption(f"今天: {dt.date.today().strftime('%Y-%m-%d')}")
+
+    # 快取強制清除 — 盤中懷疑資料 stale 可一鍵重抓
+    cc1, cc2 = st.columns([3, 2])
+    with cc1:
+        st.caption("資料快取")
+    with cc2:
+        if st.button("🔄 重抓", help="清掉所有 cache, 強制重新呼叫 yfinance / FinMind / Gemini",
+                     use_container_width=True, key="sidebar_clear_cache"):
+            try:
+                st.cache_data.clear()
+                try:
+                    st.cache_resource.clear()
+                except Exception:
+                    pass
+                st.toast("快取已清，重新跑一次", icon="✅")
+                st.rerun()
+            except Exception as _e:
+                st.error(f"清快取失敗: {_e}")
+
+    # 部位規模設定 — 用於 picks card 給張數建議
+    with st.expander("💰 部位規模設定 (用於目標價推薦)"):
+        try:
+            import position_sizer as _ps_mod
+            _ps_cfg = _ps_mod.load_user_config()
+        except Exception:
+            _ps_cfg = {"account_capital": 1_000_000, "risk_per_trade_pct": 1.0, "max_position_pct": 20.0}
+        ps_cap = st.number_input("帳戶資金 (NTD)", min_value=10000, step=10000,
+                                  value=int(_ps_cfg["account_capital"]),
+                                  key="ps_cap")
+        ps_risk = st.slider("單筆最大風險 (% 帳戶)", 0.25, 5.0,
+                             float(_ps_cfg["risk_per_trade_pct"]), step=0.25,
+                             help="保守 0.5-1%, 標準 1-2%, 積極 2-3%",
+                             key="ps_risk")
+        ps_max = st.slider("單筆最大部位 (% 帳戶)", 5.0, 50.0,
+                            float(_ps_cfg["max_position_pct"]), step=5.0,
+                            help="避免單檔過度集中, 建議 ≤ 25%",
+                            key="ps_max")
+        if st.button("儲存部位規模設定", use_container_width=True, key="ps_save"):
+            try:
+                import position_sizer as _ps_mod
+                ok = _ps_mod.save_user_config(ps_cap, ps_risk, ps_max)
+                if ok:
+                    st.toast("已儲存", icon="✅")
+                else:
+                    st.warning("儲存失敗 (詳見 log)")
+            except Exception as _e:
+                st.error(f"儲存失敗: {_e}")
 
     fm_ok = bool(ds.get_finmind_token())
     tg_ok = notifier.is_configured()
@@ -380,10 +433,127 @@ watchlist = parse_watchlist(watchlist_raw)
 # ---------------------------------------------------------------------------
 # Tabs
 # ---------------------------------------------------------------------------
-tab_wl, tab_hold, tab_tw, tab_pulse, tab_growth, tab_stock, tab_us, tab_mood, tab_bt, tab_track = st.tabs(
-    ["📋 自選股", "💼 持倉分析", "🇹🇼 台股篩選", "🚀 強勢族群", "🌱 成長動能", "🔍 個股分析",
-     "🇺🇸 美股 Top 5", "🧭 市場情緒", "📊 回測勝率", "📈 推薦追蹤"]
+(tab_actionable, tab_wl, tab_hold, tab_tw, tab_pulse, tab_growth, tab_stock,
+ tab_us, tab_mood, tab_bt, tab_track) = st.tabs(
+    ["🎯 今日可行動", "📋 自選股", "💼 持倉分析", "🇹🇼 台股篩選", "🚀 強勢族群",
+     "🌱 成長動能", "🔍 個股分析", "🇺🇸 美股 Top 5", "🧭 市場情緒",
+     "📊 回測勝率", "📈 推薦追蹤"]
 )
+
+
+# =============================================================================
+# Tab — 今日可行動 (整合各訊號的 Top 5 卡片)
+# =============================================================================
+with tab_actionable:
+    st.subheader("🎯 今日 Top 5 可行動")
+    st.caption(
+        "整合「強勢族群龍頭 / 催化劑 / 隔日突破 / 潛力股」等所有訊號, "
+        "用 R:R + 訊號交叉驗證 + 部位規模建議排出可下單清單. "
+        "點下方按鈕重抓 (耗時 30-60 秒, Gemini quota 多燒一次)."
+    )
+    cA1, cA2, cA3 = st.columns([1, 1, 2])
+    with cA1:
+        load_actionable = st.button("🔄 重抓 Top 5", use_container_width=True,
+                                      key="actionable_load")
+    with cA2:
+        send_actionable_tg = st.button("✈️ 推 Top 5 到 TG", use_container_width=True,
+                                         key="actionable_tg")
+
+    if load_actionable or "actionable_picks_cache" not in st.session_state:
+        with st.spinner("整合所有訊號中… (這需要呼叫 Gemini + yfinance, 30-60 秒)"):
+            try:
+                import actionable_picks as _ap
+                st.session_state["actionable_picks_cache"] = _ap.compute_actionable_picks(top_n=5)
+            except Exception as e:
+                st.error(f"整合失敗: {type(e).__name__}: {e}")
+                st.session_state["actionable_picks_cache"] = []
+
+    picks = st.session_state.get("actionable_picks_cache", []) or []
+
+    # Regime banner — 取第 1 筆 attach 的
+    first = picks[0] if picks else {}
+    regime = first.get("_regime") if first else None
+    if regime:
+        rg_label = regime.get("regime_label", "")
+        rg_score = regime.get("score", 0)
+        rg_guidance = regime.get("guidance", "")
+        rg = regime.get("regime", "")
+        rg_icon = {"bull":"🟢","bull_weak":"🟡","range":"⚪","bear_weak":"🟠","bear":"🔴"}.get(rg, "")
+        if rg in ("bull", "bull_weak"):
+            st.success(f"{rg_icon} **大盤狀態: {rg_label}** (score {rg_score}) · {rg_guidance}")
+        elif rg == "range":
+            st.warning(f"{rg_icon} **大盤狀態: {rg_label}** (score {rg_score}) · {rg_guidance}")
+        else:
+            st.error(f"{rg_icon} **大盤狀態: {rg_label}** (score {rg_score}) · {rg_guidance}")
+
+    # 空頭 regime: picks 第 1 筆是 dummy (沒 stock_id)
+    if first.get("_no_picks_reason") and not first.get("stock_id"):
+        st.error(f"⚠ {first['_no_picks_reason']}")
+        st.info("保護資金優先, 觀察空頭結束後再進場.")
+        picks = []  # 強制不 render 任何 card
+
+    if not picks:
+        if not regime:
+            st.info("尚未取得可行動清單 (盤前 / Gemini 失效 / 資料源全部失敗?). 按「重抓」試試.")
+    else:
+        for i, p in enumerate(picks, 1):
+            rr = p.get("rr") or 0
+            rr_emoji = "⭐⭐" if rr >= 3 else ("⭐" if rr >= 2 else "")
+            score = p.get("score", 0)
+            score_color = "🟢" if score >= 6 else ("🟡" if score >= 4 else "🔴")
+            with st.container(border=True):
+                cH1, cH2 = st.columns([3, 1])
+                with cH1:
+                    st.markdown(
+                        f"### {i}. `{p.get('stock_id')}` {p.get('name', '')} "
+                        f"{score_color}"
+                    )
+                    if p.get("theme"):
+                        st.caption(f"族群: {p.get('theme')} · R:R {rr} {rr_emoji} · 綜合分數 {score}")
+                with cH2:
+                    if p.get("current") is not None:
+                        st.metric("現價", f"{p['current']}")
+                cBody1, cBody2 = st.columns(2)
+                with cBody1:
+                    if p.get("entry_low") and p.get("entry_high"):
+                        st.write(f"**進場區間**: {p['entry_low']} ~ {p['entry_high']}")
+                    if p.get("target") and p.get("stop"):
+                        st.write(f"**目標**: {p['target']} · **停損**: {p['stop']}")
+                    if p.get("win_prob"):
+                        st.write(f"**上漲機率**: {p['win_prob']} · 持有 {p.get('hold_period', '—')}")
+                    pos = p.get("position") or {}
+                    if pos and pos.get("shares", 0) > 0:
+                        try:
+                            import position_sizer
+                            advice = position_sizer.fmt_position_advice(pos, market="TW")
+                            if advice:
+                                st.success(f"💰 {advice}")
+                        except Exception:
+                            pass
+                with cBody2:
+                    if p.get("reasons"):
+                        st.write("**訊號交叉驗證**:")
+                        for r in p["reasons"]:
+                            st.write(f"  ✓ {r}")
+                    if p.get("warnings"):
+                        st.write("**警示**:")
+                        for w in p["warnings"]:
+                            st.write(f"  ⚠ {w}")
+                    if p.get("catalyst"):
+                        st.info(f"🔥 催化劑: {p['catalyst']}")
+
+    if send_actionable_tg and picks:
+        try:
+            import actionable_picks as _ap
+            tg_msg = _ap.fmt_actionable_picks_tg(picks)
+            if tg_msg:
+                ok, info = notifier.send_message(tg_msg)
+                if ok:
+                    st.toast("已推送 Top 5 到 Telegram", icon="✅")
+                else:
+                    st.error(f"推送失敗: {info}")
+        except Exception as e:
+            st.error(f"推送異常: {e}")
 
 
 # =============================================================================
@@ -1751,6 +1921,8 @@ with tab_stock:
                 _send_tg(
                     notifier.fmt_ai_analysis(sid, full["name"] or "", last_ai["text"]),
                     f"AI 分析 {sid}",
+                    stock_id=sid,  # 附 inline 按鈕方便快速操作
+                    market="TW",
                 )
 
     # ================== 🖼️ 上傳 K 線圖讓 Gemini 分析 ==================
@@ -2174,34 +2346,25 @@ with tab_track:
         else:
             st.error(f"匯入失敗：{res.get('msg')}")
 
+
     if track_btn:
         try:
             with st.spinner("計算每檔現價並比對 base_price…"):
                 history = tracker.load_history()
-                perf = tracker.evaluate_history_performance(history, days_window=int(track_window))
-            st.session_state["track_perf"] = perf
+                perf = tracker.evaluate_history_performance(history, days_window=track_window)
+            if perf is None or perf.empty:
+                st.info("尚無追蹤紀錄. 進入「強勢族群」/「美股 Top 5」tab 推送過後, 會自動加進追蹤. 或從本 tab 上方匯入歷史 CSV.")
+            else:
+                st.dataframe(perf, use_container_width=True, hide_index=True)
+                if "報酬%" in perf.columns:
+                    avg = perf["報酬%"].mean()
+                    win_rate = (perf["報酬%"] > 0).mean() * 100
+                    cM1, cM2, cM3 = st.columns(3)
+                    with cM1:
+                        st.metric("平均報酬", f"{avg:+.2f}%")
+                    with cM2:
+                        st.metric("勝率", f"{win_rate:.1f}%")
+                    with cM3:
+                        st.metric("追蹤檔數", f"{len(perf)}")
         except Exception as e:
-            st.error(f"追蹤失敗：{e}")
-
-    perf = st.session_state.get("track_perf")
-    if perf is not None and not perf.empty:
-        s = tracker.history_summary(perf)
-        if s:
-            cM1, cM2, cM3, cM4, cM5 = st.columns(5)
-            cM1.metric("追蹤筆數", s["n_picks"])
-            cM2.metric("勝率", f"{s['win_rate']}%")
-            cM3.metric("平均報酬", f"{s['avg_return']}%")
-            cM4.metric("最佳", f"{s['best']}%")
-            cM5.metric("最差", f"{s['worst']}%")
-
-        show_cols = [c for c in
-                     ["snapshot_date", "stock_id", "stock_name", "hits_label",
-                     "base_price", "current_price", "return%",
-                      "vol_ratio", "today_pct", "持有天"]
-                     if c in perf.columns]
-        if show_cols:
-            _show_table(perf[show_cols], market="TW")
-        else:
-            _show_table(perf, market="TW")
-    elif perf is not None:
-        st.info("無歷史快照資料（請先在台股篩選頁存一筆快照）。")
+            st.error(f"追蹤計算失敗: {type(e).__name__}: {e}")

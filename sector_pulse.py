@@ -69,12 +69,15 @@ def universe_with_industry(top_n: int = 200) -> pd.DataFrame:
 # 用 yfinance 抓多檔即時報價並計算盤中資訊
 # ---------------------------------------------------------------------------
 @st.cache_data(ttl=120, show_spinner=False)
-def fetch_intraday_metrics(stock_ids: List[str], market_map: dict) -> pd.DataFrame:
-    """每檔回傳：當日 %、現價、振幅 %、量比 (今日量/5日均量)、5日%。
-    用 yfinance 抓 6 日 K 線，最後一根當盤中。
+def _fetch_intraday_metrics_cached(stock_ids_tuple: tuple, market_map_tuple: tuple) -> pd.DataFrame:
+    """內部快取版本 — 接 tuple 確保 cache hash 穩定.
+
+    Streamlit cache_data 對 list / dict 的 hash 用 pickle, 順序不穩定 → cache 永遠 miss.
+    對外 wrapper (fetch_intraday_metrics) 把 list / dict normalize 成 tuple 後才呼叫.
     """
+    market_map = dict(market_map_tuple)
     rows: List[Dict] = []
-    for sid in stock_ids:
+    for sid in stock_ids_tuple:
         suffix = ".TWO" if market_map.get(sid) == "tpex" else ".TW"
         df = ds.fetch_yf_history(f"{sid}{suffix}", period="1mo", interval="1d")
         if df.empty or len(df) < 2:
@@ -104,6 +107,20 @@ def fetch_intraday_metrics(stock_ids: List[str], market_map: dict) -> pd.DataFra
         except Exception:
             continue
     return pd.DataFrame(rows)
+
+
+def fetch_intraday_metrics(stock_ids: List[str], market_map: dict) -> pd.DataFrame:
+    """每檔回傳：當日 %、現價、振幅 %、量比 (今日量/5日均量)、5日%。
+
+    對外的穩定接口 — 把 list/dict normalize 成 tuple, cache 才會命中.
+    Caller 可以隨意亂序傳 list/dict, 結果一致.
+    """
+    stock_ids_tuple = tuple(sorted(set(s for s in stock_ids if s)))
+    # 只保留會用到的 sid 對應的 market type, 縮小 hash key
+    market_map_tuple = tuple(sorted(
+        (sid, market_map.get(sid)) for sid in stock_ids_tuple
+    ))
+    return _fetch_intraday_metrics_cached(stock_ids_tuple, market_map_tuple)
 
 
 # ---------------------------------------------------------------------------
@@ -145,6 +162,18 @@ def compute_strong_sectors(top_n: int = 200) -> dict:
         leaders_rows.append(sub)
         seen.update(sub["stock_id"].tolist())
     leaders = pd.concat(leaders_rows, ignore_index=True) if leaders_rows else pd.DataFrame()
+
+    # 補催化劑（與 compute_hot_themes 對稱; 用一次 Gemini 批次處理所有 leaders）
+    if leaders is not None and not leaders.empty:
+        try:
+            import stock_catalyst
+            cat_map = stock_catalyst.annotate_picks_with_catalysts(
+                leaders.to_dict("records"), market="TW",
+            )
+            leaders["催化劑"] = leaders["stock_id"].astype(str).map(cat_map).fillna("")
+        except Exception as _e:
+            print(f"[sector_pulse] strong_sectors annotate catalyst failed: {_e}", flush=True)
+
     return {"sectors": sect, "stocks": merged, "leaders": leaders}
 
 

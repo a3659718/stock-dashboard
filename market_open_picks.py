@@ -260,7 +260,11 @@ def get_tw_open_picks(top_themes_n: int = 3, picks_per_theme: int = 3) -> Dict:
     accuracy = market_predictor.accuracy_stats(market="TW", lookback_days=30)
 
     # 替每檔個股補上催化劑摘要 (Gemini 一次批次處理)
+    # 注意: compute_hot_themes() 內部已對 leaders 跑過一次 annotate_picks_with_catalysts,
+    # 那一次的結果保留在 DataFrame 的「催化劑」欄. 這裡先複用該欄, 只對「催化劑為空」的
+    # 個股再 call 一次 Gemini, 避免重複燒 quota.
     all_picks_rows = []
+    catalysts: Dict[str, str] = {}
     for p in picks:
         st_df = p.get("stocks")
         if st_df is None or (hasattr(st_df, "empty") and st_df.empty):
@@ -269,8 +273,46 @@ def get_tw_open_picks(top_themes_n: int = 3, picks_per_theme: int = 3) -> Dict:
             d = row.to_dict()
             d["_theme"] = p["theme"]
             all_picks_rows.append(d)
-    catalysts = stock_catalyst.annotate_picks_with_catalysts(all_picks_rows, market="TW")
+            sid = str(d.get("stock_id", ""))
+            existing_cat = d.get("催化劑", "")
+            if sid and existing_cat and str(existing_cat).strip():
+                catalysts[sid] = str(existing_cat)
+    # 只對沒催化劑的 picks 再 annotate 一次
+    missing_rows = [r for r in all_picks_rows
+                    if str(r.get("stock_id", "")) and not catalysts.get(str(r.get("stock_id", "")))]
+    if missing_rows:
+        new_cats = stock_catalyst.annotate_picks_with_catalysts(missing_rows, market="TW")
+        catalysts.update(new_cats)
     events = earnings_calendar.annotate_picks_with_events(all_picks_rows, market="TW")
+
+    # === 訊號追蹤: 把催化劑利多 + 強勢族群龍頭記下來, 3 天後驗證 ===
+    try:
+        import signal_tracker
+        for r in all_picks_rows:
+            sid = str(r.get("stock_id", ""))
+            if not sid:
+                continue
+            cur_price = r.get("現價")
+            if cur_price is None:
+                continue
+            cat = catalysts.get(sid, "")
+            # 強勢族群龍頭 → 隔日漲
+            signal_tracker.record_signal(
+                "strong_sector_leader", sid, name=r.get("stock_name", ""),
+                predicted_price=cur_price, expected_direction="up",
+                evaluate_after_days=1,
+                extras={"theme": r.get("_theme", ""), "today_pct": r.get("今日%")},
+            )
+            # 有催化劑利多 → 3 天漲
+            if cat and "利多" in cat or (cat and "催化" in cat):
+                signal_tracker.record_signal(
+                    "catalyst", sid, name=r.get("stock_name", ""),
+                    predicted_price=cur_price, expected_direction="up",
+                    evaluate_after_days=3,
+                    extras={"catalyst": cat[:120]},
+                )
+    except Exception as _e:
+        print(f"[market_open_picks] signal_tracker.record (open) failed: {_e}", flush=True)
 
     # 籌碼 / 主力換手分析 (Gemini)
     pick_ids = [str(r.get("stock_id", "")) for r in all_picks_rows if r.get("stock_id")]
@@ -291,6 +333,22 @@ def get_tw_open_picks(top_themes_n: int = 3, picks_per_theme: int = 3) -> Dict:
     # 加權指數即時 (盤中 5m 線取最後一根, 比對昨收)
     twii_info = _fetch_twii_intraday()
 
+    # Regime 偵測 (大盤狀態 — 空頭時 AI 分析跟 actionable_picks 都會降溫)
+    regime: Dict = {}
+    try:
+        import regime_detector
+        regime = regime_detector.detect_market_regime("TW")
+    except Exception as _e:
+        print(f"[market_open_picks] regime_detector failed: {_e}", flush=True)
+
+    # 萌芽族群 (還沒上排行榜但有 leading indicator)
+    emerging: List[Dict] = []
+    try:
+        import emerging_themes
+        emerging = emerging_themes.find_emerging_themes(top_n=3)
+    except Exception as _e:
+        print(f"[market_open_picks] emerging_themes failed: {_e}", flush=True)
+
     return {
         "themes": themes_df.head(top_themes_n),
         "picks": picks,
@@ -304,6 +362,8 @@ def get_tw_open_picks(top_themes_n: int = 3, picks_per_theme: int = 3) -> Dict:
         "laggards_ai": laggards_ai,
         "us_overnight": us_overnight,
         "chips": chips,
+        "regime": regime,
+        "emerging": emerging,
     }
 
 
@@ -429,9 +489,10 @@ def get_tw_close_analysis() -> Dict:
         twii_close = float(c.iloc[-1])
         twii_pct = (float(c.iloc[-1]) / float(c.iloc[-2]) - 1) * 100
 
-    # 盤後新增: 外資出貨嫌疑 + 隔日上漲機率高 top 3
+    # 盤後新增: 外資出貨嫌疑 + 隔日上漲機率高 top 3 + 避開訊號
     foreign_dumping = []
     next_day_picks = []
+    avoid_picks = []
     try:
         import closing_analyzer
         foreign_dumping = closing_analyzer.analyze_foreign_dumping(top_n=5, max_scan=80)
@@ -442,6 +503,55 @@ def get_tw_close_analysis() -> Dict:
         next_day_picks = closing_analyzer.pick_next_day_breakout(top_n=3, max_scan=150)
     except Exception as e:
         print(f"[market_open_picks] next_day_breakout failed: {e}", flush=True)
+    try:
+        import avoid_signals
+        avoid_picks = avoid_signals.find_avoid_picks(top_n=5, max_scan=80)
+    except Exception as e:
+        print(f"[market_open_picks] avoid_picks failed: {e}", flush=True)
+
+    # === 訊號追蹤: 紀錄盤後幾類預測 + 驗證昨天到期的 ===
+    accuracy_block = ""
+    try:
+        import signal_tracker
+        # 1. 先驗證所有到期的舊預測
+        n_eval = signal_tracker.evaluate_pending()
+        if n_eval:
+            print(f"[market_open_picks] 驗證 {n_eval} 筆訊號", flush=True)
+        # 2. 隔日上漲 Top 3 (closing_analyzer.pick_next_day_breakout)
+        for d in next_day_picks[:3]:
+            sid = str(d.get("stock_id", ""))
+            cur = d.get("metrics", {}).get("close") or d.get("current")
+            if sid and cur:
+                signal_tracker.record_signal(
+                    "next_day_breakout", sid, name=d.get("name", ""),
+                    predicted_price=cur, expected_direction="up",
+                    evaluate_after_days=1,
+                    extras={"score": d.get("score")},
+                )
+        # 3. 避開訊號 → 3 日跌
+        for d in avoid_picks[:5]:
+            sid = str(d.get("stock_id", ""))
+            cur = d.get("current")
+            if sid and cur:
+                signal_tracker.record_signal(
+                    "avoid_pick", sid, name=d.get("name", ""),
+                    predicted_price=cur, expected_direction="down",
+                    evaluate_after_days=3,
+                    extras={"score": d.get("score"), "reasons": d.get("reasons")},
+                )
+        # 4. 取本月準確率區塊 (推播末顯示)
+        accuracy_block = signal_tracker.fmt_accuracy_block(lookback_days=30)
+    except Exception as _e:
+        print(f"[market_open_picks] signal_tracker (close) failed: {_e}", flush=True)
+
+    # 「為什麼今天這樣走 + 明日重點」一句話 AI 摘要 (給推播首段用)
+    why_summary = _gemini_one_line_why(
+        twii_pct=round(twii_pct, 2),
+        jp_pct=round(jp_pct, 2),
+        kr_pct=round(kr_pct, 2),
+        themes_df=themes_df,
+        foreign_dumping=foreign_dumping,
+    )
 
     return {
         "themes": themes_df,
@@ -454,7 +564,59 @@ def get_tw_close_analysis() -> Dict:
         "ai_text": ai_text,
         "foreign_dumping": foreign_dumping,
         "next_day_picks": next_day_picks,
+        "avoid_picks": avoid_picks,
+        "why_summary": why_summary,
+        "accuracy_block": accuracy_block,
     }
+
+
+def _gemini_one_line_why(twii_pct: float, jp_pct: float, kr_pct: float,
+                          themes_df, foreign_dumping: list,
+                          model: str = "gemini-2.5-flash") -> str:
+    """產生「今日大盤動因 + 明日重點」一句話 (≤ 80 字).
+
+    用最少資料快速問 Gemini, 失敗 / 沒 key 回 "" (推播會 skip 此區塊).
+    """
+    try:
+        import ai_analyzer as _ai
+        if not _ai.gemini_available():
+            return ""
+        # 組精簡 context
+        top_themes = []
+        bot_themes = []
+        if themes_df is not None and not themes_df.empty:
+            for _, r in themes_df.head(3).iterrows():
+                top_themes.append(f"{r.get('題材','')} {r.get('平均%','')}%")
+            for _, r in themes_df.tail(2).iterrows():
+                bot_themes.append(f"{r.get('題材','')} {r.get('平均%','')}%")
+        dump_str = ""
+        if foreign_dumping:
+            d0 = foreign_dumping[0]
+            dump_str = f"外資出貨嫌疑首位: {d0.get('stock_id','')} {d0.get('name','')}"
+        prompt = (
+            f"今日台股加權 {twii_pct:+.2f}%, 日經 {jp_pct:+.2f}%, 韓 KOSPI {kr_pct:+.2f}%. "
+            f"領漲族群: {', '.join(top_themes) or '(無顯著)'}. "
+            f"落後族群: {', '.join(bot_themes) or '(無)'}. "
+            f"{dump_str}. "
+            "用 1 句話 (≤ 60 中文字) 總結「今日大盤怎麼走 + 為什麼」, "
+            "再用 1 句話 (≤ 30 中文字) 點出「明日盯什麼」. 直接給 2 行內容, "
+            "不要 markdown / 不要前後贅述."
+        )
+        import google.generativeai as genai
+        genai.configure(api_key=_ai.get_gemini_key())
+        m = genai.GenerativeModel(model)
+        resp = m.generate_content(
+            prompt,
+            generation_config={"temperature": 0.4, "max_output_tokens": 200},
+            safety_settings=_ai.get_safety_settings(),
+        )
+        text = (getattr(resp, "text", None) or "").strip()
+        # 防呆: 只取前 2 行, 各截 100 char
+        lines = [ln.strip() for ln in text.split("\n") if ln.strip()][:2]
+        return "\n".join(ln[:100] for ln in lines)
+    except Exception as e:
+        print(f"[market_open_picks] gemini_one_line_why failed: {e}", flush=True)
+        return ""
 
 
 # ---------------------------------------------------------------------------
@@ -482,6 +644,15 @@ def _us_stock_metrics(symbol: str) -> Optional[Dict]:
         }
     except Exception:
         return None
+
+
+def _get_us_regime() -> Dict:
+    """美股 regime — get_us_open_picks 用."""
+    try:
+        import regime_detector
+        return regime_detector.detect_market_regime("US")
+    except Exception:
+        return {}
 
 
 def get_us_open_picks(top_sectors_n: int = 3, picks_per_sector: int = 3,
@@ -594,6 +765,14 @@ def get_us_open_picks(top_sectors_n: int = 3, picks_per_sector: int = 3,
         print(f"[market_open_picks] potential_picker failed: {e}", flush=True)
         potential_picks = []
 
+    # 美股版萌芽 sector (RS vs SPY 突破 + 成員放量背離)
+    us_emerging = []
+    try:
+        import emerging_themes
+        us_emerging = emerging_themes.find_us_emerging_sectors(top_n=3)
+    except Exception as _e:
+        print(f"[market_open_picks] us_emerging failed: {_e}", flush=True)
+
     return {
         "sectors": sectors_sorted,
         "sector_picks": sector_picks,
@@ -605,427 +784,269 @@ def get_us_open_picks(top_sectors_n: int = 3, picks_per_sector: int = 3,
         "laggards": laggards,
         "laggards_ai": laggards_ai,
         "potential_picks": potential_picks,
+        "regime": _get_us_regime(),
+        "emerging": us_emerging,
     }
 
 
-# ---------------------------------------------------------------------------
-# 美股盤後 +2h 分析 (含台股次日開盤推測)
-# ---------------------------------------------------------------------------
 def _gemini_us_close_reasoning(sectors_df: pd.DataFrame, spy_pct: float,
                                 qqq_pct: float, dia_pct: float,
                                 fg: dict, model: str = "gemini-2.5-flash") -> str:
+    """美股盤後 Gemini 推理 (簡短版, 重點放對台股次日影響)."""
     try:
         import ai_analyzer as _ai
+        if not _ai.gemini_available():
+            return ""
     except ImportError:
         return ""
-    if not _ai.gemini_available():
-        return ""
-
-    fg_line = ""
-    if fg and fg.get("score") is not None:
-        fg_line = f"CNN F&G: {fg['score']:.0f} ({fg.get('rating')})"
-
-    sector_lines = []
+    sec_lines = []
     if sectors_df is not None and not sectors_df.empty:
-        for _, r in sectors_df.iterrows():
-            sym = r.get("symbol")
-            name = r.get("sector", "")
-            r1 = r.get("1d_%", 0)
-            sector_lines.append(f"  {sym} {name}: {r1:+.2f}%")
-
-    sector_block = "\n".join(sector_lines) if sector_lines else "(無資料)"
-
-    prompt = f"""你是美股 + 全球宏觀分析師。今日美股已收盤，請推理：
-
-【美股大盤當日】
-SPY: {spy_pct:+.2f}%
-QQQ: {qqq_pct:+.2f}%
-DIA: {dia_pct:+.2f}%
-{fg_line}
-
-【板塊輪動 (1d)】
-{sector_block}
-
-請用繁體中文回應 (避免太多 emoji)，結構：
-
------- 今日美股總結 ------
-- 主流方向 (科技 / 防禦 / 循環 / 能源 等)
-- 強勢板塊與背後的市場原因
-- 市場情緒判讀
-
------- 對台股次日開盤推測 ------
-- 區域影響: 美股強勢時，台股 ADR / 半導體股可能開高 N% 左右
-- 留意風險: Fed / 地緣 / 公司財報 等任何隔夜訊號
-- 預估台股開盤偏向: 開高走高 / 開高走低 / 開低 / 平盤
-
------- 給台灣投資人的操作建議 ------
-- 1-2 個具體可行建議
-
-結尾加「以上分析僅供參考，不構成投資建議」。"""
-
+        for _, r in sectors_df.head(8).iterrows():
+            sec_lines.append(f"  {r.get('symbol')} {r.get('sector','')}: {r.get('1d_%','')}%")
+    fg_str = f"F&G {fg.get('score','—'):.0f} ({fg.get('rating','')})" if fg else "F&G N/A"
+    prompt = (
+        f"美股盤後綜合: SPY {spy_pct:+.2f}%, QQQ {qqq_pct:+.2f}%, DIA {dia_pct:+.2f}%. {fg_str}\n\n"
+        f"板塊輪動 (1d):\n" + "\n".join(sec_lines) + "\n\n"
+        "請用繁體中文做盤後分析, 結構:\n"
+        "## 全日綜合\n"
+        "1-2 句總結今日美股強弱原因.\n"
+        "## 對台股次日開盤推測\n"
+        "1-2 句, 哪些族群可能受惠 / 受壓.\n"
+        "## 操作建議\n"
+        "1 句, 是否該加減碼 / 觀望.\n"
+        "全文 ≤ 250 字, 不要前後贅述."
+    )
     try:
         import google.generativeai as genai
         genai.configure(api_key=_ai.get_gemini_key())
         m = genai.GenerativeModel(model)
         resp = m.generate_content(
             prompt,
-            generation_config={"temperature": 0.4, "max_output_tokens": 1500},
+            generation_config={"temperature": 0.4, "max_output_tokens": 600},
             safety_settings=_ai.get_safety_settings(),
         )
-        return (resp.text or "").strip()
+        return (getattr(resp, "text", None) or "").strip()
     except Exception as e:
-        return f"(Gemini 推理失敗: {e})"
+        print(f"[market_open_picks] _gemini_us_close_reasoning failed: {e}", flush=True)
+        return ""
 
 
 def get_us_overnight_summary() -> Dict:
-    """取美股最近一次收盤的隔夜表現 (給 TW 開盤分析參考)."""
-    out = {}
-    for sym, name in [("SPY", "S&P 500"), ("QQQ", "NASDAQ"), ("DIA", "DOW")]:
-        df = ds.fetch_yf_history(sym, period="3d", interval="1d")
-        if df.empty or len(df) < 2:
-            continue
+    """美股隔夜 summary — 給 tw_open 推播當「美股隔夜行情」用. 比 get_us_open_picks 輕量."""
+    spy = ds.fetch_yf_history("SPY", period="2d", interval="1d")
+    qqq = ds.fetch_yf_history("QQQ", period="2d", interval="1d")
+    dia = ds.fetch_yf_history("DIA", period="2d", interval="1d")
+    def _p(df):
+        if df is None or df.empty or len(df) < 2:
+            return None
         try:
             c = df["Close"].astype(float)
-            pct = (float(c.iloc[-1]) / float(c.iloc[-2]) - 1) * 100
-            out[sym] = {"name": name, "pct": round(pct, 2)}
+            return round((float(c.iloc[-1]) / float(c.iloc[-2]) - 1) * 100, 2)
         except Exception:
-            continue
+            return None
     sectors = ds.fetch_sector_rotation()
-    if sectors is not None and not sectors.empty:
-        out["sectors"] = sectors
     fg = ds.fetch_fear_greed()
-    if fg:
-        out["fg"] = fg
-    return out
+    return {
+        "SPY": {"pct": _p(spy)},
+        "QQQ": {"pct": _p(qqq)},
+        "DIA": {"pct": _p(dia)},
+        "sectors": sectors,
+        "fg": fg,
+    }
 
 
-def find_tw_beneficiaries_from_us(us_sectors_df: pd.DataFrame,
-                                    min_pct: float = 0.5,
-                                    top_per_theme: int = 4) -> Dict[str, List[Dict]]:
-    """根據美股強勢板塊，找對應的台股可能受惠者.
-    回傳: {tw_theme: [{stock_id, name, us_drivers}, ...]}
-    """
-    if us_sectors_df is None or us_sectors_df.empty or "1d_%" not in us_sectors_df.columns:
+def find_tw_beneficiaries_from_us(us_sectors_df) -> Dict:
+    """美股板塊強勢 → 對應的台股族群 (簡單映射, 給 us_close 推播用)."""
+    if us_sectors_df is None or us_sectors_df.empty:
         return {}
-
-    strong = us_sectors_df[us_sectors_df["1d_%"] > min_pct]
-    if strong.empty:
-        return {}
-
-    info = ds.get_taiwan_stock_info()
-    name_map = info.set_index("stock_id")["stock_name"].to_dict() if "stock_name" in info.columns else {}
-
-    # 收集 TW 題材 → driver
-    theme_drivers: Dict[str, List[str]] = {}
-    for _, r in strong.iterrows():
-        sym = r.get("symbol", "")
-        name = r.get("sector", "")
-        pct = r.get("1d_%", 0)
-        themes = US_SECTOR_TO_TW_THEMES.get(sym, [])
-        for t in themes:
-            theme_drivers.setdefault(t, []).append(f"{sym} {name} {pct:+.2f}%")
-
-    out: Dict[str, List[Dict]] = {}
-    seen: set = set()
-    for theme, drivers in theme_drivers.items():
-        stock_ids = sector_pulse.TW_THEMES.get(theme, [])
-        picks = []
-        for sid in stock_ids:
-            if sid in seen:
+    tw_map = {
+        "XLK": ("AI 半導體", ["2330", "2454", "3661", "6669"]),
+        "XLF": ("金控", ["2882", "2891", "5880"]),
+        "XLE": ("塑化石化", ["1301", "1303", "6505"]),
+        "XLV": ("生技", ["1707", "4128"]),
+        "XLY": ("零售消費", ["1216", "2912"]),
+    }
+    out = {}
+    try:
+        for _, r in us_sectors_df.head(5).iterrows():
+            sym = r.get("symbol")
+            r1 = r.get("1d_%")
+            if r1 is None or r1 < 0.5:
                 continue
-            picks.append({
-                "stock_id": sid,
-                "name": name_map.get(sid, ""),
-                "theme": theme,
-            })
-            seen.add(sid)
-            if len(picks) >= top_per_theme:
-                break
-        if picks:
-            out[theme] = {"drivers": drivers, "picks": picks}
+            if sym not in tw_map:
+                continue
+            theme, sids = tw_map[sym]
+            picks = [{"stock_id": s, "name": ""} for s in sids[:3]]
+            out[theme] = {
+                "drivers": [f"{sym} {r1:+.2f}%"],
+                "picks": picks,
+            }
+    except Exception as e:
+        print(f"[market_open_picks] find_tw_beneficiaries_from_us failed: {e}", flush=True)
     return out
 
 
 def _gemini_recommend_tw_after_us(beneficiaries: Dict, model: str = "gemini-2.5-flash") -> Dict[str, str]:
-    """讓 Gemini 為每檔台股寫 1 句受惠美股的具體理由."""
+    """對 beneficiaries 裡每檔 TW 股票, 用 Gemini 給 1 句受惠原因. 失敗回 {}."""
+    if not beneficiaries:
+        return {}
     try:
         import ai_analyzer as _ai
-    except ImportError:
-        return {}
-    if not _ai.gemini_available() or not beneficiaries:
-        return {}
-
-    blocks = []
-    all_ids: List[str] = []
-    for theme, info in beneficiaries.items():
-        drivers = ", ".join(info.get("drivers", []))
-        picks = info.get("picks", [])
-        if not picks:
-            continue
-        names = ", ".join(f"{p['stock_id']} {p['name']}" for p in picks)
-        blocks.append(f"[{theme}] 受美股驅動: {drivers}\n候選台股: {names}")
-        all_ids.extend(p["stock_id"] for p in picks)
-
-    if not blocks:
-        return {}
-
-    prompt = f"""你是熟悉台美股聯動的分析師。下面是今日美股強勢板塊 → 對應台股題材 → 候選個股。
-請為每檔候選台股寫 1 句具體「受惠美股的方式」(產品 / 客戶 / 訂單 / 供應鏈位置 等)。
-
-請用嚴格 JSON 格式回應，key 是 stock_id，value 是 1 句中文理由。
-範例: {{"6669": "AI Server ODM Direct，直接接 NVIDIA / Meta 大單", "2382": "Microsoft AI 伺服器代工龍頭"}}
-
-不要加任何前後 markdown，只回 JSON。
-
-待分析:
-
-{chr(10).join(blocks)}"""
-
-    try:
+        if not _ai.gemini_available():
+            return {}
+        all_picks = []
+        for theme, info in beneficiaries.items():
+            for p in info.get("picks", []):
+                all_picks.append({"theme": theme, "stock_id": p["stock_id"]})
+        if not all_picks:
+            return {}
+        lines = [f"  {p['stock_id']} (受惠 {p['theme']})" for p in all_picks]
+        prompt = (
+            "下列台股可能受惠美股板塊強勢, 請用繁體中文 1 句話解釋每檔受惠原因 (≤ 30 字):\n"
+            + "\n".join(lines) + "\n\n"
+            "回覆嚴格 JSON, key=stock_id, value=1 句說明. 範例:\n"
+            "{\"2330\": \"AI 晶片需求帶動先進製程訂單\"}\n"
+            "不要前後贅述, 只回 JSON."
+        )
         import google.generativeai as genai
         genai.configure(api_key=_ai.get_gemini_key())
         m = genai.GenerativeModel(model)
         resp = m.generate_content(
             prompt,
-            generation_config={
-                "temperature": 0.4,
-                "max_output_tokens": 1500,
-                "response_mime_type": "application/json",
-            },
+            generation_config={"temperature": 0.3, "max_output_tokens": 800,
+                                "response_mime_type": "application/json"},
             safety_settings=_ai.get_safety_settings(),
         )
-        text = (resp.text or "").strip()
+        text = (getattr(resp, "text", None) or "").strip()
         if not text:
             return {}
         import json, re
         text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.MULTILINE)
         data = json.loads(text)
         return {str(k): str(v) for k, v in data.items()} if isinstance(data, dict) else {}
-    except Exception:
+    except Exception as e:
+        print(f"[market_open_picks] _gemini_recommend_tw_after_us failed: {e}", flush=True)
         return {}
 
 
 def _gemini_holiday_reasoning(spy_pct: float, qqq_pct: float, dia_pct: float,
-                                asia_data: dict, oil: dict, macro: dict,
-                                top_news: list, trump_posts: list,
-                                model: str = "gemini-2.5-flash") -> str:
-    """假日重大消息 Gemini 推理對台股下次開盤的影響."""
+                               asia: dict, news: list, model: str = "gemini-2.5-flash") -> str:
+    """假日重大消息推理 — 給 holiday_news 推播用."""
     try:
         import ai_analyzer as _ai
+        if not _ai.gemini_available():
+            return ""
     except ImportError:
         return ""
-    if not _ai.gemini_available():
-        return ""
-
-    # 組 prompt 各部分
-    asia_str = ""
-    if asia_data and asia_data.get("snapshot"):
-        asia_lines = [f"  {s['country']} {s['market']}: {s['daily_pct']:+.2f}%"
-                       for s in asia_data["snapshot"]]
-        asia_str = "亞洲市場今日:\n" + "\n".join(asia_lines)
-        if asia_data.get("events"):
-            asia_str += "\n  異常事件: " + "; ".join(
-                f"{e['country']} {e['market']} [{e['event']}]" for e in asia_data["events"][:5]
-            )
-
-    oil_str = ""
-    if oil:
-        oil_str = f"WTI 原油: ${oil.get('price')} ({oil.get('pct_5d', 0):+.1f}% 5d) — {oil.get('signal','')}"
-
-    macro_str = ""
-    if macro:
-        parts = [f"{n}: {m['value']} ({m['pct_5d']:+.2f}%)" for n, m in macro.items()]
-        macro_str = "Macro: " + " · ".join(parts)
-
-    news_str = ""
-    if top_news:
-        news_lines = []
-        for n in top_news[:12]:
-            sent = n.get("sentiment", 0)
-            tag = "📈" if sent > 0 else ("📉" if sent < 0 else "▪")
-            t = n.get("title_zh") or n.get("title", "")
-            news_lines.append(f"  {tag} [{n.get('source','')}] {t}")
-        news_str = "今日重要新聞:\n" + "\n".join(news_lines)
-
-    trump_str = ""
-    if trump_posts:
-        trump_lines = []
-        for t in trump_posts[:3]:
-            text = t.get("text", "")[:200]
-            trump_lines.append(f"  - {text}")
-        trump_str = "Trump Truth Social:\n" + "\n".join(trump_lines)
-
-    prompt = f"""今日台股休市。請整理今日全球 / 區域市場重大消息，並推理對台股「下個交易日開盤」的可能影響。
-
-【美股大盤】
-SPY: {spy_pct:+.2f}%   QQQ: {qqq_pct:+.2f}%   DIA: {dia_pct:+.2f}%
-
-{asia_str}
-
-{oil_str}
-{macro_str}
-
-{news_str}
-
-{trump_str}
-
-------
-
-請用繁體中文回應 (避免太多 emoji)，結構：
-
------- 今日重要事件摘要 ------
-- 列 3-5 個對台股影響最大的事件 / 新聞 / 政治面 / Macro
-- 每個 1-2 句
-
------- 利多 vs 利空 分類 ------
-明確標註哪些是台股下次開盤的「利多」，哪些是「利空」
-
------- 對台股下個開盤推測 ------
-- 評估 開高 / 開低 / 平盤 的可能性
-- 給出最可能情境 + 1-2 個風險情境
-
------- 給投資人準備建議 ------
-- 1-2 個具體可行動作 (例如「持股觀望」、「準備加碼名單」、「降低部位」)
-
-結尾加「以上分析僅供參考，不構成投資建議」。"""
-
+    news_lines = []
+    for n in (news or [])[:8]:
+        t = n.get("title_zh") or n.get("title", "")
+        news_lines.append(f"  - {t[:100]}")
+    prompt = (
+        f"美股: SPY {spy_pct:+.2f}%, QQQ {qqq_pct:+.2f}%, DIA {dia_pct:+.2f}%\n\n"
+        f"重要新聞:\n" + "\n".join(news_lines) + "\n\n"
+        "請用繁體中文寫休市日重大消息分析:\n"
+        "## 重點回顧\n2 句概述今日國際重要動態.\n"
+        "## 對台股下個交易日影響\n2 句, 哪些族群會受惠 / 受壓.\n"
+        "全文 ≤ 200 字."
+    )
     try:
         import google.generativeai as genai
         genai.configure(api_key=_ai.get_gemini_key())
         m = genai.GenerativeModel(model)
         resp = m.generate_content(
             prompt,
-            generation_config={"temperature": 0.5, "max_output_tokens": 1500},
+            generation_config={"temperature": 0.4, "max_output_tokens": 500},
             safety_settings=_ai.get_safety_settings(),
         )
-        return (resp.text or "").strip()
+        return (getattr(resp, "text", None) or "").strip()
     except Exception as e:
-        return f"(Gemini 推理失敗: {e})"
+        print(f"[market_open_picks] _gemini_holiday_reasoning failed: {e}", flush=True)
+        return ""
 
 
 def get_holiday_news_summary() -> Dict:
-    """台股休市日 22:00 推播：彙整全球重大消息 + Gemini 推理對台股下次開盤影響."""
-    # 美股大盤 (US 可能在交易中或盤後)
-    spy_df = ds.fetch_yf_history("SPY", period="3d", interval="1d")
-    qqq_df = ds.fetch_yf_history("QQQ", period="3d", interval="1d")
-    dia_df = ds.fetch_yf_history("DIA", period="3d", interval="1d")
-
-    def _pct(df):
-        if df.empty or len(df) < 2:
+    """假日重大消息推播資料."""
+    spy = ds.fetch_yf_history("SPY", period="2d", interval="1d")
+    qqq = ds.fetch_yf_history("QQQ", period="2d", interval="1d")
+    dia = ds.fetch_yf_history("DIA", period="2d", interval="1d")
+    def _p(df):
+        if df is None or df.empty or len(df) < 2:
             return 0.0
         try:
             c = df["Close"].astype(float)
-            return (float(c.iloc[-1]) / float(c.iloc[-2]) - 1) * 100
+            return round((float(c.iloc[-1]) / float(c.iloc[-2]) - 1) * 100, 2)
         except Exception:
             return 0.0
-
-    spy_pct = _pct(spy_df)
-    qqq_pct = _pct(qqq_df)
-    dia_pct = _pct(dia_df)
-
-    # 亞洲市場
-    asia = asia_markets.check_asia_markets()
-
-    # Macro / Oil
+    spy_pct = _p(spy)
+    qqq_pct = _p(qqq)
+    dia_pct = _p(dia)
+    asia = {}
+    try:
+        import asia_markets
+        asia = asia_markets.check_asia_markets()
+    except Exception:
+        pass
+    news = []
+    try:
+        import news_sources
+        news = news_sources.fetch_holiday_news(max_n=10)
+    except Exception:
+        pass
+    oil = {}
     try:
         import news_sources
         oil = news_sources.fetch_oil_signal()
-        macro = news_sources.fetch_macro_indicators()
-        news = news_sources.fetch_world_news()
-        news = news_sources.enrich_news_with_sentiment(news)
-        # 翻譯成中文 (Gemini 可用時)
-        try:
-            import ai_analyzer as _ai
-            if _ai.gemini_available():
-                news = news_sources.translate_news_titles(news)
-        except Exception:
-            pass
-        # 排序: 利多/利空優先，中性最後
-        news.sort(key=lambda n: -abs(n.get("sentiment", 0)))
+    except Exception:
+        pass
+    fg = ds.fetch_fear_greed()
+    trump = []
+    try:
+        import news_sources
         trump = news_sources.fetch_trump_truth_social(max_items=3)
     except Exception:
-        oil, macro, news, trump = {}, {}, [], []
-
-    # F&G
-    fg = ds.fetch_fear_greed()
-
-    # Gemini 推理
-    ai_text = _gemini_holiday_reasoning(
-        spy_pct, qqq_pct, dia_pct,
-        asia, oil, macro, news, trump,
-    )
-
-    # 5 支台股潛力股 (假日復盤後可關注)
-    macro_str = (
-        f"假日復盤前 macro: 美股 SPY {spy_pct:+.2f}%, QQQ {qqq_pct:+.2f}%, "
-        f"日經 {asia.get('snapshot',[{}])[0].get('daily_pct', 0) if asia.get('snapshot') else 0:+.2f}%, "
-        f"F&G: {fg.get('rating','')}"
-    )
-    potential_picks = potential_picker.find_picks_for_holiday(
-        macro_context=macro_str, top_n=5
-    )
-
+        pass
+    potential_picks = []
+    try:
+        import potential_picker
+        potential_picks = potential_picker.pick_top_potential_stocks(top_n=5)
+    except Exception:
+        pass
+    ai_text = _gemini_holiday_reasoning(spy_pct, qqq_pct, dia_pct, asia, news)
     return {
-        "spy_pct": round(spy_pct, 2),
-        "qqq_pct": round(qqq_pct, 2),
-        "dia_pct": round(dia_pct, 2),
-        "fg": fg,
-        "asia": asia,
-        "oil": oil,
-        "macro": macro,
-        "news": news[:12],
-        "trump": trump,
-        "ai_text": ai_text,
-        "potential_picks": potential_picks,
+        "spy_pct": spy_pct, "qqq_pct": qqq_pct, "dia_pct": dia_pct,
+        "asia": asia, "news": news, "oil": oil, "fg": fg, "trump": trump,
+        "potential_picks": potential_picks, "ai_text": ai_text,
     }
 
 
 def get_us_close_analysis() -> Dict:
-    """美股收盤 +2 小時 (18:00 EDT / 06:00 隔日台北) 全日綜合 + 對台股次日影響推理."""
+    """美股收盤 +2 小時全日綜合 + 對台股次日影響推理."""
     sectors = ds.fetch_sector_rotation()
     fg = ds.fetch_fear_greed()
-
     spy_df = ds.fetch_yf_history("SPY", period="2d", interval="1d")
     qqq_df = ds.fetch_yf_history("QQQ", period="2d", interval="1d")
     dia_df = ds.fetch_yf_history("DIA", period="2d", interval="1d")
-
     def _pct(df):
-        if df.empty or len(df) < 2:
-            return 0.0
+        if df is None or df.empty or len(df) < 2: return 0.0
         try:
             c = df["Close"].astype(float)
             return (float(c.iloc[-1]) / float(c.iloc[-2]) - 1) * 100
         except Exception:
             return 0.0
-
-    spy_pct = _pct(spy_df)
-    qqq_pct = _pct(qqq_df)
-    dia_pct = _pct(dia_df)
-
+    spy_pct = _pct(spy_df); qqq_pct = _pct(qqq_df); dia_pct = _pct(dia_df)
     ai_text = _gemini_us_close_reasoning(sectors, spy_pct, qqq_pct, dia_pct, fg)
-
-    # 受惠美股的台股推薦
-    beneficiaries = find_tw_beneficiaries_from_us(sectors, min_pct=0.5)
+    beneficiaries = find_tw_beneficiaries_from_us(sectors)
     beneficiary_reasons = _gemini_recommend_tw_after_us(beneficiaries) if beneficiaries else {}
-
-    # 5 支台股潛力股 + 目標價
-    macro_str = (
-        f"美股 SPY {spy_pct:+.2f}% / QQQ {qqq_pct:+.2f}%, "
-        f"F&G: {fg.get('rating','')}"
-        if fg else f"美股 SPY {spy_pct:+.2f}% / QQQ {qqq_pct:+.2f}%"
-    )
-    potential_picks = potential_picker.find_picks_from_us_sectors(
-        sectors, macro_context=macro_str, top_n=5
-    )
-
+    potential_picks = []
+    try:
+        import potential_picker
+        potential_picks = potential_picker.pick_top_potential_stocks(top_n=5)
+    except Exception as e:
+        print(f"[market_open_picks] potential_picks (us_close) failed: {e}", flush=True)
     return {
-        "sectors": sectors,
-        "spy_pct": round(spy_pct, 2),
-        "qqq_pct": round(qqq_pct, 2),
-        "dia_pct": round(dia_pct, 2),
-        "fg": fg,
-        "ai_text": ai_text,
-        "beneficiaries": beneficiaries,
-        "beneficiary_reasons": beneficiary_reasons,
-        "potential_picks": potential_picks,
+        "spy_pct": round(spy_pct, 2), "qqq_pct": round(qqq_pct, 2), "dia_pct": round(dia_pct, 2),
+        "sectors": sectors, "fg": fg, "ai_text": ai_text,
+        "beneficiaries": beneficiaries, "beneficiary_reasons": beneficiary_reasons,
+        "potential_picks": potential_picks, "regime": _get_us_regime(),
     }

@@ -139,8 +139,13 @@ def _compute_technicals(df: pd.DataFrame) -> Dict:
 # ---------------------------------------------------------------------------
 # 新聞 (重用 yfinance)
 # ---------------------------------------------------------------------------
+_FETCH_NEWS_LOGGED_ERR = False
+
+
 def _fetch_news(stock_id: str, name: str) -> List[Dict]:
     """抓近期該檔個股新聞 (yfinance get_news)."""
+    global _FETCH_NEWS_LOGGED_ERR
+    last_err = None
     try:
         import yfinance as yf
         for suffix in [".TW", ".TWO"]:
@@ -157,10 +162,15 @@ def _fetch_news(stock_id: str, name: str) -> List[Dict]:
                             out.append({"title": title, "publisher": publisher, "link": link})
                     if out:
                         return out
-            except Exception:
+            except Exception as _e:
+                last_err = _e
                 continue
-    except Exception:
-        pass
+    except Exception as _e:
+        last_err = _e
+    # 第一次失敗印一次 — 401/429 應該至少 log 一次, 不要永遠靜默
+    if last_err is not None and not _FETCH_NEWS_LOGGED_ERR:
+        print(f"[holdings_analyzer._fetch_news] {stock_id} {type(last_err).__name__}: {last_err}", flush=True)
+        _FETCH_NEWS_LOGGED_ERR = True
     return []
 
 

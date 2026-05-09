@@ -95,8 +95,12 @@ def _score_dumping(chip: Dict) -> Tuple[float, Dict]:
     return round(score, 2), {"reasons": " · ".join(reason_bits[:4])}
 
 
+_FETCH_ONE_CHIP_LOGGED_ERR = False
+
+
 def _fetch_one_chip(sid: str, name: str, days: int = 10) -> Optional[Dict]:
     """單檔抓籌碼 + score."""
+    global _FETCH_ONE_CHIP_LOGGED_ERR
     try:
         chip = chip_analyzer.fetch_chip_data(sid, days=days)
         if not chip:
@@ -118,7 +122,11 @@ def _fetch_one_chip(sid: str, name: str, days: int = 10) -> Optional[Dict]:
                 "margin_30d": chip.get("margin", {}).get("融資30日變化%", 0),
             },
         }
-    except Exception:
+    except Exception as _e:
+        # 第一次失敗印一次, 之後沉默 (避免 spam log) — universe 80 檔走完全部 noise 太多
+        if not _FETCH_ONE_CHIP_LOGGED_ERR:
+            print(f"[closing_analyzer._fetch_one_chip] {sid} {type(_e).__name__}: {_e}", flush=True)
+            _FETCH_ONE_CHIP_LOGGED_ERR = True
         return None
 
 
@@ -314,7 +322,11 @@ def _score_breakout(df: pd.DataFrame) -> Tuple[float, Dict]:
     return round(score, 2), metrics
 
 
+_FETCH_ONE_BREAKOUT_LOGGED_ERR = False
+
+
 def _fetch_one_breakout(sid: str, name: str, market_type: str) -> Optional[Dict]:
+    global _FETCH_ONE_BREAKOUT_LOGGED_ERR
     suffix = ".TWO" if market_type == "tpex" else ".TW"
     try:
         df = ds.fetch_yf_history(f"{sid}{suffix}", period="3mo", interval="1d")
@@ -329,7 +341,10 @@ def _fetch_one_breakout(sid: str, name: str, market_type: str) -> Optional[Dict]
             "score": score,
             "metrics": metrics,
         }
-    except Exception:
+    except Exception as _e:
+        if not _FETCH_ONE_BREAKOUT_LOGGED_ERR:
+            print(f"[closing_analyzer._fetch_one_breakout] {sid} {type(_e).__name__}: {_e}", flush=True)
+            _FETCH_ONE_BREAKOUT_LOGGED_ERR = True
         return None
 
 

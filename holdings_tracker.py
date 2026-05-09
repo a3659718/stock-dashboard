@@ -237,7 +237,9 @@ def update_stop_loss_state(holdings_results: List[Dict]) -> int:
                 "stop_loss": float(sl),
                 "name": h.get("name", ""),
                 "set_date": today_str,
-                "fired_date": existing.get("fired_date", ""),  # 保留歷史 fired
+                # 保留 fired 紀錄, 避免 Gemini 重設停損後同日再推一次
+                "fired_date": existing.get("fired_date", ""),
+                "near_stop_fired_date": existing.get("near_stop_fired_date", ""),
             }
             n += 1
     tracker["stop_loss"] = sl_state
@@ -252,6 +254,10 @@ def update_stop_loss_state(holdings_results: List[Dict]) -> int:
 def check_stop_loss_breaches() -> List[Dict]:
     """掃所有持倉, 抓即時價, 跌破停損就回傳 alert.
     一天最多 1 次 per 股票 (用 fired_date 去重).
+
+    回傳 alert dict 多帶 "alert_type":
+      - "breach" — 已跌破停損
+      - "near_stop" — 距停損 ≤ 2% (預警, 還沒破)
     """
     try:
         import holdings_store
@@ -275,8 +281,9 @@ def check_stop_loss_breaches() -> List[Dict]:
         if not sl_info or not sl_info.get("stop_loss"):
             continue  # 還沒設過停損 (Gemini 沒跑過)
         stop_loss = float(sl_info["stop_loss"])
-        if sl_info.get("fired_date") == today_str:
-            continue  # 今日已警報過
+        # fired_date 對 breach 是「真的破」, near_stop_fired_date 是「預警」
+        fired_breach = sl_info.get("fired_date") == today_str
+        fired_near = sl_info.get("near_stop_fired_date") == today_str
 
         # 抓即時價 (5m 線最後一根, fallback daily)
         cur = None
@@ -301,6 +308,8 @@ def check_stop_loss_breaches() -> List[Dict]:
             continue
 
         if cur <= stop_loss:
+            if fired_breach:
+                continue
             breach_pct = (cur / stop_loss - 1) * 100 if stop_loss > 0 else 0
             alerts.append({
                 "stock_id": sid,
@@ -309,8 +318,24 @@ def check_stop_loss_breaches() -> List[Dict]:
                 "stop_loss": round(stop_loss, 2),
                 "breach_pct": round(breach_pct, 2),
                 "set_date": sl_info.get("set_date", ""),
+                "alert_type": "breach",
             })
             sl_info["fired_date"] = today_str
+        else:
+            # 預警: 距停損 ≤ 2% (還沒破, 但很接近)
+            distance_pct = (cur / stop_loss - 1) * 100 if stop_loss > 0 else 999
+            if 0 < distance_pct <= 2 and not fired_near and not fired_breach:
+                alerts.append({
+                    "stock_id": sid,
+                    "name": h.get("name", "") or sl_info.get("name", ""),
+                    "current": round(cur, 2),
+                    "stop_loss": round(stop_loss, 2),
+                    "distance_pct": round(distance_pct, 2),
+                    "breach_pct": 0,  # 還沒破
+                    "set_date": sl_info.get("set_date", ""),
+                    "alert_type": "near_stop",
+                })
+                sl_info["near_stop_fired_date"] = today_str
 
     tracker["stop_loss"] = sl_state
     state["holdings_tracker"] = tracker

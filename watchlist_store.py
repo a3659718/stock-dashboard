@@ -33,6 +33,35 @@ MONITOR_STATE_FILE = Path("monitor_state.json")
 MAX_WATCHLIST = 15
 
 
+def _atomic_write_text(path: Path, blob: str) -> None:
+    """Atomic 寫入 — 寫到 .tmp 後 os.replace, 防併發 cron 互相覆蓋.
+
+    GH Actions cron 啟動有 ~30s 抖動, monitor (每 30 min) + tw_close (07:00 UTC)
+    可能在同分鐘觸發. 用 rename 的 atomic 性, 確保不會看到半寫狀態.
+    """
+    import tempfile
+    parent = path.parent if str(path.parent) else Path(".")
+    parent.mkdir(parents=True, exist_ok=True)
+    # mkstemp 在同 dir 才能 atomic rename (跨 fs 會 fall back 到 copy)
+    fd, tmp_str = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=str(parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(blob)
+            try:
+                f.flush()
+                os.fsync(f.fileno())
+            except Exception:
+                pass
+        os.replace(tmp_str, str(path))
+    except Exception:
+        # 寫失敗 — 清掉 tmp
+        try:
+            os.unlink(tmp_str)
+        except Exception:
+            pass
+        raise
+
+
 # ---------------------------------------------------------------------------
 # Watchlist (15 檔上限)
 # ---------------------------------------------------------------------------
@@ -61,14 +90,14 @@ def save_watchlist(items: List[Dict]) -> bool:
     items = items[:MAX_WATCHLIST]
     items = [_normalize_item(d) for d in items]
 
-    # Local
+    # Local (atomic)
     try:
-        WATCHLIST_FILE.write_text(
+        _atomic_write_text(
+            WATCHLIST_FILE,
             json.dumps(items, ensure_ascii=False, indent=2),
-            encoding="utf-8",
         )
-    except Exception:
-        pass
+    except Exception as _e:
+        print(f"[watchlist_store] local write failed: {_e}", flush=True)
 
     # Sheets
     sheet = _get_sheet("watchlist")
@@ -80,8 +109,8 @@ def save_watchlist(items: List[Dict]) -> bool:
             for d in items:
                 sheet.append_row([str(d.get(c, "")) for c in cols])
             return True
-        except Exception:
-            pass
+        except Exception as _e:
+            print(f"[watchlist_store] gsheets save_watchlist failed: {_e}", flush=True)
     return True
 
 
@@ -170,19 +199,19 @@ def load_monitor_state() -> Dict:
 
 
 def save_monitor_state(state: Dict) -> None:
-    """儲存 monitor state."""
+    """儲存 monitor state (atomic write, 防併發 cron 互相覆蓋)."""
     blob = json.dumps(state, ensure_ascii=False, indent=2)
     try:
-        MONITOR_STATE_FILE.write_text(blob, encoding="utf-8")
-    except Exception:
-        pass
+        _atomic_write_text(MONITOR_STATE_FILE, blob)
+    except Exception as _e:
+        print(f"[watchlist_store] monitor_state local write failed: {_e}", flush=True)
     sheet = _get_sheet("monitor_state")
     if sheet is not None:
         try:
             sheet.clear()
             sheet.update_acell("A1", blob)
-        except Exception:
-            pass
+        except Exception as _e:
+            print(f"[watchlist_store] monitor_state gsheets update failed: {_e}", flush=True)
 
 
 # ---------------------------------------------------------------------------

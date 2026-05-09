@@ -32,8 +32,13 @@ import data_sources as ds
 # ---------------------------------------------------------------------------
 # 抓單檔籌碼資料
 # ---------------------------------------------------------------------------
+@st.cache_data(ttl=900, show_spinner=False)
 def fetch_chip_data(stock_id: str, days: int = 30) -> Dict:
-    """彙整單檔股票的籌碼/法人/融資融券資料."""
+    """彙整單檔股票的籌碼/法人/融資融券資料.
+
+    @st.cache_data ttl=900 (15 分鐘): emerging_themes / sector_pulse / closing_analyzer
+    都會密集呼叫此函式對相同 sid 重複叫, 不 cache 會撞 FinMind rate limit.
+    """
     today = dt.date.today()
     end = today.strftime("%Y-%m-%d")
     start = (today - dt.timedelta(days=days)).strftime("%Y-%m-%d")
@@ -245,5 +250,6 @@ def analyze_chips_batch(stock_ids: List[str], stock_names: Dict[str, str] = None
                     "reason": str(v.get("reason", "")),
                 }
         return out
-    except Exception:
+    except Exception as e:
+        print(f"[chip_analyzer] analyze_chips_batch failed: {e}", flush=True)
         return {}

@@ -170,12 +170,38 @@ def check_watchlist_alerts() -> List[Dict]:
     wl_state = state.setdefault("watchlist_alerts", {})
     today_str = dt.date.today().strftime("%Y-%m-%d")
 
+    # 假日 / 市場時段檢查 — 避免閉市時抓 stale daily data 觸發假警報
+    # (例: 美股盤中對 TW 股, 5m 線無資料會 fall back 到 daily,
+    #  把昨天 open 當 today_open / 前天 close 當 prev_close, 隔夜大跳動的隔天會誤觸警報)
+    closed_markets: set = set()
+    try:
+        import holiday_check
+        for mk in ("TW", "US"):
+            if holiday_check.is_market_closed_today(mk):
+                closed_markets.add(mk)
+    except Exception:
+        pass
+
+    try:
+        import index_alerts as _ia
+        _in_session = {mk: _ia._is_market_in_session(mk) for mk in ("TW", "US")}
+    except Exception:
+        _in_session = {}
+
     alerts: List[Dict] = []
     for item in items:
         sid = item.get("stock_id", "")
         name = item.get("name", "")
         market = item.get("market", "TW").upper()
         entry_price = item.get("entry_price")
+
+        # 該市場休市 → 完全跳過
+        if market in closed_markets:
+            continue
+        # 該市場非交易時段 → 跳過 (避免 5m 拿不到 → fall back daily 觸發誤警報)
+        # 若 in_session 偵測 dict 可用且該市場明確 False, 就 skip; 偵測失敗時放行不擋
+        if _in_session and _in_session.get(market) is False:
+            continue
 
         info = _fetch_today_status(sid, market)
         if info is None:
