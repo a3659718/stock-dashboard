@@ -135,8 +135,13 @@ def send_message(text: str, disable_preview: bool = True,
       2. HTML parse 失敗 → 自動 retry 一次純文字 (避免單一字元擋住整則推播)
       3. 失敗時把更多診斷資訊 (chat_id 長度、message 前 80 字) 包進 info
       4. reply_markup: optional inline keyboard (來自 build_stock_action_keyboard)
+      5. 對 None / 空 text early return, 避免 text[:80] 在診斷字串炸 TypeError
     """
     import json as _json
+    # 防 None / 空文 — 不能 raise, 要 graceful 回傳
+    if text is None or not str(text).strip():
+        return False, "送出失敗: 訊息為空 (text is None or whitespace)"
+    text = str(text)
     token = _bot_token()
     chat_id = _chat_id()
     if not (token and chat_id):
@@ -290,10 +295,11 @@ def fmt_us_top_picks(df, fg: dict) -> str:
         fg_line = "恐慌指數 N/A"
     lines = [f"<b>美股 Top 5 推薦</b> · {fg_line}", ""]
     for i, row in df.head(5).iterrows():
-        # 改 .get + fallback "—" 避免 KeyError 炸整封推播
-        sym = row.get("symbol") if hasattr(row, "get") else row["symbol"] if "symbol" in row else "—"
-        sc = row.get("score") if hasattr(row, "get") else (row["score"] if "score" in row else "—")
-        theme_v = row.get("題材") if hasattr(row, "get") else None
+        # pandas Series .get(key, default) 缺 key 時回 default; 但 None 值仍會回 None
+        # → 用 `or "—"` 同時擋 None 跟空字串
+        sym = row.get("symbol") or "—"
+        sc = row.get("score") or "—"
+        theme_v = row.get("題材")
         lines.append(
             f"{i+1}. <b><code>{_esc(sym)}</code></b>  "
             f"日 {_esc(row.get('daily_%'))}% / 20d {_esc(row.get('20d_%'))}% · 分數 {_esc(sc)}"

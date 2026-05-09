@@ -60,6 +60,88 @@ def _save_state(state: Dict) -> None:
         print(f"[signal_tracker] save failed: {e}", flush=True)
 
 
+def _mutate_signals_atomically(mutate_fn) -> int:
+    """以 file-lock 保護的 read-modify-write, 防 cron + Streamlit 同時 lost update.
+
+    `mutate_fn(records: list) -> int` 接 mutable list, return 變動的筆數. 函式內可
+    直接修改 list (append / 改值) — 在持有 lock 期間做完 reload 就不會被覆蓋.
+
+    Lock 用 fcntl (Unix) 或 portalocker (Windows fallback). 失敗就 fall back 到
+    無 lock 模式 (不致 raise, 但有 race 風險).
+    """
+    import os, time
+    n_changed = 0
+    try:
+        import watchlist_store
+        lock_path = str(watchlist_store.MONITOR_STATE_FILE) + ".lock"
+    except Exception:
+        # 連 watchlist_store 都掛 — fall back 無鎖模式
+        state = _load_state()
+        records = state.setdefault(_STATE_KEY, [])
+        n_changed = mutate_fn(records)
+        if n_changed:
+            state[_STATE_KEY] = records
+            _save_state(state)
+        return n_changed
+
+    # 嘗試開 lock file 並排他鎖定 (跨 process)
+    fd = None
+    locked = False
+    try:
+        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
+        try:
+            import fcntl
+            for _ in range(20):  # 最多等 1 秒 (20 × 50ms)
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    locked = True
+                    break
+                except BlockingIOError:
+                    time.sleep(0.05)
+        except ImportError:
+            # Windows: 用 portalocker (若沒裝就 skip lock, fall back race-prone)
+            try:
+                import portalocker
+                portalocker.lock(fd, portalocker.LOCK_EX)
+                locked = True
+            except Exception:
+                pass
+
+        # 持有 lock 後再 read → mutate → save (atomic 區段)
+        state = _load_state()
+        records = state.setdefault(_STATE_KEY, [])
+        n_changed = mutate_fn(records)
+        if n_changed:
+            state[_STATE_KEY] = records
+            _save_state(state)
+    except Exception as e:
+        print(f"[signal_tracker] _mutate_signals_atomically failed: {e}", flush=True)
+        # fall back to non-locked
+        state = _load_state()
+        records = state.setdefault(_STATE_KEY, [])
+        n_changed = mutate_fn(records)
+        if n_changed:
+            state[_STATE_KEY] = records
+            _save_state(state)
+    finally:
+        if fd is not None:
+            try:
+                if locked:
+                    try:
+                        import fcntl
+                        fcntl.flock(fd, fcntl.LOCK_UN)
+                    except ImportError:
+                        try:
+                            import portalocker
+                            portalocker.unlock(fd)
+                        except Exception:
+                            pass
+                os.close(fd)
+            except Exception:
+                pass
+    return n_changed
+
+
 def _today_str() -> str:
     return dt.date.today().strftime("%Y-%m-%d")
 
@@ -74,48 +156,51 @@ def record_signal(signal_type: str, stock_id: str, name: str = "",
                    expected_direction: str = "up",
                    evaluate_after_days: int = 3,
                    extras: Optional[Dict] = None) -> Optional[str]:
-    """記一筆預測, 回 record id (失敗回 None)."""
+    """記一筆預測, 回 record id (失敗回 None).
+
+    用 _mutate_signals_atomically 保證 cron + Streamlit 同時 record 不會 lost update.
+    """
     if not stock_id or not signal_type:
         return None
-    state = _load_state()
-    records: List[Dict] = state.setdefault(_STATE_KEY, [])
-
-    # Dedup: 同一天 同一 stock_id + signal_type 只記一筆
     today = _today_str()
-    for r in records:
-        if (r.get("predicted_at") == today
-                and r.get("signal_type") == signal_type
-                and str(r.get("stock_id", "")) == str(stock_id)):
-            return r.get("id")  # 已存在 → 回原 id, 不重複
+    rec_id_holder = [None]  # closure 用
 
-    rec_id = str(uuid.uuid4())[:8]
-    rec = {
-        "id": rec_id,
-        "signal_type": signal_type,
-        "stock_id": str(stock_id),
-        "name": str(name or ""),
-        "predicted_at": today,
-        "predicted_price": float(predicted_price) if predicted_price is not None else None,
-        "expected_direction": expected_direction,
-        "evaluate_after_days": int(evaluate_after_days),
-        "evaluate_at": _add_days(today, int(evaluate_after_days)),
-        "actual_price": None,
-        "actual_pct": None,
-        "hit": None,
-        "extras": dict(extras or {}),
-    }
-    records.append(rec)
-    # Cap — 但要保留所有「還沒驗證 (hit=None)」的 pending, 不能被砍掉
-    # 否則 evaluate_after_days=5 的訊號可能被開頭的舊紀錄擠掉
-    if len(records) > _MAX_RECORDS:
-        pending = [r for r in records if r.get("hit") is None]
-        validated = [r for r in records if r.get("hit") is not None]
-        # 留所有 pending + 最近的 validated, 直到總數 <= _MAX_RECORDS
-        keep_validated = max(0, _MAX_RECORDS - len(pending))
-        records[:] = pending + validated[-keep_validated:]
-    state[_STATE_KEY] = records
-    _save_state(state)
-    return rec_id
+    def _mutate(records: List[Dict]) -> int:
+        # Dedup: 同一天 同一 stock_id + signal_type 只記一筆
+        for r in records:
+            if (r.get("predicted_at") == today
+                    and r.get("signal_type") == signal_type
+                    and str(r.get("stock_id", "")) == str(stock_id)):
+                rec_id_holder[0] = r.get("id")
+                return 0  # 已存在 → 不變動
+
+        rec_id_holder[0] = str(uuid.uuid4())[:8]
+        rec = {
+            "id": rec_id_holder[0],
+            "signal_type": signal_type,
+            "stock_id": str(stock_id),
+            "name": str(name or ""),
+            "predicted_at": today,
+            "predicted_price": float(predicted_price) if predicted_price is not None else None,
+            "expected_direction": expected_direction,
+            "evaluate_after_days": int(evaluate_after_days),
+            "evaluate_at": _add_days(today, int(evaluate_after_days)),
+            "actual_price": None,
+            "actual_pct": None,
+            "hit": None,
+            "extras": dict(extras or {}),
+        }
+        records.append(rec)
+        # Cap — 保留所有 pending (hit=None) + 最近的 validated
+        if len(records) > _MAX_RECORDS:
+            pending = [r for r in records if r.get("hit") is None]
+            validated = [r for r in records if r.get("hit") is not None]
+            keep_validated = max(0, _MAX_RECORDS - len(pending))
+            records[:] = pending + validated[-keep_validated:]
+        return 1
+
+    _mutate_signals_atomically(_mutate)
+    return rec_id_holder[0]
 
 
 def _is_market_closed_now(market: str = "TW") -> bool:
@@ -168,57 +253,63 @@ _fetch_close_price = _fetch_eod_close_price
 
 
 def evaluate_pending() -> int:
-    """掃所有 evaluate_at <= 今日 的待驗證紀錄, 抓現價算 hit. 回驗證了幾筆."""
-    state = _load_state()
-    records: List[Dict] = state.get(_STATE_KEY, [])
-    if not records:
-        return 0
+    """掃所有 evaluate_at <= 今日 的待驗證紀錄, 抓現價算 hit. 回驗證了幾筆.
+
+    用 _mutate_signals_atomically 保證跟 record_signal 不會 lost update.
+    """
     today = _today_str()
-    n = 0
-    for r in records:
+
+    # Phase 1: pre-fetch 所有需要 evaluate 的價格 (這段沒鎖, 慢操作不卡 lock)
+    state_snap = _load_state()
+    records_snap: List[Dict] = state_snap.get(_STATE_KEY, []) or []
+    price_map: Dict[str, Optional[float]] = {}
+    for r in records_snap:
         if r.get("hit") is not None:
-            continue  # 已驗過
+            continue
         if r.get("evaluate_at", "9999-99-99") > today:
-            continue  # 還沒到期
+            continue
         sid = r.get("stock_id", "")
+        if not sid or sid in price_map:
+            continue
         market = "US" if r.get("extras", {}).get("market") == "US" else "TW"
-        # 收盤後才評估; 否則 skip 等下次 cron
-        price = _fetch_eod_close_price(sid, market)
-        if price is None:
-            continue
-        pred = r.get("predicted_price")
-        if not pred:
-            continue
-        actual_pct = (price / pred - 1) * 100
-        direction = r.get("expected_direction", "up")
-        if direction == "up":
-            hit = actual_pct > 0.5  # 漲 > 0.5% 算命中
-        else:  # down
-            hit = actual_pct < -0.5
-        r["actual_price"] = round(float(price), 2)
-        r["actual_pct"] = round(float(actual_pct), 2)
-        r["hit"] = bool(hit)
-        n += 1
-    if n:
-        state[_STATE_KEY] = records
-        _save_state(state)
-    return n
+        price_map[sid] = _fetch_eod_close_price(sid, market)
+
+    # Phase 2: 持鎖 mutate (快操作, 用 phase1 抓好的 price_map)
+    def _mutate(records: List[Dict]) -> int:
+        n = 0
+        for r in records:
+            if r.get("hit") is not None:
+                continue
+            if r.get("evaluate_at", "9999-99-99") > today:
+                continue
+            sid = r.get("stock_id", "")
+            price = price_map.get(sid)
+            if price is None:
+                continue
+            pred = r.get("predicted_price")
+            if not pred:
+                continue
+            actual_pct = (price / pred - 1) * 100
+            direction = r.get("expected_direction", "up")
+            if direction == "up":
+                hit = actual_pct > 0.5
+            else:
+                hit = actual_pct < -0.5
+            r["actual_price"] = round(float(price), 2)
+            r["actual_pct"] = round(float(actual_pct), 2)
+            r["hit"] = bool(hit)
+            n += 1
+        return n
+    return _mutate_signals_atomically(_mutate)
 
 
 def accuracy_summary(signal_type: Optional[str] = None,
                       lookback_days: int = 30) -> Dict:
-    """指定 signal_type 的滾動準確率 (None = 全部).
-
-    回 {
-        "signal_type": "...",
-        "n": 25, "hit": 17, "pct": 68.0, "lookback_days": 30,
-    }
-    """
+    """指定 signal_type 的滾動準確率 (None = 全部)."""
     state = _load_state()
-    records: List[Dict] = state.get(_STATE_KEY, [])
+    records: List[Dict] = state.get(_STATE_KEY, []) or []
     cutoff = dt.date.today() - dt.timedelta(days=lookback_days)
     cutoff_str = cutoff.strftime("%Y-%m-%d")
-
     total = 0
     hit = 0
     for r in records:
@@ -266,8 +357,9 @@ def fmt_accuracy_block(signal_types: Optional[List[str]] = None,
 
 
 def reset_all() -> int:
-    state = _load_state()
-    n = len(state.get(_STATE_KEY, []) or [])
-    state[_STATE_KEY] = []
-    _save_state(state)
-    return n
+    """清空所有訊號紀錄. 回原本筆數."""
+    def _mutate(records):
+        n = len(records)
+        records.clear()
+        return n
+    return _mutate_signals_atomically(_mutate)

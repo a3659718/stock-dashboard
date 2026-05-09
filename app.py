@@ -382,10 +382,22 @@ def _alert_dedup_state() -> dict:
 
 
 def _save_dedup_state(state: dict) -> None:
+    """Atomic 寫入 dedup state — 用 watchlist_store._atomic_write_text 保證
+    並發 cron / Streamlit 不會看到半寫狀態."""
     try:
-        _ALERT_STATE_FILE.write_text(_json.dumps(state, ensure_ascii=False), encoding="utf-8")
+        import watchlist_store
+        watchlist_store._atomic_write_text(
+            _ALERT_STATE_FILE,
+            _json.dumps(state, ensure_ascii=False, indent=2),
+        )
     except Exception:
-        pass
+        # Fall back: 普通 write_text (race-prone 但至少不 crash)
+        try:
+            _ALERT_STATE_FILE.write_text(
+                _json.dumps(state, ensure_ascii=False), encoding="utf-8",
+            )
+        except Exception:
+            pass
 
 
 def _should_send_once(key: str) -> bool:

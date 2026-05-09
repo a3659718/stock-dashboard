@@ -258,6 +258,14 @@ def _build_from_potential(p: Dict, parent_data: Dict) -> Optional[Dict]:
     if spy_pct is not None and spy_pct > 0.3:
         reasons.append(f"美股隔夜偏多 SPY +{spy_pct:.2f}%")
 
+    # 財報事件? (從 parent_data["events"] 拉)
+    events = parent_data.get("events") or {}
+    ev = events.get(sid) if isinstance(events, dict) else None
+    if ev and isinstance(ev, dict):
+        ev_summary = ev.get("summary") or ""
+        if ev_summary and ev_summary != "—":
+            reasons.append(f"財報: {ev_summary[:50]}")
+
     return {
         "stock_id": sid,
         "name": p.get("name", ""),

@@ -463,5 +463,7 @@ def fmt_emerging_themes_block(emerging: List[Dict]) -> List[str]:
             nm = _esc(s.get("name", ""))
             tp = _esc(s.get("today_pct", ""))
             vr = _esc(s.get("vol_ratio", ""))
-            out.append(f"     <code>{sid}</code> {nm}  今日 {tp}% · 量比 {vr}x")
+            # US 版 leading_stocks 沒有 stock_name (空字串), 避免雙空白
+            name_part = f" {nm}" if nm and str(nm).strip() else ""
+            out.append(f"     <code>{sid}</code>{name_part}  今日 {tp}% · 量比 {vr}x")
     return out

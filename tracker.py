@@ -217,14 +217,15 @@ def evaluate_history_performance(history: pd.DataFrame, days_window: int = 30) -
 
 
 def history_summary(perf_df: pd.DataFrame) -> dict:
-    """整體勝率 / 平均報酬。"""
+    """整體勝率 / 平均報酬."""
     if perf_df is None or perf_df.empty:
         return {}
-    valid = perf_df[perf_df["return%"].notna()]
-    if valid.empty:
-        return {}
+    valid = perf_df[perf_df["return%"].notna()] if "return%" in perf_df.columns else perf_df
+    if len(valid) == 0:
+        return {"total": len(perf_df), "valid": 0}
     return {
-        "n_picks": len(valid),
+        "total": len(perf_df),
+        "valid": len(valid),
         "win_rate": round(float((valid["return%"] > 0).mean() * 100), 1),
         "avg_return": round(float(valid["return%"].mean()), 2),
         "median_return": round(float(valid["return%"].median()), 2),

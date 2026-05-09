@@ -296,8 +296,7 @@ def check_triggers() -> List[Dict]:
             is_cross = (t_type.startswith("kd_") or t_type.startswith("macd_")
                         or t_type.startswith("ma_cross"))
             if is_cross and only_price_triggers:
-                # 不會發生 (only_price_triggers 表示沒 cross), 防呆
-                continue
+                continue  # 防呆 (不會發生)
             msg = _evaluate_trigger(t, m_state)
             if msg:
                 t["fired_at"] = today
