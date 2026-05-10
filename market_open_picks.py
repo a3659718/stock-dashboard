@@ -990,9 +990,22 @@ def get_holiday_news_summary() -> Dict:
     news = []
     try:
         import news_sources
-        news = news_sources.fetch_holiday_news(max_n=10)
-    except Exception:
-        pass
+        # 用 fetch_finance_news 聚合純財經 RSS + 含財經關鍵字的一般新聞
+        # (避免推到假日的 weekend 政治 / 體育 / 娛樂等噪音)
+        raw_news = news_sources.fetch_finance_news(max_items=10)
+        news = raw_news or []
+        # 補 sentiment score (title 關鍵字評分) — fmt_holiday_news 用 sentiment 顯示 📈/📉/▪
+        try:
+            import stock_catalyst
+            for n in news:
+                s = stock_catalyst._score_news_sentiment(n.get("title", "") or "", lang="en")
+                n["sentiment"] = s.get("score", 0)
+        except Exception as _e:
+            print(f"[market_open_picks] news sentiment scoring failed: {_e}", flush=True)
+        # 排序: sentiment 強 (利多 / 利空) 的優先, 中性的後面 → 提高假日推播信息密度
+        news.sort(key=lambda n: abs(n.get("sentiment", 0) or 0), reverse=True)
+    except Exception as e:
+        print(f"[market_open_picks] fetch_finance_news failed: {e}", flush=True)
     oil = {}
     try:
         import news_sources
@@ -1009,9 +1022,18 @@ def get_holiday_news_summary() -> Dict:
     potential_picks = []
     try:
         import potential_picker
-        potential_picks = potential_picker.pick_top_potential_stocks(top_n=5)
-    except Exception:
-        pass
+        # 用真實存在的 find_picks_for_holiday (我之前重建時誤寫成 pick_top_potential_stocks ghost)
+        # macro_context 給 Gemini 一些前提資料 (美股漲跌 + 油價 + 重大新聞)
+        macro_ctx = (
+            f"美股: SPY {spy_pct:+.2f}%, QQQ {qqq_pct:+.2f}%, DIA {dia_pct:+.2f}%. "
+            f"WTI 油價 ${oil.get('price', '—')} ({oil.get('pct_5d', 0):+.1f}% 5d). "
+            f"重大新聞: " + "; ".join(n.get("title", "")[:60] for n in (news or [])[:3])
+        )
+        potential_picks = potential_picker.find_picks_for_holiday(
+            macro_context=macro_ctx, top_n=5,
+        )
+    except Exception as _e:
+        print(f"[market_open_picks] potential_picks (holiday) failed: {_e}", flush=True)
     ai_text = _gemini_holiday_reasoning(spy_pct, qqq_pct, dia_pct, asia, news)
     return {
         "spy_pct": spy_pct, "qqq_pct": qqq_pct, "dia_pct": dia_pct,
@@ -1041,7 +1063,12 @@ def get_us_close_analysis() -> Dict:
     potential_picks = []
     try:
         import potential_picker
-        potential_picks = potential_picker.pick_top_potential_stocks(top_n=5)
+        macro_ctx = (
+            f"美股盤後: SPY {spy_pct:+.2f}%, QQQ {qqq_pct:+.2f}%, DIA {dia_pct:+.2f}%."
+        )
+        potential_picks = potential_picker.find_picks_for_holiday(
+            macro_context=macro_ctx, top_n=5,
+        )
     except Exception as e:
         print(f"[market_open_picks] potential_picks (us_close) failed: {e}", flush=True)
     return {

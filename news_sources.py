@@ -104,6 +104,109 @@ def fetch_world_news() -> List[Dict]:
 
 
 # ---------------------------------------------------------------------------
+# 財經新聞專用 (給 holiday_news 推播用 — 過濾掉純世界新聞 / 政治 / 體育)
+# ---------------------------------------------------------------------------
+# 純財經 feeds (這些 source 內容已是財經主軸, 不需關鍵字過濾)
+FINANCE_RSS_FEEDS = {
+    "CNN Business":      "http://rss.cnn.com/rss/money_latest.rss",
+    "Fox Business":      "https://moxie.foxnews.com/google-publisher/business.xml",
+    "BBC Business":      "http://feeds.bbci.co.uk/news/business/rss.xml",
+    "NYT Business":      "https://rss.nytimes.com/services/xml/rss/nyt/Business.xml",
+}
+
+# 一般新聞 source 出現這些字才視為財經 (過濾政治 / 體育 / 娛樂)
+_FINANCE_KEYWORDS = [
+    # 市場
+    "stock", "market", "shares", "index", "indices", "rally", "selloff", "sell-off",
+    "bull", "bear", "wall street", "nasdaq", "s&p", "dow", "futures", "etf",
+    # 央行 / 利率
+    "fed", "fomc", "rate cut", "rate hike", "rate decision", "interest rate",
+    "yield", "treasury", "bonds", "central bank", "ecb", "boj",
+    # 經濟
+    "inflation", "cpi", "ppi", "gdp", "recession", "unemployment", "jobs report",
+    "economy", "economic", "growth", "deficit", "tariff", "trade",
+    # 公司 / 財報
+    "earnings", "eps", "revenue", "guidance", "ipo", "buyback", "dividend",
+    "merger", "acquisition", "takeover", "spin-off",
+    # 商品 / 匯率
+    "oil", "crude", "wti", "brent", "gold", "silver", "copper", "natural gas",
+    "dollar", "euro", "yen", "yuan", "currency", "fx",
+    # 加密貨幣 / 金融科技
+    "bitcoin", "btc", "ethereum", "crypto", "cryptocurrency",
+    # 公司名 (Mag 7 + 知名股票)
+    "apple", "microsoft", "google", "amazon", "tesla", "nvidia", "meta", "openai",
+    "tsmc", "samsung", "intel", "amd", "boeing", "exxon", "jpmorgan", "berkshire",
+]
+
+
+def _is_finance_news(item: Dict, source: str) -> bool:
+    """判斷一則 RSS item 是不是財經新聞.
+
+    純財經 source (Business 系列) 全部視為財經.
+    其他 source 看 title + summary 是否含財經關鍵字.
+    """
+    if source in FINANCE_RSS_FEEDS:
+        return True
+    text = (
+        (item.get("title", "") or "").lower()
+        + " "
+        + (item.get("summary", "") or "").lower()
+    )
+    return any(kw in text for kw in _FINANCE_KEYWORDS)
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def fetch_finance_news(max_items: int = 15) -> List[Dict]:
+    """財經新聞聚合 — 給假日推播用.
+
+    來源:
+      1. 純財經 RSS (CNN/Fox/BBC/NYT Business)
+      2. 一般 RSS 中過濾出含財經關鍵字的
+
+    回傳近 36 小時內的 unique items, 至多 max_items 筆.
+    """
+    out: List[Dict] = []
+    seen_titles: set = set()
+    # 先抓純財經 feeds (優先)
+    for name, url in FINANCE_RSS_FEEDS.items():
+        for item in fetch_rss_feed(name, url, max_items=8):
+            t = item.get("title", "").strip()
+            if not t or t in seen_titles:
+                continue
+            seen_titles.add(t)
+            out.append(item)
+
+    # 再從一般 feeds 抓含財經關鍵字的 (補滿)
+    for name, url in RSS_FEEDS.items():
+        if name in FINANCE_RSS_FEEDS:
+            continue  # 已經抓過
+        for item in fetch_rss_feed(name, url, max_items=8):
+            t = item.get("title", "").strip()
+            if not t or t in seen_titles:
+                continue
+            if not _is_finance_news(item, name):
+                continue
+            seen_titles.add(t)
+            out.append(item)
+
+    # 過濾近 36 小時
+    cutoff = dt.datetime.utcnow() - dt.timedelta(hours=36)
+    fresh = []
+    for it in out:
+        ts = it.get("time")
+        if not ts:
+            fresh.append(it)
+            continue
+        try:
+            d = dt.datetime.fromisoformat(ts.replace("Z", ""))
+            if d >= cutoff:
+                fresh.append(it)
+        except Exception:
+            fresh.append(it)
+    return fresh[:max_items]
+
+
+# ---------------------------------------------------------------------------
 # 油價 + 其他大宗商品 / 殖利率訊號
 # ---------------------------------------------------------------------------
 def _pct_change(close: pd.Series, days: int) -> float:
@@ -337,115 +440,179 @@ def time_ago(iso_str: str) -> str:
         return ""
     try:
         d = dt.datetime.fromisoformat(iso_str.replace("Z", ""))
+        delta = dt.datetime.utcnow() - d
+        sec = int(delta.total_seconds())
+        if sec < 60:
+            return f"{sec} 秒前"
+        if sec < 3600:
+            return f"{sec // 60} 分鐘前"
+        if sec < 86400:
+            return f"{sec // 3600} 小時前"
+        return f"{sec // 86400} 天前"
     except Exception:
         return iso_str[:16]
-    now = dt.datetime.utcnow()
-    diff = now - d
-    secs = int(diff.total_seconds())
-    if secs < 60:
-        return "剛剛"
-    if secs < 3600:
-        return f"{secs // 60} 分鐘前"
-    if secs < 86400:
-        return f"{secs // 3600} 小時前"
-    if secs < 604800:
-        return f"{secs // 86400} 天前"
-    return d.strftime("%Y-%m-%d")
 
 
-def enrich_news_with_sentiment(news_list: List[Dict], lang_default: str = "en") -> List[Dict]:
-    """為每則新聞補上 sentiment 標籤 + 命中關鍵字 + 相對時間.
-    lang_default: 'en' for world news, 'zh' for TaiwanStockNews.
+def _humanize_iso_time(iso_str: str) -> str:
+    """把 ISO 時間轉成「3 小時前 / 2 天前」的人類可讀字串."""
+    if not iso_str:
+        return ""
+    try:
+        d = dt.datetime.fromisoformat(iso_str.replace("Z", ""))
+        delta = dt.datetime.utcnow() - d
+        sec = int(delta.total_seconds())
+        if sec < 60:
+            return f"{sec} 秒前"
+        if sec < 3600:
+            return f"{sec // 60} 分鐘前"
+        if sec < 86400:
+            return f"{sec // 3600} 小時前"
+        return f"{sec // 86400} 天前"
+    except Exception:
+        return iso_str[:16]
+
+
+def enrich_news_with_sentiment(news_list, lang_default: str = "en"):
+    """對每個 news item 加 sentiment 分數 (基於關鍵字) + time_ago 顯示文字.
+
+    item 已存在的 sentiment / time_ago 不會被覆蓋. 給 dashboard 顯示用.
     """
+    if not news_list:
+        return news_list
     try:
         import stock_catalyst
     except ImportError:
         return news_list
     out = []
     for n in news_list:
-        x = dict(n)
-        title = x.get("title", "")
-        # Heuristic: 含中文字元 → zh
-        has_chinese = any("一" <= ch <= "鿿" for ch in title)
-        lang = "zh" if has_chinese else lang_default
-        s = stock_catalyst._score_news_sentiment(title, lang=lang)
-        x["sentiment"] = s.get("score", 0)
-        x["bullish_kw"] = s.get("bullish", [])
-        x["bearish_kw"] = s.get("bearish", [])
-        x["time_ago"] = time_ago(x.get("time", ""))
-        out.append(x)
+        if not isinstance(n, dict):
+            out.append(n)
+            continue
+        n2 = dict(n)
+        if "sentiment" not in n2:
+            try:
+                title = n2.get("title", "") or ""
+                # 中文 title 用中文字典, 英文用英文字典
+                lang = "zh" if any('\u4e00' <= ch <= '\u9fff' for ch in title[:30]) else lang_default
+                s = stock_catalyst._score_news_sentiment(title, lang=lang)
+                n2["sentiment"] = s.get("score", 0)
+                n2["sentiment_keywords"] = (s.get("bullish") or s.get("bearish") or [])[:3]
+            except Exception:
+                n2["sentiment"] = 0
+        if "time_ago" not in n2:
+            try:
+                n2["time_ago"] = _humanize_iso_time(n2.get("time", ""))
+            except Exception:
+                n2["time_ago"] = ""
+        out.append(n2)
     return out
 
 
-def fetch_tw_news_aggregated(stock_ids: List[str] = None, days: int = 3,
-                                max_per_stock: int = 3) -> List[Dict]:
-    """從 FinMind TaiwanStockNews 抓多檔個股新聞彙整，做台股新聞分頁用."""
-    if not stock_ids:
-        return []
-    today = dt.date.today()
-    end = today.strftime("%Y-%m-%d")
-    start = (today - dt.timedelta(days=days)).strftime("%Y-%m-%d")
-    out: List[Dict] = []
-    for sid in stock_ids[:30]:  # 最多 30 檔避免太久
-        try:
-            df = ds._finmind_get("TaiwanStockNews", data_id=sid,
-                                  start_date=start, end_date=end)
-        except Exception:
-            continue
-        if df is None or df.empty:
-            continue
-        df["date"] = pd.to_datetime(df.get("date", pd.NaT), errors="coerce")
-        for _, r in df.head(max_per_stock).iterrows():
-            ts = ""
-            if pd.notna(r.get("date")):
-                ts = r["date"].isoformat()
-            out.append({
-                "source": f"FinMind ({sid})",
-                "title": str(r.get("title", "") or "")[:200],
-                "link": str(r.get("link", "") or ""),
-                "summary": str(r.get("summary", "") or "")[:300],
-                "time": ts,
-                "stock_id": sid,
-            })
-    return out
+def translate_news_titles(news_list, max_items: int = 15):
+    """用 Gemini 把英文 news title 翻成繁中 (一次批次). 失敗就 keep original.
 
+    每個 item 多一個 "title_zh" 欄位 (跟 fmt_holiday_news 對接).
+    """
+    if not news_list:
+        return news_list
+    # 只翻譯沒 title_zh 的
+    targets = [(i, n) for i, n in enumerate(news_list[:max_items])
+               if isinstance(n, dict) and not n.get("title_zh") and n.get("title")]
+    if not targets:
+        return news_list
 
-def build_news_context(include_trump: bool = True) -> str:
-    """組裝給 Gemini 用的純文字 context."""
-    parts = []
+    try:
+        import ai_analyzer as _ai
+        if not _ai.gemini_available():
+            return news_list
+    except ImportError:
+        return news_list
 
-    # 油價 + macro
-    oil = fetch_oil_signal()
-    if oil:
-        parts.append(
-            f"WTI 原油 ${oil['price']} (1d {oil['pct_1d']:+.1f}%, 5d {oil['pct_5d']:+.1f}%) — {oil['signal']}"
+    titles = [t[1].get("title", "") for t in targets]
+    prompt = (
+        "請把以下英文新聞標題翻成繁體中文 (一行一個, 順序對應). "
+        "保留專有名詞 / 公司股票代號 / 數字百分比. 簡潔, 不超過 35 字.\n\n"
+        + "\n".join(f"{i+1}. {t}" for i, t in enumerate(titles))
+        + "\n\n用 JSON array 回 (不要 markdown), 順序對應上面 1..N: [\"翻譯1\", \"翻譯2\", ...]"
+    )
+    try:
+        import google.generativeai as genai
+        genai.configure(api_key=_ai.get_gemini_key())
+        m = genai.GenerativeModel("gemini-2.5-flash")
+        resp = m.generate_content(
+            prompt,
+            generation_config={"temperature": 0.2, "max_output_tokens": 1500,
+                                "response_mime_type": "application/json"},
+            safety_settings=_ai.get_safety_settings(),
         )
-    macro = fetch_macro_indicators()
-    if macro:
-        macro_lines = []
-        for name, m in macro.items():
-            macro_lines.append(f"  {name}: {m['value']} (1d {m['pct_1d']:+.2f}%, 5d {m['pct_5d']:+.2f}%)")
-        parts.append("Macro 指標:\n" + "\n".join(macro_lines))
+        import json, re as _re
+        text = (getattr(resp, "text", None) or "").strip()
+        text = _re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=_re.MULTILINE)
+        translated = json.loads(text)
+        if not isinstance(translated, list):
+            return news_list
+        # 寫回
+        out = list(news_list)
+        for j, (orig_idx, n) in enumerate(targets):
+            if j < len(translated):
+                n2 = dict(n)
+                n2["title_zh"] = str(translated[j])[:200]
+                out[orig_idx] = n2
+        return out
+    except Exception as e:
+        print(f"[news_sources] translate_news_titles failed: {e}", flush=True)
+        return news_list
 
-    # World news
-    news = fetch_world_news()
-    if news:
-        parts.append(f"國際新聞 ({len(news)} 則):")
-        # 按來源分組
-        by_source: Dict[str, List[Dict]] = {}
-        for n in news[:30]:
-            by_source.setdefault(n["source"], []).append(n)
-        for src, items in by_source.items():
-            parts.append(f"  [{src}]")
-            for n in items[:3]:
-                parts.append(f"    - {n['title']}")
 
-    # Trump
+def build_news_context(include_trump: bool = True, max_items: int = 8) -> str:
+    """整合多源新聞 + Trump 言論 + 油價 + macro, 給 AI 分析個股時當 context.
+
+    回一個多行字串 (可以直接餵 prompt). 失敗回空字串.
+    """
+    parts = []
+    try:
+        # 油價 + macro
+        oil = fetch_oil_signal()
+        if oil:
+            parts.append(f"WTI 油價: ${oil.get('price','—')} ({oil.get('pct_5d',0):+.1f}% 5d) — {oil.get('signal','')}")
+        macro = fetch_macro_indicators()
+        if macro:
+            macro_parts = []
+            for k in ("美元指數", "10年美債殖利率", "VIX", "BTC"):
+                if k in macro:
+                    v = macro[k]
+                    macro_parts.append(f"{k} {v.get('value','—')} ({v.get('pct_5d',0):+.2f}%)")
+            if macro_parts:
+                parts.append("Macro: " + " · ".join(macro_parts))
+    except Exception:
+        pass
+
+    try:
+        # 財經新聞 top N (sentiment 強的優先)
+        news = fetch_finance_news(max_items=max_items)
+        news = enrich_news_with_sentiment(news, lang_default="en")
+        # 排序 sentiment abs 大的優先
+        news.sort(key=lambda n: abs(n.get("sentiment", 0) or 0), reverse=True)
+        if news:
+            parts.append("近期重要新聞:")
+            for n in news[:max_items]:
+                src = n.get("source", "")
+                t = n.get("title_zh") or n.get("title", "")
+                sent = n.get("sentiment", 0) or 0
+                tag = "📈" if sent > 0 else ("📉" if sent < 0 else "▪")
+                parts.append(f"  {tag} [{src}] {t[:120]}")
+    except Exception:
+        pass
+
     if include_trump:
-        trumps = fetch_trump_truth_social(max_items=5)
-        if trumps:
-            parts.append("Trump Truth Social (近期):")
-            for t in trumps[:5]:
-                parts.append(f"  - {t['text'][:150]}")
+        try:
+            trumps = fetch_trump_truth_social(max_items=2)
+            if trumps:
+                parts.append("Trump 最新言論:")
+                for t in trumps[:1]:
+                    txt = (t.get("text") or "")[:200]
+                    parts.append(f"  • {txt}")
+        except Exception:
+            pass
 
-    return "\n\n".join(parts)
+    return "\n".join(parts)

@@ -909,7 +909,7 @@ def fmt_holiday_news(data: dict) -> str:
     ]
     if fg.get("score") is not None:
         try:
-            lines.append(f"CNN F&G: {float(fg['score']):.0f} ({_esc(fg.get('rating',''))})")
+            lines.append(f"CNN F&amp;G: {float(fg['score']):.0f} ({_esc(fg.get('rating',''))})")
         except (TypeError, ValueError):
             pass
 
@@ -1145,7 +1145,7 @@ def fmt_us_close_analysis(data: dict) -> str:
     ]
     if fg.get("score") is not None:
         try:
-            lines.append(f"CNN F&G: {float(fg['score']):.0f} ({_esc(fg.get('rating',''))})")
+            lines.append(f"CNN F&amp;G: {float(fg['score']):.0f} ({_esc(fg.get('rating',''))})")
         except (TypeError, ValueError):
             pass
 
