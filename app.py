@@ -457,9 +457,9 @@ watchlist = parse_watchlist(watchlist_raw)
 # Tabs
 # ---------------------------------------------------------------------------
 (tab_wl, tab_actionable, tab_hold, tab_tw, tab_pulse, tab_growth, tab_stock,
- tab_us, tab_mood, tab_bt, tab_track) = st.tabs(
+ tab_us, tab_crypto, tab_mood, tab_bt, tab_track) = st.tabs(
     ["📋 自選股", "🎯 今日可行動", "💼 持倉分析", "🇹🇼 台股篩選", "🚀 強勢族群",
-     "🌱 成長動能", "🔍 個股分析", "🇺🇸 美股 Top 5", "🧭 市場情緒",
+     "🌱 成長動能", "🔍 個股分析", "🇺🇸 美股 Top 5", "🪙 加密貨幣", "🧭 市場情緒",
      "📊 回測勝率", "📈 推薦追蹤"]
 )
 
@@ -2464,3 +2464,131 @@ with tab_track:
                             st.metric("追蹤檔數", f"{len(valid)}")
         except Exception as e:
             st.error(f"追蹤計算失敗: {type(e).__name__}: {e}")
+
+
+# =============================================================================
+# Tab — 🪙 加密貨幣 (上漲趨勢 + Gemini 挑 5 檔)
+# =============================================================================
+with tab_crypto:
+    st.subheader("🪙 加密貨幣 Top 5 進場推薦")
+    st.caption(
+        "掃 30 個主流幣種 (top 市值 + 高 momentum + meme), 用 today%/7d%/30d%/量比/RSI 評分, "
+        "取前 10 名交給 Gemini 挑 5 個給進場區間 / 目標價 / 停損. 每天中午 12:00 自動推 TG."
+    )
+    cC1, cC2, cC3 = st.columns([1, 1, 2])
+    with cC1:
+        load_crypto = st.button("🔄 重抓 Top 5", use_container_width=True,
+                                  type="primary", key="crypto_load")
+    with cC2:
+        send_crypto_tg = st.button("✈️ 推 Top 5 到 TG", use_container_width=True,
+                                     key="crypto_tg")
+    with cC3:
+        last_ts = st.session_state.get("crypto_picks_ts")
+        if last_ts:
+            st.caption(f"上次更新: {last_ts}")
+
+    if load_crypto:
+        with st.spinner("掃 30 個幣種 + Gemini 分析中… 約 20-40 秒"):
+            try:
+                import crypto_picker
+                st.session_state["crypto_picks_cache"] = crypto_picker.get_crypto_picks(top_n=5)
+                st.session_state["crypto_picks_ts"] = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
+            except Exception as e:
+                st.error(f"加密貨幣分析失敗: {type(e).__name__}: {e}")
+                st.session_state["crypto_picks_cache"] = {"error": str(e)}
+
+    raw = st.session_state.get("crypto_picks_cache", None)
+    if raw is None:
+        st.info(
+            "👆 按「重抓 Top 5」開始分析.\n\n"
+            "會掃描的幣種 (30 個): BTC/ETH/SOL/XRP/ADA/DOGE 等 top 市值 + "
+            "ARB/OP/INJ/SUI/TIA/SEI/FET/RNDR 等高 momentum + PEPE/WIF/BONK 等 meme.\n"
+            "首次跑 20-40 秒 (yfinance 並行抓 + Gemini 分析)."
+        )
+    elif raw.get("error"):
+        st.error(f"分析失敗: {raw['error']}")
+    else:
+        # 上方統計 + regime
+        regime = raw.get("regime") or {}
+        if regime.get("regime"):
+            rg = regime.get("regime", "")
+            rg_label = regime.get("regime_label", "")
+            rg_score = regime.get("score", 0)
+            icon_map = {"bull":"🟢","bull_weak":"🟡","range":"⚪","bear_weak":"🟠","bear":"🔴"}
+            ic = icon_map.get(rg, "")
+            if rg in ("bull", "bull_weak"):
+                st.success(f"{ic} **美股大盤: {rg_label}** (score {rg_score}) — 加密貨幣風險偏好通常與其同步")
+            elif rg == "range":
+                st.warning(f"{ic} **美股大盤: {rg_label}** (score {rg_score}) — 加密可能跟著震盪")
+            else:
+                st.error(f"{ic} **美股大盤: {rg_label}** (score {rg_score}) — 加密風險升高, 部位減半")
+
+        mc = raw.get("market_context", "")
+        if mc:
+            st.info(f"📊 {mc}")
+
+        picks = raw.get("picks", []) or []
+        if not picks:
+            st.warning("今日無符合條件的幣種 (today% 跟 7d% 都正才入選)")
+        else:
+            for i, p in enumerate(picks, 1):
+                rr = p.get("rr") or 0
+                rr_emoji = "⭐⭐" if rr >= 3 else ("⭐" if rr >= 2 else "")
+                score = p.get("score", 0)
+                score_color = "🟢" if score >= 6 else ("🟡" if score >= 4 else "🔴")
+                with st.container(border=True):
+                    cH1, cH2 = st.columns([3, 1])
+                    with cH1:
+                        st.markdown(f"### {i}. `{p.get('symbol')}` {score_color}")
+                        st.caption(
+                            f"R:R {rr} {rr_emoji} · 綜合分數 {score} · "
+                            f"持有 {p.get('hold_period','—')} · 機率 {p.get('win_prob','—')}"
+                        )
+                    with cH2:
+                        st.metric("現價", f"${p.get('current')}")
+                    cBody1, cBody2 = st.columns(2)
+                    with cBody1:
+                        st.write(f"**進場區間**: ${p.get('entry_low')} ~ ${p.get('entry_high')}")
+                        st.write(f"**目標**: ${p.get('target')} · **停損**: ${p.get('stop_loss')}")
+                        if p.get("reason"):
+                            st.info(f"💡 {p['reason']}")
+                    with cBody2:
+                        today = p.get("today_pct", 0)
+                        wk = p.get("7d_pct", 0)
+                        mo = p.get("30d_pct", 0)
+                        vr = p.get("vol_ratio", 0)
+                        rsi = p.get("rsi", 0)
+                        st.write(f"**漲跌**: 今日 {today:+.2f}% · 7d {wk:+.2f}% · 30d {mo:+.2f}%")
+                        st.write(f"**量比**: {vr}x · **RSI**: {rsi}")
+
+        # 顯示 universe 排名 (擴充看其他候選)
+        scanned = raw.get("scanned", [])
+        if scanned:
+            with st.expander(f"📋 全市場掃描排名 (前 15 / 共 {raw.get('universe_size', '?')} 個)"):
+                df = pd.DataFrame([
+                    {"symbol": s["symbol"], "current": s["current"],
+                     "today%": s["today_pct"], "7d%": s["7d_pct"],
+                     "30d%": s["30d_pct"], "vol_ratio": s["vol_ratio"],
+                     "RSI": s["rsi"], "score": s["score"]}
+                    for s in scanned
+                ])
+                st.dataframe(df, use_container_width=True, hide_index=True)
+
+    if send_crypto_tg:
+        if raw is None or raw.get("error"):
+            st.warning("還沒抓資料 / 抓失敗, 先按重抓")
+        else:
+            try:
+                import crypto_picker
+                tg_msg = crypto_picker.fmt_crypto_picks_tg(raw)
+                if tg_msg:
+                    ok_, info = notifier.send_message(tg_msg)
+                    if ok_:
+                        st.toast("已推送加密貨幣 Top 5 到 Telegram", icon="✅")
+                    else:
+                        st.error(f"推送失敗: {info}")
+                else:
+                    st.warning("沒可推送內容")
+            except Exception as e:
+                st.error(f"推送異常: {type(e).__name__}: {e}")
+

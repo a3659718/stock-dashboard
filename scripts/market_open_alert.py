@@ -461,6 +461,31 @@ def main() -> int:
             print(f"Gemini reasoning: {len(data['ai_text'])} chars")
         print(f"Got {len(data.get('news', []))} news items")
         msg = notifier.fmt_holiday_news(data)
+    elif market == "crypto_picks":
+        # 每天中午 12:00 台北 (04:00 UTC) 推 5 個適合進場的加密貨幣
+        print("Running crypto picks (daily noon)...")
+        try:
+            import crypto_picker
+            data = crypto_picker.get_crypto_picks(top_n=5)
+            n_picks = len(data.get("picks", []) or [])
+            print(f"Got {n_picks} crypto picks (universe scanned: {data.get('universe_size', 0)})")
+            if data.get("market_context"):
+                print(f"Market context: {data['market_context']}")
+            msg = crypto_picker.fmt_crypto_picks_tg(data)
+        except Exception as e:
+            print(f"crypto_picks fatal failure: {e}", flush=True)
+            err_msg = (
+                f"<b>加密貨幣推播失敗</b>\n\n"
+                f"原因: <code>{type(e).__name__}: {str(e)[:200]}</code>\n\n"
+                f"建議檢查:\n"
+                f"  • Gemini API key 是否有效\n"
+                f"  • yfinance 是否被 rate-limit"
+            )
+            try:
+                notifier.send_message(err_msg)
+            except Exception:
+                pass
+            return 1
     elif market == "monitor":
         # 盤中監控: 自選股 / 大盤點數 / 加密貨幣
         print("Running monitor mode (intraday alerts)...")
