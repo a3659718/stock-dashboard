@@ -11,7 +11,7 @@ Gemini AI 深度個股分析。
 from __future__ import annotations
 
 import datetime as dt
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
 import streamlit as st
@@ -156,6 +156,61 @@ def _summarize_news(news_df: pd.DataFrame, max_items: int = 8) -> str:
     return f"近 14 天新聞 ({len(items)} 則):\n" + "\n".join(lines)
 
 
+def _summarize_deep_analysis(deep_analysis: Optional[Dict]) -> str:
+    """格式化 stock_deep_analyzer.get_deep_analysis 的結果, 給 Gemini prompt 用.
+
+    回空字串時表示沒深度資料. 有時回完整 block (含標題).
+    """
+    if not deep_analysis:
+        return ""
+    parts = []
+    # 估值
+    pe = deep_analysis.get("pe_peers") or {}
+    if pe.get("stock_pe") is not None:
+        parts.append(
+            f"  本股 PE {pe['stock_pe']}, 同業中位 {pe.get('peer_median_pe','—')}, "
+            f"percentile {pe.get('stock_percentile','—')}%, 估值: {pe.get('valuation','—')}"
+        )
+    # 籌碼變化
+    h = deep_analysis.get("holdings") or {}
+    if h.get("trend"):
+        if h.get("foreign_pct_now") is not None:
+            parts.append(
+                f"  外資持股 {h['foreign_pct_now']:.2f}%, "
+                f"30 日變化 {h.get('foreign_change_30d',0):+.2f}pp, {h['trend']}"
+            )
+        elif h.get("fi_30d_lots"):
+            parts.append(
+                f"  外資 30d 累積 {int(h['fi_30d_lots']):+,} 張, {h['trend']}"
+            )
+    # K 形態
+    cp = deep_analysis.get("candle_patterns") or {}
+    if cp.get("summary"):
+        parts.append(
+            f"  K 線形態 (近 5 日): {cp['summary']}; 短期趨勢: {cp.get('trend_context','—')}"
+        )
+    # 財報數據
+    fund = deep_analysis.get("fundamentals") or {}
+    if fund.get("summary"):
+        parts.append(f"  財報數據: {fund['summary']}")
+    # 重大訊息摘要 + sentiment 統計
+    ann = deep_analysis.get("announcements") or {}
+    if ann.get("summary"):
+        s = ann["summary"].replace("\n", " ").strip()
+        parts.append(f"  重大訊息摘要: {s[:200]}")
+    if ann.get("sentiment_breakdown"):
+        sb = ann["sentiment_breakdown"]
+        parts.append(
+            f"  訊息 sentiment: 利多 {sb.get('bullish',0)} / 利空 {sb.get('bearish',0)} / 中性 {sb.get('neutral',0)}"
+        )
+    if ann.get("key_events"):
+        parts.append(f"  事件分類: {', '.join(ann['key_events'])}")
+
+    if not parts:
+        return ""
+    return "\n【深度分析】\n" + "\n".join(parts) + "\n"
+
+
 def _summarize_hits(hits: Dict[str, bool], score: float) -> str:
     on = [tw.CONDITION_LABELS.get(k, k) for k, v in hits.items() if v]
     off = [tw.CONDITION_LABELS.get(k, k) for k, v in hits.items() if not v]
@@ -168,7 +223,8 @@ def _summarize_hits(hits: Dict[str, bool], score: float) -> str:
 # ---------------------------------------------------------------------------
 def build_prompt(stock_meta: Dict, daily: pd.DataFrame, ind: pd.DataFrame,
                  inst: pd.DataFrame, margin: pd.DataFrame, news_df: pd.DataFrame,
-                 hits: Dict[str, bool], score: float) -> str:
+                 hits: Dict[str, bool], score: float,
+                 deep_analysis: Optional[Dict] = None) -> str:
     # 注入市場情緒 macro context
     is_us = stock_meta.get("market") == "US"
     macro_lines = []
@@ -225,7 +281,7 @@ def build_prompt(stock_meta: Dict, daily: pd.DataFrame, ind: pd.DataFrame,
 
 【新聞】
 {_summarize_news(news_df)}
-
+{_summarize_deep_analysis(deep_analysis)}
 ──────────────────
 請依照以下格式產出分析（用繁體中文）。每個段落 3–5 句即可，避免冗長：
 
@@ -282,8 +338,14 @@ def fetch_stock_news(stock_id: str, days: int = 14) -> pd.DataFrame:
 def analyze(stock_meta: Dict, daily: pd.DataFrame, ind: pd.DataFrame,
             inst: pd.DataFrame, margin: pd.DataFrame,
             hits: Dict[str, bool], score: float,
-            model: str = DEFAULT_MODEL) -> Tuple[bool, str]:
-    """呼叫 Gemini，回傳 (success, text)."""
+            model: str = DEFAULT_MODEL,
+            deep_analysis: Optional[Dict] = None) -> Tuple[bool, str]:
+    """呼叫 Gemini，回傳 (success, text).
+
+    deep_analysis: 來自 stock_deep_analyzer.get_deep_analysis() 的結果,
+                   含 PE 估值 / 籌碼變化 / K 形態 / 重大訊息摘要.
+                   會被塞進 prompt 提升分析品質. None = 不附深度資料.
+    """
     api_key = get_gemini_key()
     if not api_key:
         return False, "尚未設定 GEMINI_API_KEY"
@@ -293,7 +355,8 @@ def analyze(stock_meta: Dict, daily: pd.DataFrame, ind: pd.DataFrame,
         return False, "google-generativeai 套件未安裝，請更新 requirements.txt 後重新部署"
 
     news_df = fetch_stock_news(stock_meta.get("stock_id", ""))
-    prompt = build_prompt(stock_meta, daily, ind, inst, margin, news_df, hits, score)
+    prompt = build_prompt(stock_meta, daily, ind, inst, margin, news_df, hits, score,
+                            deep_analysis=deep_analysis)
 
     try:
         genai.configure(api_key=api_key)
@@ -421,61 +484,47 @@ def analyze_open_picks(market: str, picks_summary: str,
 (每點 1-2 句，3-5 點即可)
 
 ## 📊 今日大盤判讀
-{"- 日韓比台股早一小時開盤，今日 JP/KR 走勢給的訊號是?" if is_tw_market else ""}
-- 今日資金主流是什麼類型？(防禦/成長/題材/輪動?)
-- 上述族群中，哪一個有機會延續整天？哪一個可能只是早盤反彈？
-{"- 哪些族群是亞洲區域同步? 哪些是台股獨秀?" if is_tw_market else ""}
+- 今日資金主流是什麼類型？(防禦 / 成長 / 循環 / 科技)
+- 是否該追進場 / 等回檔 / 完全觀望?
 
-## 🎯 操作節奏建議
-- 1-2 個具體建議 (例如「等回測支撐」、「分批佈局 A 族群」、「規避 B 族群」、「縮短持股時間」)
-
-不要空泛、不要逐檔評論。結尾加「以上分析僅供參考，不構成投資建議」。"""
+(每點 1-2 句, 全文 ≤ 600 字)
+"""
 
     try:
         genai.configure(api_key=api_key)
         m = genai.GenerativeModel(model)
         resp = m.generate_content(
             prompt,
-            generation_config={"temperature": 0.5, "max_output_tokens": 1200},
+            generation_config={"temperature": 0.4, "max_output_tokens": 1500},
             safety_settings=SAFETY_SETTINGS,
         )
-        text = (resp.text or "").strip()
-        return (bool(text), text or "Gemini 沒有回應")
+        text = (getattr(resp, "text", None) or "").strip()
+        return (bool(text), text or "Gemini 無回應")
     except Exception as e:
-        return False, f"Gemini 失敗: {e}"
+        return False, f"Gemini 呼叫失敗: {e}"
 
 
 def analyze_chart_image(image_bytes: bytes, extra_note: str = "",
-                        fg: dict | None = None, market_news: list | None = None,
-                        model: str = DEFAULT_MODEL) -> Tuple[bool, str]:
-    """上傳 K 線截圖 → Gemini Vision 分析."""
+                          fg: dict | None = None, market_news: list | None = None,
+                          model: str = DEFAULT_MODEL):
+    """用 Gemini Vision 分析 K 線圖. 回 (success, text)."""
     api_key = get_gemini_key()
     if not api_key:
         return False, "尚未設定 GEMINI_API_KEY"
     try:
         import google.generativeai as genai
-        from PIL import Image
-        import io
-    except ImportError as e:
-        return False, f"套件未安裝: {e}. 請更新 requirements.txt 後重新部署"
-
+    except ImportError:
+        return False, "google-generativeai 套件未安裝"
+    prompt = _build_chart_prompt(extra_note=extra_note, fg=fg, market_news=market_news)
     try:
         genai.configure(api_key=api_key)
-        img = Image.open(io.BytesIO(image_bytes))
         m = genai.GenerativeModel(model)
-        prompt = _build_chart_prompt(extra_note, fg, market_news)
         resp = m.generate_content(
-            [prompt, img],
-            generation_config={
-                "temperature": 0.4,
-                "top_p": 0.9,
-                "max_output_tokens": 1500,
-            },
+            [prompt, {"mime_type": "image/png", "data": image_bytes}],
+            generation_config={"temperature": 0.4, "max_output_tokens": 1500},
             safety_settings=SAFETY_SETTINGS,
         )
-        text = (resp.text or "").strip()
-        if not text:
-            return False, "Gemini 沒有回應內容 (可能被安全過濾擋下)"
-        return True, text
+        text = (getattr(resp, "text", None) or "").strip()
+        return (bool(text), text or "Gemini 無回應")
     except Exception as e:
-        return False, f"Gemini 圖片分析失敗: {e}"
+        return False, f"Gemini 呼叫失敗: {e}"

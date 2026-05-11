@@ -237,16 +237,20 @@ def check_index_alerts() -> List[Dict]:
         today_open = info["open"]
         current = info["current"]
         diff = current - today_open  # 點數變化
-        # ATR 動態門檻: 基準 = max(static threshold, ATR(14) × 0.3)
-        # 高波動期門檻適度拉高, 避免一直推; 但設上限 = static × 2 防爆衝
-        # (例: TWII ATR 約 330, ×0.5=165 太敏感; ×0.3≈100 接近 static, 偶爾拉高 1.5x)
+
+        # 3 層 throttle 降低警報頻率:
+        # (1) ATR 動態門檻 — 高波動期自動拉高 (費半 ^SOX ATR 約 80-150 點, ×0.8 = 64-120 接近其靜態 100)
+        # (2) 時間 throttle — 兩次警報間至少 30 分鐘 (避免 5 分鐘內連環推)
+        # (3) 每日上限 — 每 index 一天最多 4 次警報 (避免一整天一直跳)
         threshold = cfg["threshold"]
         try:
             atr14 = _compute_atr(sym, period_days="2mo", n=14)
             if atr14 is not None:
-                dyn = atr14 * 0.3
-                upper_cap = threshold * 2  # 門檻最多翻倍, 避免完全沒警報
-                if dyn > threshold * 1.2:
+                # 原 0.3 太敏感 (TWII ATR 300×0.3=90 vs static 100), 改 0.8
+                # 80% 標準差 = 一天典型大波段, 合理
+                dyn = atr14 * 0.8
+                upper_cap = threshold * 3  # 門檻最多 3 倍 (極高波動期才會 hit)
+                if dyn > threshold:
                     threshold = round(min(dyn, upper_cap), 1)
         except Exception:
             pass
@@ -267,20 +271,41 @@ def check_index_alerts() -> List[Dict]:
             sym_state["last_alert_price"] = round(today_open, 2)
             sym_state["consecutive_count"] = 0
             sym_state["last_direction"] = "none"
+            sym_state["last_alert_at"] = None       # 新增: 上次警報時間
+            sym_state["alerts_today_count"] = 0     # 新增: 今日已警報次數
 
         last_bucket = sym_state.get("last_bucket", 0)
         if bucket != last_bucket and abs(bucket) >= threshold:
-            # 觸發新門檻
+            # 在 throttle 之前先算 direction (throttle skip 也要更新, 避免 stale 方向標籤)
             direction = "漲" if diff > 0 else "跌"
             last_direction = sym_state.get("last_direction", "none")
-            if direction == last_direction:
-                sym_state["consecutive_count"] = sym_state.get("consecutive_count", 0) + 1
-            else:
-                sym_state["consecutive_count"] = 1
+            # 方向變了 → 不管有沒有 throttle, consecutive 都歸 1
+            if direction != last_direction:
+                sym_state["consecutive_count"] = 0  # 暫存歸零, 下面 +1
                 sym_state["last_direction"] = direction
+
+            # === Throttle layer 2: 時間間隔檢查 (兩次警報間至少 30 分鐘) ===
+            # 重要: skip 時不更新 last_bucket, 留給下個 tick 重評
+            last_at = sym_state.get("last_alert_at")
+            if last_at:
+                try:
+                    last_dt = dt.datetime.fromisoformat(last_at)
+                    elapsed = (dt.datetime.utcnow() - last_dt).total_seconds()
+                    if elapsed < 30 * 60:  # 30 分鐘
+                        continue
+                except Exception:
+                    pass
+
+            # === Throttle layer 3: 每日上限 ===
+            alerts_count = sym_state.get("alerts_today_count", 0)
+            MAX_ALERTS_PER_DAY = 4
+            if alerts_count >= MAX_ALERTS_PER_DAY:
+                continue
+
+            # 通過所有 throttle → 觸發警報, 累計 consecutive
+            sym_state["consecutive_count"] = sym_state.get("consecutive_count", 0) + 1
             consecutive = sym_state["consecutive_count"]
 
-            # 上次警報資訊 (給「自上次」對比用)
             last_alert_diff = float(sym_state.get("last_alert_diff", 0))
             last_alert_price = float(sym_state.get("last_alert_price", today_open))
             leg_pts = round(diff - last_alert_diff, 2)
@@ -297,12 +322,16 @@ def check_index_alerts() -> List[Dict]:
                 "leg_pts": leg_pts,
                 "direction": direction,
                 "threshold_bucket": bucket,
+                "threshold_used": threshold,  # 新增: 顯示實際用的 (ATR 動態)
                 "consecutive": consecutive,
                 "warning": consecutive >= 2,
+                "alerts_today": alerts_count + 1,  # 今日第 N 次
             })
             sym_state["last_bucket"] = bucket
             sym_state["last_alert_diff"] = round(diff, 2)
             sym_state["last_alert_price"] = round(current, 2)
+            sym_state["last_alert_at"] = dt.datetime.utcnow().isoformat()
+            sym_state["alerts_today_count"] = alerts_count + 1
 
     state["index_alerts"] = idx_state
     watchlist_store.save_monitor_state(state)
@@ -409,7 +438,7 @@ def check_crypto_alerts() -> List[Dict]:
                 "change_abs": round(change_abs, 2),
                 "direction": direction,
                 "slot": slot_label,
-                "slot_label_zh": "中午 12:00" if slot_label == "noon" else "晚上 23:00",
+                "slot_label_zh": "晚上 23:00",  # 04:00 noon 已被 crypto_picks 取代, 只剩 night slot
                 "is_first": is_first_global,
                 "alert_type": "scheduled",  # 固定排程推播
             })
@@ -435,24 +464,17 @@ def check_crypto_alerts() -> List[Dict]:
                 first_price = float(first_price) if first_price not in (None, "") else None
             except Exception:
                 first_price = None
-
-
             if not first_price or first_price <= 0:
                 print(f"[crypto] {sym} no first_price recorded, skip", flush=True)
                 continue
-
             change_pct = (current / first_price - 1) * 100
             change_abs = current - first_price
-
-            # 變動不夠大 → 不發
             if abs(change_pct) < threshold:
                 print(f"[crypto] {sym} 2nd-tick change {change_pct:+.2f}% < {threshold}%, skip", flush=True)
                 continue
-
             direction = "急漲" if change_pct > 0 else "急跌"
             alerts.append({
-                "symbol": sym,
-                "name": cfg["name"],
+                "symbol": sym, "name": cfg["name"],
                 "current": round(current, 2),
                 "prev_price": round(first_price, 2),
                 "prev_time": sid_state.get("first_alert_time", ""),
@@ -460,12 +482,11 @@ def check_crypto_alerts() -> List[Dict]:
                 "change_abs": round(change_abs, 2),
                 "direction": direction,
                 "slot": slot_label,
-                "slot_label_zh": "中午 12:00" if slot_label == "noon" else "晚上 23:00",
+                "slot_label_zh": "晚上 23:00",
                 "is_first": False,
                 "alert_type": "intra_slot",
                 "threshold_pct": threshold,
             })
-
             sid_state["prev_alert_price"] = current
             sid_state["prev_alert_time"] = now_str
             print(f"[crypto] {sym} SECOND push: {first_price} -> {current} ({change_pct:+.2f}%) >= {threshold}%", flush=True)

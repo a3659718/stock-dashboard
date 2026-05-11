@@ -832,6 +832,20 @@ def fmt_monitor_alerts(watchlist_alerts: list, index_alerts: list, crypto_alerts
             if consecutive >= 2:
                 d = _esc(a.get("direction", ""))
                 lines.append(f"  連{consecutive}次同方向{d}")
+            # 顯示動態門檻 + 今日次數 (給 user 知道 throttle 狀態)
+            extra_parts = []
+            try:
+                t_used = a.get("threshold_used")
+                # 只在動態門檻 != 預設時才顯示 (避免每次都顯示同樣的)
+                if t_used is not None and abs(float(t_used) - float(a.get("threshold_bucket_size", t_used) or t_used)) > 0.1:
+                    extra_parts.append(f"門檻 {int(float(t_used))}點")
+            except Exception:
+                pass
+            alerts_today = a.get("alerts_today")
+            if alerts_today:
+                extra_parts.append(f"今日第 {alerts_today}/4 次")
+            if extra_parts:
+                lines.append(f"  ({' · '.join(extra_parts)})")
         lines.append("")
 
     if crypto_alerts:

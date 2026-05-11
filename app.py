@@ -1725,6 +1725,89 @@ with tab_pulse:
         except Exception as _e:
             st.error(f"強勢族群推播失敗: {type(_e).__name__}: {_e}")
 
+    # ========== 🔎 隱藏概念股探勘 (從新聞反向挖) ==========
+    st.divider()
+    st.markdown("### 🔎 隱藏概念股探勘")
+    st.caption(
+        "輸入題材關鍵字 (如 '矽光子' / 'AI 伺服器' / '低軌衛星'), "
+        "掃近 60 天台股新聞, 找「實質有做但還沒上熱門名單」的隱藏受惠股. "
+        "限制: 必須有新聞曝光才挖得到, 純內部研發無曝光的找不到."
+    )
+    cCF1, cCF2, cCF3 = st.columns([3, 1, 1])
+    with cCF1:
+        try:
+            import concept_finder
+            preset = concept_finder.PRESET_THEMES
+        except Exception:
+            preset = ["矽光子", "AI 伺服器", "低軌衛星"]
+        cf_keyword = st.selectbox(
+            "選預設題材, 或下方手動輸入",
+            options=[""] + preset, key="cf_preset",
+        )
+        cf_custom = st.text_input(
+            "或手動輸入 (覆蓋上方 select)",
+            value="", key="cf_custom",
+            placeholder="例: 玻璃基板, 矽智財, 衛星通訊...",
+        )
+    with cCF2:
+        cf_days = st.number_input("掃幾天新聞", 14, 90, 60, step=7, key="cf_days")
+    with cCF3:
+        cf_btn = st.button("🔎 開始探勘", use_container_width=True,
+                            type="primary", key="cf_btn",
+                            help="掃 200 檔 × N 天新聞, 約 1-2 分鐘")
+
+    if cf_btn:
+        kw = (cf_custom.strip() or cf_keyword).strip()
+        if not kw:
+            st.warning("請選擇或輸入一個 keyword")
+        else:
+            with st.spinner(f"探勘「{kw}」概念股中... (掃 200 檔 × {cf_days} 天新聞)"):
+                try:
+                    import concept_finder
+                    results = concept_finder.find_hidden_concept_stocks(
+                        kw, days=int(cf_days), max_scan=200,
+                    )
+                    st.session_state["concept_results"] = results
+                    st.session_state["concept_keyword"] = kw
+                except Exception as e:
+                    st.error(f"探勘失敗: {type(e).__name__}: {e}")
+
+    cf_results = st.session_state.get("concept_results")
+    if cf_results is not None:
+        cf_kw = st.session_state.get("concept_keyword", "")
+        hidden = [r for r in cf_results if r["hidden"]]
+        known = [r for r in cf_results if not r["hidden"]]
+        st.markdown(f"#### 「{cf_kw}」 探勘結果")
+        st.caption(
+            f"找到 {len(cf_results)} 檔有相關新聞 — "
+            f"**🔎 {len(hidden)} 檔隱藏 / 📊 {len(known)} 檔已知**"
+        )
+        if hidden:
+            st.markdown("##### 🔎 隱藏概念股 (未上 TW_THEMES 名單, 但有新聞曝光)")
+            for r in hidden[:15]:
+                with st.container(border=True):
+                    cR1, cR2 = st.columns([3, 1])
+                    with cR1:
+                        st.markdown(
+                            f"**`{r['stock_id']}` {r['name']}** "
+                            f"[{r.get('industry','—')}]"
+                        )
+                        for t in r.get("recent_news_titles", [])[:3]:
+                            st.text(f"  • {t}")
+                    with cR2:
+                        st.metric("提及次數", r["mentions"])
+        if known:
+            with st.expander(f"📊 已知概念股 ({len(known)} 檔, 已在 TW_THEMES 名單)"):
+                df_known = pd.DataFrame([
+                    {"代號": r["stock_id"], "名稱": r["name"],
+                     "產業": r.get("industry", ""), "提及次數": r["mentions"]}
+                    for r in known
+                ])
+                st.dataframe(df_known, use_container_width=True, hide_index=True)
+
+        if not hidden and not known:
+            st.info(f"沒找到「{cf_kw}」相關的股票新聞, 試試其他 keyword 或拉長 days.")
+
 
 # =============================================================================
 # Tab 3 — 美股 Top 5
@@ -1846,6 +1929,148 @@ with tab_stock:
             st.success("命中條件: " + " · ".join(reasons))
         else:
             st.info("目前沒有命中任何條件。")
+
+        # ========== 🔬 深度分析 (法說 / PE / 籌碼 / K 形態) ==========
+        st.markdown("---")
+        st.markdown("### 🔬 深度分析")
+        if st.button("🔄 跑深度分析 (約 10-20 秒)", key=f"deep_btn_{sid}",
+                      help="抓重大訊息+Gemini 摘要 / PE vs 同業 / 外資持股變化 / K 線形態",
+                      use_container_width=False):
+            with st.spinner("深度分析中..."):
+                try:
+                    import stock_deep_analyzer
+                    deep = stock_deep_analyzer.get_deep_analysis(
+                        sid, market="US" if full.get("is_us") else "TW",
+                    )
+                    st.session_state[f"deep_{sid}"] = deep
+                except Exception as e:
+                    st.error(f"深度分析失敗: {type(e).__name__}: {e}")
+                    st.session_state[f"deep_{sid}"] = None
+
+        deep = st.session_state.get(f"deep_{sid}")
+        if deep:
+            # 1. PE vs 同業 (台股才有)
+            pe = deep.get("pe_peers") or {}
+            if pe.get("stock_pe") is not None:
+                cPE1, cPE2, cPE3, cPE4 = st.columns(4)
+                cPE1.metric("本股 PE", f"{pe['stock_pe']}")
+                cPE2.metric("同業中位數", f"{pe.get('peer_median_pe','—')}")
+                cPE3.metric("本股 percentile", f"{pe.get('stock_percentile','—')}%")
+                val = pe.get("valuation", "—")
+                color = {"低估":"🟢","合理":"🟡","偏高":"🟠","極高":"🔴"}.get(val, "")
+                cPE4.metric("估值", f"{color} {val}")
+                if pe.get("context"):
+                    st.caption(pe["context"])
+
+            # 2. 外資持股比例變化
+            h = deep.get("holdings") or {}
+            if h and h.get("trend"):
+                st.markdown("**🏛 籌碼變化**")
+                if h.get("foreign_pct_now") is not None:
+                    cH1, cH2, cH3 = st.columns(3)
+                    cH1.metric("外資持股 (今)", f"{h['foreign_pct_now']:.2f}%")
+                    cH2.metric("30 日變化",
+                                f"{h.get('foreign_change_30d',0):+.2f}pp",
+                                delta_color="normal")
+                    cH3.metric("趨勢", h["trend"])
+                    # 走勢 chart
+                    if isinstance(h.get("history"), pd.DataFrame) and not h["history"].empty:
+                        try:
+                            chart_df = h["history"].set_index("date")[["foreign_pct"]]
+                            st.line_chart(chart_df, height=200)
+                        except Exception:
+                            pass
+                elif h.get("fi_30d_lots"):
+                    cF1, cF2, cF3 = st.columns(3)
+                    cF1.metric("外資 30d 累積",
+                                f"{int(h['fi_30d_lots']):+,} 張")
+                    cF2.metric("5d 累積", f"{int(h.get('fi_5d_lots',0)):+,} 張")
+                    cF3.metric("趨勢", h["trend"])
+                    if h.get("note"):
+                        st.caption(f"⚠ {h['note']}")
+
+            # 3. K 線形態
+            cp = deep.get("candle_patterns") or {}
+            patterns = cp.get("patterns") or []
+            if cp.get("summary"):
+                st.markdown("**🕯 K 線形態 (近 5 日)**")
+                pCol1, pCol2 = st.columns([2, 1])
+                with pCol1:
+                    st.write(f"📊 {cp['summary']}")
+                with pCol2:
+                    st.caption(f"短期趨勢: **{cp.get('trend_context','—')}**")
+                # badge 顯示每個 pattern
+                if patterns:
+                    badge_lines = []
+                    for p in patterns:
+                        di = p.get("day_index", 0)
+                        day_label = "今天" if di == 0 else f"{di} 日前"
+                        signal_color = "🟢" if "跌勢反轉" in p.get("signal", "") or "強勢" in p.get("signal", "") else \
+                                        ("🔴" if "漲勢反轉" in p.get("signal", "") or "弱勢" in p.get("signal", "") else "🟡")
+                        badge_lines.append(
+                            f"- {signal_color} **{p['label']}** ({day_label}): {p.get('signal', '')}"
+                        )
+                    st.markdown("\n".join(badge_lines))
+
+            # 4. 財報數據 (月營收 YoY + 季 EPS YoY)
+            fund = deep.get("fundamentals") or {}
+            if fund and (fund.get("monthly_revenue") or fund.get("latest_eps") is not None):
+                st.markdown("**📈 財報數據**")
+                cFund1, cFund2, cFund3, cFund4 = st.columns(4)
+                # 最新月營收 YoY (擋 None + NaN)
+                yoy_val = fund.get("latest_revenue_yoy")
+                if yoy_val is not None and not (isinstance(yoy_val, float) and pd.isna(yoy_val)):
+                    cFund1.metric("最新月營收 YoY", f"{yoy_val:+.2f}%",
+                                    delta=fund.get("revenue_trend", "—"),
+                                    delta_color="normal")
+                # 最新 EPS + YoY
+                eps_val = fund.get("latest_eps")
+                if eps_val is not None and not (isinstance(eps_val, float) and pd.isna(eps_val)):
+                    q = fund.get("latest_eps_quarter", "")
+                    cFund2.metric(f"EPS ({q})", f"{eps_val}")
+                    eps_yoy = fund.get("eps_yoy_pct")
+                    if eps_yoy is not None and not (isinstance(eps_yoy, float) and pd.isna(eps_yoy)):
+                        cFund3.metric("EPS YoY", f"{eps_yoy:+.2f}%",
+                                        delta=fund.get("eps_trend", "—"))
+                    elif fund.get("eps_trend"):
+                        cFund3.caption(fund["eps_trend"])
+                # 趨勢標籤
+                if fund.get("revenue_trend"):
+                    cFund4.caption(f"營收: {fund['revenue_trend'][:25]}")
+
+                # 6 個月營收 chart
+                if fund.get("monthly_revenue"):
+                    try:
+                        mr_df = pd.DataFrame(fund["monthly_revenue"])
+                        if "yoy_pct" in mr_df.columns and mr_df["yoy_pct"].notna().any():
+                            chart_df = mr_df.set_index("date")[["yoy_pct"]]
+                            st.caption("近 6 月營收 YoY (%)")
+                            st.bar_chart(chart_df, height=180)
+                    except Exception:
+                        pass
+
+            # 5. 重大訊息 / 法說摘要 (含利多/利空 sentiment)
+            ann = deep.get("announcements") or {}
+            if ann.get("summary") or ann.get("count"):
+                st.markdown("**📢 近期重大訊息 / 法說**")
+                # 利多 / 利空 統計
+                sb = ann.get("sentiment_breakdown") or {}
+                if sb:
+                    sb_cols = st.columns(3)
+                    sb_cols[0].metric("🟢 利多訊息", sb.get("bullish", 0))
+                    sb_cols[1].metric("🔴 利空訊息", sb.get("bearish", 0))
+                    sb_cols[2].metric("⚪ 中性訊息", sb.get("neutral", 0))
+                if ann.get("key_events"):
+                    st.write(" · ".join(f"`{e}`" for e in ann["key_events"]))
+                if ann.get("summary"):
+                    st.info(f"🤖 Gemini 摘要: {ann['summary']}")
+                if ann.get("raw_items"):
+                    with st.expander(f"📋 原始訊息列表 ({ann.get('count',0)} 條)"):
+                        for it in ann["raw_items"][:15]:
+                            cat_emoji = "🏛" if it.get("category") == "重大訊息" else "📰"
+                            sent = it.get("sentiment_label", "")
+                            sent_emoji = {"利多":"🟢","利空":"🔴","中性":"⚪"}.get(sent, "")
+                            st.text(f"{cat_emoji} {sent_emoji} {it.get('date','')} {it.get('title','')}")
 
         # ========== 💡 上漲催化劑 + 財報事件 ==========
         st.markdown("---")
@@ -1999,6 +2224,9 @@ with tab_stock:
                 st.error("尚未設定 GEMINI_API_KEY 或 google-generativeai 未安裝。")
             else:
                 with st.spinner("🤖 Gemini 思考中…約 10–20 秒"):
+                    # 把 tab_stock 下方深度分析結果一起餵進 AI prompt
+                    # (如果使用者已按過「跑深度分析」按鈕)
+                    deep_data = st.session_state.get(f"deep_{full['stock_id']}")
                     ok, ai_text = ai_analyzer.analyze(
                         stock_meta={
                             "stock_id": full["stock_id"], "name": full["name"],
@@ -2007,6 +2235,7 @@ with tab_stock:
                         daily=full["daily"], ind=ind,
                         inst=full["inst"], margin=full["margin"],
                         hits=hits, score=score,
+                        deep_analysis=deep_data,
                     )
                 if ok:
                     st.session_state["last_ai"] = {"sid": sid, "text": ai_text}
@@ -2464,131 +2693,3 @@ with tab_track:
                             st.metric("追蹤檔數", f"{len(valid)}")
         except Exception as e:
             st.error(f"追蹤計算失敗: {type(e).__name__}: {e}")
-
-
-# =============================================================================
-# Tab — 🪙 加密貨幣 (上漲趨勢 + Gemini 挑 5 檔)
-# =============================================================================
-with tab_crypto:
-    st.subheader("🪙 加密貨幣 Top 5 進場推薦")
-    st.caption(
-        "掃 30 個主流幣種 (top 市值 + 高 momentum + meme), 用 today%/7d%/30d%/量比/RSI 評分, "
-        "取前 10 名交給 Gemini 挑 5 個給進場區間 / 目標價 / 停損. 每天中午 12:00 自動推 TG."
-    )
-    cC1, cC2, cC3 = st.columns([1, 1, 2])
-    with cC1:
-        load_crypto = st.button("🔄 重抓 Top 5", use_container_width=True,
-                                  type="primary", key="crypto_load")
-    with cC2:
-        send_crypto_tg = st.button("✈️ 推 Top 5 到 TG", use_container_width=True,
-                                     key="crypto_tg")
-    with cC3:
-        last_ts = st.session_state.get("crypto_picks_ts")
-        if last_ts:
-            st.caption(f"上次更新: {last_ts}")
-
-    if load_crypto:
-        with st.spinner("掃 30 個幣種 + Gemini 分析中… 約 20-40 秒"):
-            try:
-                import crypto_picker
-                st.session_state["crypto_picks_cache"] = crypto_picker.get_crypto_picks(top_n=5)
-                st.session_state["crypto_picks_ts"] = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
-            except Exception as e:
-                st.error(f"加密貨幣分析失敗: {type(e).__name__}: {e}")
-                st.session_state["crypto_picks_cache"] = {"error": str(e)}
-
-    raw = st.session_state.get("crypto_picks_cache", None)
-    if raw is None:
-        st.info(
-            "👆 按「重抓 Top 5」開始分析.\n\n"
-            "會掃描的幣種 (30 個): BTC/ETH/SOL/XRP/ADA/DOGE 等 top 市值 + "
-            "ARB/OP/INJ/SUI/TIA/SEI/FET/RNDR 等高 momentum + PEPE/WIF/BONK 等 meme.\n"
-            "首次跑 20-40 秒 (yfinance 並行抓 + Gemini 分析)."
-        )
-    elif raw.get("error"):
-        st.error(f"分析失敗: {raw['error']}")
-    else:
-        # 上方統計 + regime
-        regime = raw.get("regime") or {}
-        if regime.get("regime"):
-            rg = regime.get("regime", "")
-            rg_label = regime.get("regime_label", "")
-            rg_score = regime.get("score", 0)
-            icon_map = {"bull":"🟢","bull_weak":"🟡","range":"⚪","bear_weak":"🟠","bear":"🔴"}
-            ic = icon_map.get(rg, "")
-            if rg in ("bull", "bull_weak"):
-                st.success(f"{ic} **美股大盤: {rg_label}** (score {rg_score}) — 加密貨幣風險偏好通常與其同步")
-            elif rg == "range":
-                st.warning(f"{ic} **美股大盤: {rg_label}** (score {rg_score}) — 加密可能跟著震盪")
-            else:
-                st.error(f"{ic} **美股大盤: {rg_label}** (score {rg_score}) — 加密風險升高, 部位減半")
-
-        mc = raw.get("market_context", "")
-        if mc:
-            st.info(f"📊 {mc}")
-
-        picks = raw.get("picks", []) or []
-        if not picks:
-            st.warning("今日無符合條件的幣種 (today% 跟 7d% 都正才入選)")
-        else:
-            for i, p in enumerate(picks, 1):
-                rr = p.get("rr") or 0
-                rr_emoji = "⭐⭐" if rr >= 3 else ("⭐" if rr >= 2 else "")
-                score = p.get("score", 0)
-                score_color = "🟢" if score >= 6 else ("🟡" if score >= 4 else "🔴")
-                with st.container(border=True):
-                    cH1, cH2 = st.columns([3, 1])
-                    with cH1:
-                        st.markdown(f"### {i}. `{p.get('symbol')}` {score_color}")
-                        st.caption(
-                            f"R:R {rr} {rr_emoji} · 綜合分數 {score} · "
-                            f"持有 {p.get('hold_period','—')} · 機率 {p.get('win_prob','—')}"
-                        )
-                    with cH2:
-                        st.metric("現價", f"${p.get('current')}")
-                    cBody1, cBody2 = st.columns(2)
-                    with cBody1:
-                        st.write(f"**進場區間**: ${p.get('entry_low')} ~ ${p.get('entry_high')}")
-                        st.write(f"**目標**: ${p.get('target')} · **停損**: ${p.get('stop_loss')}")
-                        if p.get("reason"):
-                            st.info(f"💡 {p['reason']}")
-                    with cBody2:
-                        today = p.get("today_pct", 0)
-                        wk = p.get("7d_pct", 0)
-                        mo = p.get("30d_pct", 0)
-                        vr = p.get("vol_ratio", 0)
-                        rsi = p.get("rsi", 0)
-                        st.write(f"**漲跌**: 今日 {today:+.2f}% · 7d {wk:+.2f}% · 30d {mo:+.2f}%")
-                        st.write(f"**量比**: {vr}x · **RSI**: {rsi}")
-
-        # 顯示 universe 排名 (擴充看其他候選)
-        scanned = raw.get("scanned", [])
-        if scanned:
-            with st.expander(f"📋 全市場掃描排名 (前 15 / 共 {raw.get('universe_size', '?')} 個)"):
-                df = pd.DataFrame([
-                    {"symbol": s["symbol"], "current": s["current"],
-                     "today%": s["today_pct"], "7d%": s["7d_pct"],
-                     "30d%": s["30d_pct"], "vol_ratio": s["vol_ratio"],
-                     "RSI": s["rsi"], "score": s["score"]}
-                    for s in scanned
-                ])
-                st.dataframe(df, use_container_width=True, hide_index=True)
-
-    if send_crypto_tg:
-        if raw is None or raw.get("error"):
-            st.warning("還沒抓資料 / 抓失敗, 先按重抓")
-        else:
-            try:
-                import crypto_picker
-                tg_msg = crypto_picker.fmt_crypto_picks_tg(raw)
-                if tg_msg:
-                    ok_, info = notifier.send_message(tg_msg)
-                    if ok_:
-                        st.toast("已推送加密貨幣 Top 5 到 Telegram", icon="✅")
-                    else:
-                        st.error(f"推送失敗: {info}")
-                else:
-                    st.warning("沒可推送內容")
-            except Exception as e:
-                st.error(f"推送異常: {type(e).__name__}: {e}")
-
