@@ -133,6 +133,273 @@ CRYPTO_CONFIG = {
 
 
 # ---------------------------------------------------------------------------
+# 系統性大跌警報配置 (繞過 ATR / cooldown / daily-cap throttle)
+# ---------------------------------------------------------------------------
+# 觸發條件 (任一):
+#   A) 盤中跌幅 vs 今日開盤 <= INTRADAY_PCT  (預設 -3%)
+#   B) 連續 2 日累計跌幅 (今日 close vs 前日 close 再串接) <= TWO_DAY_CUM_PCT (預設 -4%)
+# 監控標的: 台股加權, 費城半導體 (台股先行指標), S&P500, 台積電 ADR
+#
+# Throttle (避免一天狂推):
+#   - 同 symbol 兩次警報至少間隔 SYSTEMIC_COOLDOWN_MIN 分鐘 (預設 60)
+#   - 全 symbol 一天最多 SYSTEMIC_MAX_PER_DAY 則 (預設 2)
+#
+# State: monitor_state["systemic_crash_alerts"][symbol] = {
+#   "date": "YYYY-MM-DD", "last_alert_at": iso, "alerts_today": int
+# }
+SYSTEMIC_CRASH_CONFIG = {
+    "^TWII": {"name": "台灣加權", "country": "TW"},
+    "^SOX":  {"name": "費城半導體", "country": "US"},
+    "^GSPC": {"name": "S&P 500", "country": "US"},
+    "TSM":   {"name": "台積電 ADR", "country": "US"},
+}
+SYSTEMIC_INTRADAY_PCT = -3.0      # 觸發門檻: 盤中 -3%
+SYSTEMIC_TWO_DAY_CUM_PCT = -4.0   # 觸發門檻: 連續 2 日累計 -4%
+SYSTEMIC_COOLDOWN_MIN = 60        # 同 symbol 兩警報間最少間隔 (分)
+SYSTEMIC_MAX_PER_DAY = 2          # 全 symbol 每日最多警報數
+
+
+def _fetch_systemic_snapshot(symbol: str) -> Optional[Dict]:
+    """抓系統性大跌判斷需要的數據:
+       今日開盤 / 即時價 / 前日收盤 / 前前日收盤.
+
+    優先用 5m intraday 抓 today_open + current, 然後用 daily 抓 prior closes.
+    任一失敗 → 回 None.
+    """
+    import pandas as pd
+
+    # 1) Daily 抓 prior close 跟前前日 close (近 5 個交易日)
+    df_d = ds.fetch_yf_history(symbol, period="10d", interval="1d")
+    if df_d is None or df_d.empty or len(df_d) < 2:
+        return None
+    try:
+        df_d = df_d.copy()
+        date_col_d = "Date" if "Date" in df_d.columns else df_d.columns[0]
+        df_d["_d"] = pd.to_datetime(df_d[date_col_d]).dt.date
+        df_d = df_d.sort_values("_d")
+        latest_d = df_d["_d"].iloc[-1]
+        sys_today = dt.date.today()
+        # daily 已過期 → 跳 (盤前 / 假日 / yfinance 延遲)
+        if (sys_today - latest_d).days >= 2:
+            return None
+        # 視 latest 是否為「今天」
+        latest_is_today = (latest_d == sys_today)
+        closes = df_d["Close"].astype(float).tolist()
+    except Exception:
+        return None
+
+    # 2) 5m intraday 抓 today_open + current (若 latest_is_today 為 False, 表示盤前/休市)
+    today_open = None
+    current = None
+    df_i = ds.fetch_yf_history(symbol, period="2d", interval="5m")
+    if df_i is not None and not df_i.empty:
+        try:
+            df_i = df_i.copy()
+            date_col_i = "Datetime" if "Datetime" in df_i.columns else df_i.columns[0]
+            df_i["_dt"] = pd.to_datetime(df_i[date_col_i])
+            df_i["_d"] = df_i["_dt"].dt.date
+            today_in_intraday = df_i["_d"].max()
+            sys_today = dt.date.today()
+            if (sys_today - today_in_intraday).days < 1:
+                today_bars = df_i[df_i["_d"] == today_in_intraday].sort_values("_dt")
+                if not today_bars.empty:
+                    today_open = float(today_bars.iloc[0]["Open"])
+                    current = float(today_bars.iloc[-1]["Close"])
+        except Exception:
+            pass
+
+    # 3) 若 intraday 拿不到 → fallback 用 daily (latest)
+    if today_open is None or current is None:
+        try:
+            today_open = float(df_d["Open"].iloc[-1])
+            current = float(df_d["Close"].iloc[-1])
+        except Exception:
+            return None
+
+    # 4) prior close: 若 latest_is_today, 用倒數第 2;否則用倒數第 1
+    try:
+        if latest_is_today and len(closes) >= 2:
+            prior_close = float(closes[-2])
+        else:
+            prior_close = float(closes[-1])
+    except Exception:
+        return None
+
+    # 5) 前前日 close (給「連續 2 日累計」用)
+    try:
+        if latest_is_today and len(closes) >= 3:
+            prior_prior_close = float(closes[-3])
+        elif (not latest_is_today) and len(closes) >= 2:
+            prior_prior_close = float(closes[-2])
+        else:
+            prior_prior_close = None
+    except Exception:
+        prior_prior_close = None
+
+    return {
+        "today_open": today_open,
+        "current": current,
+        "prior_close": prior_close,
+        "prior_prior_close": prior_prior_close,
+    }
+
+
+def check_systemic_crash() -> Optional[Dict]:
+    """檢測系統性大跌. 任一監控標的觸發即回傳整體 context.
+
+    回傳 None (沒觸發) 或 dict:
+    {
+      "triggers": [{symbol, name, country, trigger_type, value, ...}, ...],
+      "context": {
+        "vix": float | None,
+        "all_snapshots": [...全部標的的當前狀態給 Gemini 看全局],
+        "macro_news": str | None,  # 國際新聞背景
+        "checked_at": ISO,
+      },
+      "alert_index": int  # 今天第 N 次 (1 開始, 用於文案)
+    }
+    """
+    # 載 state — 共用 monitor_state.json
+    state = watchlist_store.load_monitor_state()
+    crash_state = state.setdefault("systemic_crash_alerts", {})
+    today_str = dt.date.today().strftime("%Y-%m-%d")
+    now_utc = dt.datetime.utcnow()
+
+    # 跨日重置: 全部 symbol 都把舊日的 state 清掉
+    for sym in list(crash_state.keys()):
+        if crash_state[sym].get("date") != today_str:
+            crash_state[sym] = {"date": today_str, "last_alert_at": None, "alerts_today": 0}
+
+    # 今日已發過的總數 (跨 symbol)
+    total_today = sum(s.get("alerts_today", 0) for s in crash_state.values())
+    if total_today >= SYSTEMIC_MAX_PER_DAY:
+        return None
+
+    triggers: List[Dict] = []
+    all_snapshots: List[Dict] = []
+
+    for sym, cfg in SYSTEMIC_CRASH_CONFIG.items():
+        country = cfg.get("country", "")
+        # 該市場必須在 session 內 (避免抓 stale close 觸發假警報)
+        if not _is_market_in_session(country):
+            continue
+        snap = _fetch_systemic_snapshot(sym)
+        if not snap:
+            continue
+        today_open = snap["today_open"]
+        current = snap["current"]
+        prior_close = snap["prior_close"]
+        prior_prior = snap.get("prior_prior_close")
+
+        # 算盤中跌幅 vs 開盤 / vs 昨收 (取較大的負值)
+        try:
+            pct_vs_open = (current / today_open - 1) * 100 if today_open else 0.0
+        except Exception:
+            pct_vs_open = 0.0
+        try:
+            pct_vs_prior = (current / prior_close - 1) * 100 if prior_close else 0.0
+        except Exception:
+            pct_vs_prior = 0.0
+        intraday_pct = min(pct_vs_open, pct_vs_prior)
+
+        # 算 2 日累計 (前日 close → 今日 close, 並把昨日 close vs 前前日 close 加上)
+        two_day_pct = None
+        try:
+            if prior_prior and prior_close and prior_prior > 0:
+                # 兩日複合報酬: (1+d1)*(1+d2)-1
+                d1 = prior_close / prior_prior - 1
+                d2 = current / prior_close - 1 if prior_close else 0
+                two_day_pct = ((1 + d1) * (1 + d2) - 1) * 100
+        except Exception:
+            two_day_pct = None
+
+        snap_full = {
+            "symbol": sym,
+            "name": cfg["name"],
+            "country": country,
+            "today_open": round(today_open, 4),
+            "current": round(current, 4),
+            "prior_close": round(prior_close, 4),
+            "pct_vs_open": round(pct_vs_open, 2),
+            "pct_vs_prior": round(pct_vs_prior, 2),
+            "intraday_pct": round(intraday_pct, 2),
+            "two_day_pct": round(two_day_pct, 2) if two_day_pct is not None else None,
+        }
+        all_snapshots.append(snap_full)
+
+        # === 判斷是否觸發 ===
+        sym_state = crash_state.setdefault(sym, {"date": today_str, "last_alert_at": None, "alerts_today": 0})
+
+        # Cooldown: 同 symbol 至少 60 分鐘
+        last_at = sym_state.get("last_alert_at")
+        if last_at:
+            try:
+                last_dt = dt.datetime.fromisoformat(last_at)
+                if (now_utc - last_dt).total_seconds() < SYSTEMIC_COOLDOWN_MIN * 60:
+                    continue
+            except Exception:
+                pass
+
+        trigger_type = None
+        trigger_value = None
+        if intraday_pct <= SYSTEMIC_INTRADAY_PCT:
+            trigger_type = "intraday"
+            trigger_value = intraday_pct
+        elif two_day_pct is not None and two_day_pct <= SYSTEMIC_TWO_DAY_CUM_PCT:
+            trigger_type = "two_day"
+            trigger_value = two_day_pct
+
+        if trigger_type:
+            triggers.append({
+                **snap_full,
+                "trigger_type": trigger_type,
+                "trigger_value": round(trigger_value, 2),
+            })
+            sym_state["last_alert_at"] = now_utc.isoformat()
+            sym_state["alerts_today"] = sym_state.get("alerts_today", 0) + 1
+
+    if not triggers:
+        # 沒觸發 — 仍存回 state (跨日 reset 已套用)
+        state["systemic_crash_alerts"] = crash_state
+        watchlist_store.save_monitor_state(state)
+        return None
+
+    # === 蒐集上下文 (VIX + 國際新聞) 給 Gemini 用 ===
+    vix_now = None
+    try:
+        vix_df = ds.fetch_yf_history("^VIX", period="5d", interval="1d")
+        if vix_df is not None and not vix_df.empty:
+            vix_now = float(vix_df["Close"].astype(float).iloc[-1])
+    except Exception:
+        pass
+
+    macro_news = None
+    try:
+        import news_sources
+        macro_news = news_sources.build_news_context(include_trump=True)
+    except Exception:
+        macro_news = None
+
+    # 算今天第幾次 (給文案用)
+    new_total = sum(s.get("alerts_today", 0) for s in crash_state.values())
+
+    state["systemic_crash_alerts"] = crash_state
+    watchlist_store.save_monitor_state(state)
+
+    return {
+        "triggers": triggers,
+        "context": {
+            "vix": round(vix_now, 2) if vix_now is not None else None,
+            "all_snapshots": all_snapshots,
+            "macro_news": macro_news,
+            "checked_at": now_utc.isoformat(),
+        },
+        "alert_index": new_total,
+        "max_per_day": SYSTEMIC_MAX_PER_DAY,
+    }
+
+
+# ---------------------------------------------------------------------------
 # ATR helper (給動態門檻用)
 # ---------------------------------------------------------------------------
 def _compute_atr(symbol: str, period_days: str = "2mo", n: int = 14) -> Optional[float]:

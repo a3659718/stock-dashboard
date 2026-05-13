@@ -1415,6 +1415,140 @@ def fmt_stop_loss_alerts(breaches: list) -> str:
     return "\n".join(lines).rstrip() if lines else ""
 
 
+def fmt_systemic_crash_alert(crash_data: dict, ai_text: str = "") -> str:
+    """系統性大跌警報訊息 (含 trigger 摘要 + 規則式快評 + Gemini 動作建議).
+
+    crash_data: 來自 index_alerts.check_systemic_crash() 的回傳 dict.
+    ai_text:    Gemini 回的分析文字 (可空, 空的時候只附規則式快評).
+    """
+    if not crash_data:
+        return ""
+    triggers = crash_data.get("triggers", []) or []
+    ctx = crash_data.get("context", {}) or {}
+    if not triggers:
+        return ""
+
+    alert_idx = crash_data.get("alert_index", 1)
+    max_per_day = crash_data.get("max_per_day", 2)
+    vix = ctx.get("vix")
+    all_snaps = ctx.get("all_snapshots", []) or []
+
+    lines = [
+        f"<b>🚨 系統性大跌警報 (本日 {alert_idx}/{max_per_day})</b>",
+        "",
+        "<b>觸發標的</b>",
+    ]
+    for t in triggers:
+        name = _esc(t.get("name", ""))
+        sym = _esc(t.get("symbol", ""))
+        ttype = t.get("trigger_type", "")
+        try:
+            tval = float(t.get("trigger_value", 0) or 0)
+        except (TypeError, ValueError):
+            tval = 0.0
+        try:
+            cur = float(t.get("current", 0) or 0)
+        except (TypeError, ValueError):
+            cur = 0.0
+        ttype_zh = "盤中" if ttype == "intraday" else "連2日累計"
+        lines.append(f"• {name} <code>{sym}</code> {cur:,.2f}, {ttype_zh} <b>{tval:+.2f}%</b>")
+    lines.append("")
+
+    # 全部監控標的 (給全局視野)
+    if all_snaps:
+        lines.append("<b>當下全市場</b>")
+        for s in all_snaps:
+            name = _esc(s.get("name", ""))
+            try:
+                ip = float(s.get("intraday_pct", 0) or 0)
+            except (TypeError, ValueError):
+                ip = 0.0
+            twoday = s.get("two_day_pct")
+            try:
+                tw_v = float(twoday) if twoday is not None else None
+            except (TypeError, ValueError):
+                tw_v = None
+            two_str = f" / 2日 {tw_v:+.2f}%" if tw_v is not None else ""
+            lines.append(f"  {name} 今日 {ip:+.2f}%{two_str}")
+        if vix is not None:
+            try:
+                vix_f = float(vix)
+                if vix_f >= 30:
+                    vix_zone = " (恐慌)"
+                elif vix_f >= 20:
+                    vix_zone = " (警戒)"
+                else:
+                    vix_zone = " (正常)"
+                lines.append(f"  VIX 恐慌指數 {vix_f:.2f}{vix_zone}")
+            except Exception:
+                pass
+        lines.append("")
+
+    # ===== 規則式快評 (我自己, 不靠 Gemini) =====
+    # 簡單的 rule-based action hint, 用於 Gemini 不可用時 fallback
+    rule_hint = _rule_based_crash_verdict(triggers, ctx)
+    if rule_hint:
+        lines.append("<b>📐 規則式快評</b>")
+        lines.append(rule_hint)
+        lines.append("")
+
+    # ===== Gemini 深入分析 =====
+    if ai_text:
+        lines.append("<b>🤖 Gemini 動作建議</b>")
+        # Gemini 輸出已自帶 markdown 標題 — escape 後直接附上
+        lines.append(_esc(ai_text))
+        lines.append("")
+    else:
+        lines.append("<i>(Gemini 暫不可用, 僅顯示規則式快評)</i>")
+        lines.append("")
+
+    lines.append("⚠️ 僅供參考, 不構成投資建議")
+
+    out = "\n".join(lines)
+    if len(out) > 3900:
+        out = out[:3900] + "\n…(節錄)"
+    return out
+
+
+def _rule_based_crash_verdict(triggers: list, ctx: dict) -> str:
+    """非 AI 的快速判斷: 用 VIX + 觸發數 + 跌幅深度 給粗略動作建議.
+
+    回傳格式化 string. 失敗回空字串.
+    """
+    try:
+        n_trig = len(triggers)
+        max_intraday = min((float(t.get("intraday_pct", 0) or 0) for t in triggers), default=0.0)
+        vix = ctx.get("vix")
+        try:
+            vix_f = float(vix) if vix is not None else None
+        except (TypeError, ValueError):
+            vix_f = None
+
+        verdict_lines = []
+        # 判斷類型: 系統性 vs 事件性
+        if vix_f is not None and vix_f >= 28:
+            verdict_lines.append("• 類型: 偏向<b>系統性風險</b> (VIX 已進入恐慌區)")
+            action = "減碼或觀望"
+        elif n_trig >= 3 and max_intraday <= -4:
+            verdict_lines.append("• 類型: 偏向<b>系統性大跌</b> (多市場同步重挫)")
+            action = "觀望, 避免接刀"
+        elif n_trig <= 2 and (vix_f is None or vix_f < 22):
+            verdict_lines.append("• 類型: 偏向<b>事件性回檔</b> (VIX 仍低, 非全面恐慌)")
+            action = "可分批承接優質標的, 但不宜重押"
+        else:
+            verdict_lines.append("• 類型: 訊號混合 (跨市場走勢分歧)")
+            action = "觀望等待 confirmation"
+
+        verdict_lines.append(f"• 建議: <b>{action}</b>")
+        verdict_lines.append(
+            f"• 依據: 觸發 {n_trig} 檔標的, 最大盤中跌幅 {max_intraday:+.2f}%"
+            + (f", VIX {vix_f:.1f}" if vix_f is not None else "")
+        )
+        return "\n".join(verdict_lines)
+    except Exception:
+        return ""
+
+
 def _DEPRECATED_fmt_stop_loss_alerts(breaches: list) -> str:
     """(僅留作對照, 已被新版取代) 停損警報訊息."""
     if not breaches:

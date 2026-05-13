@@ -504,6 +504,111 @@ def analyze_open_picks(market: str, picks_summary: str,
         return False, f"Gemini 呼叫失敗: {e}"
 
 
+def analyze_systemic_crash(crash_data: Dict, model: str = DEFAULT_MODEL) -> Tuple[bool, str]:
+    """系統性大跌時的 Gemini 觀點 — 明確給「加碼 / 觀望 / 減碼」動作建議.
+
+    crash_data: 來自 index_alerts.check_systemic_crash() 的回傳 dict, 含:
+      - triggers: 觸發的標的 list (intraday_pct, two_day_pct 等)
+      - context: vix, all_snapshots, macro_news
+      - alert_index: 今天第幾次
+    """
+    api_key = get_gemini_key()
+    if not api_key:
+        return False, "尚未設定 GEMINI_API_KEY"
+    try:
+        import google.generativeai as genai
+    except ImportError:
+        return False, "google-generativeai 未安裝"
+
+    triggers = crash_data.get("triggers", []) or []
+    ctx = crash_data.get("context", {}) or {}
+    vix = ctx.get("vix")
+    all_snaps = ctx.get("all_snapshots", []) or []
+    macro_news = ctx.get("macro_news") or "(本次未取得國際新聞)"
+
+    # ===== 整理 trigger 資訊 (給 prompt 看) =====
+    trigger_lines = []
+    for t in triggers:
+        name = t.get("name", "")
+        sym = t.get("symbol", "")
+        ttype = t.get("trigger_type", "")
+        tval = t.get("trigger_value", 0)
+        if ttype == "intraday":
+            trigger_lines.append(f"  - {name} ({sym}): 盤中跌 {tval:+.2f}%")
+        elif ttype == "two_day":
+            trigger_lines.append(f"  - {name} ({sym}): 連 2 日累計跌 {tval:+.2f}%")
+    triggers_block = "\n".join(trigger_lines) if trigger_lines else "  (無)"
+
+    # ===== 全部標的 snapshot (給全局視野) =====
+    snap_lines = []
+    for s in all_snaps:
+        name = s.get("name", "")
+        sym = s.get("symbol", "")
+        intraday = s.get("intraday_pct", 0)
+        twoday = s.get("two_day_pct")
+        twoday_str = f", 2日累計 {twoday:+.2f}%" if twoday is not None else ""
+        snap_lines.append(f"  {name} ({sym}): 今日 {intraday:+.2f}%{twoday_str}")
+    snap_block = "\n".join(snap_lines) if snap_lines else "(無)"
+
+    vix_line = f"VIX 恐慌指數: {vix:.2f}" if vix is not None else "VIX 恐慌指數: 無法取得"
+    # VIX 判讀提示
+    if vix is not None:
+        if vix >= 30:
+            vix_hint = "(>30 → 恐慌, 系統性風險升高)"
+        elif vix >= 20:
+            vix_hint = "(20-30 → 高波動, 警戒區)"
+        else:
+            vix_hint = "(<20 → 正常區間, 尚無恐慌)"
+        vix_line = f"{vix_line} {vix_hint}"
+
+    prompt = f"""你是務實的台股 / 美股市場策略師, 風格冷靜不煽動。
+目前偵測到「可能的系統性大跌」訊號, 請依下面資料做快速判斷。
+
+【觸發的標的】
+{triggers_block}
+
+【全部監控標的當下狀態】
+{snap_block}
+
+【市場恐慌指標】
+{vix_line}
+
+【國際新聞 / 大宗商品 / 政治面 sentiment】
+{macro_news}
+
+請用繁體中文, 嚴格依下列格式回覆 (每段 2-4 句, 全文 ≤ 450 字):
+
+## 🩺 判斷
+這是「系統性大跌」, 還是「事件性回檔」? 給出明確判斷 (二選一), 並以 2-3 點支持判斷的事實.
+
+## 🎯 動作建議
+從下列三個動作擇一明確建議, 並說明理由 (1-2 句):
+- 加碼 (適合於: 事件性回檔 + 恐慌過頭 + 體質佳)
+- 觀望 (適合於: 訊號不明 / 等更多 confirmation)
+- 減碼 (適合於: 系統性風險升高 + 趨勢明顯轉空)
+
+## 🔭 關鍵觀察點
+列出 3-5 個未來 1-3 個交易日的觀察重點 (具體價位 / 指標水準).
+
+## ⚠️ 風險提醒
+1 句說明本次判斷可能的最大盲點.
+
+結尾務必加註: 「以上分析僅供參考, 不構成投資建議, 請依個人風險承受度與整體配置自行決策。」"""
+
+    try:
+        genai.configure(api_key=api_key)
+        m = genai.GenerativeModel(model)
+        resp = m.generate_content(
+            prompt,
+            generation_config={"temperature": 0.3, "max_output_tokens": 1200},
+            safety_settings=SAFETY_SETTINGS,
+        )
+        text = (getattr(resp, "text", None) or "").strip()
+        return (bool(text), text or "Gemini 無回應 (可能被安全過濾)")
+    except Exception as e:
+        return False, f"Gemini 呼叫失敗: {e}"
+
+
 def analyze_chart_image(image_bytes: bytes, extra_note: str = "",
                           fg: dict | None = None, market_news: list | None = None,
                           model: str = DEFAULT_MODEL):
