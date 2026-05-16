@@ -290,6 +290,37 @@ def main() -> int:
         label = "開盤後 30 分鐘 (09:30)" if market == "tw_open" else "中盤更新 (11:00)"
         print(f"Running TW {label}...")
 
+        # ===== 主動式 ETF 持股變動 (只在 tw_open 跑, 09:30 時 MoneyDJ 應已更新昨日資料) =====
+        if market == "tw_open":
+            try:
+                import active_etf_monitor
+                etf_changes = active_etf_monitor.check_all_active_etfs()
+                if etf_changes:
+                    for diff in etf_changes:
+                        etf_code = diff.get("etf_code", "?")
+                        is_baseline = diff.get("is_baseline", False)
+                        msg_etf = notifier.fmt_active_etf_change(diff)
+                        if not msg_etf:
+                            continue
+                        if is_baseline:
+                            print(f"[active_etf] sending baseline-init notification for {etf_code}", flush=True)
+                        else:
+                            print(
+                                f"[active_etf] sending change alert for {etf_code}: "
+                                f"+{len(diff.get('added', []))} -{len(diff.get('removed', []))} "
+                                f"~{len(diff.get('changed', []))}",
+                                flush=True,
+                            )
+                        # Hidden Bug #6 fix: 接 send_message 的 return tuple 並 log
+                        ok_etf, info_etf = notifier.send_message(msg_etf)
+                        print(f"[active_etf] TG result for {etf_code}: ok={ok_etf} info={info_etf}", flush=True)
+                else:
+                    print("[active_etf] no changes detected (data_date unchanged)", flush=True)
+            except Exception as _e:
+                import traceback
+                print(f"[active_etf] check failed (non-fatal): {_e}", flush=True)
+                traceback.print_exc()
+
         # 持倉停損預警 — 在主分析前先檢查, 跌破立刻另外推一封
         try:
             import holdings_tracker
@@ -486,9 +517,116 @@ def main() -> int:
             except Exception:
                 pass
             return 1
+    elif market == "heartbeat":
+        # 系統健康日報: 探外部 API + 印 ETF 資料新鮮度
+        print("Running heartbeat health check...")
+        try:
+            import heartbeat
+            msg = heartbeat.build_heartbeat_message()
+            print(f"Heartbeat message length: {len(msg)} chars / {len(msg.encode('utf-8'))} bytes")
+            ok, info = notifier.send_message(msg)
+            print(f"Heartbeat TG: ok={ok}, info={info}")
+            return 0 if ok else 2
+        except Exception as e:
+            import traceback
+            print(f"Heartbeat check failed: {e}", flush=True)
+            traceback.print_exc()
+            return 1
+
     elif market == "monitor":
         # 盤中監控: 自選股 / 大盤點數 / 加密貨幣
         print("Running monitor mode (intraday alerts)...")
+
+        # ===== 防禦性 early-exit (省 GH Actions 額度) =====
+        # 為什麼: cron 已限定在 session 時段, 但 GH cron 可能 drift 跨小時誤觸發.
+        #         若觸發時所有 market 都沒 session 且不在 crypto 時段, 跑完整流程是 ~30s
+        #         浪費 (yfinance / state I/O 等). 直接 exit 0 跳過.
+        try:
+            import index_alerts as _ia_pre
+            import datetime as _dt
+            now_utc = _dt.datetime.utcnow()
+            cur_hour = now_utc.hour
+            in_any_session = any(
+                _ia_pre._is_market_in_session(c) for c in ["TW", "JP", "KR", "US"]
+            )
+            is_crypto_hour = cur_hour in getattr(_ia_pre, "CRYPTO_SCHEDULE_UTC_HOURS", {})
+            if not in_any_session and not is_crypto_hour:
+                print(
+                    f"Monitor mode: 無 market session 且非 crypto 時段 "
+                    f"(UTC hour={cur_hour}). Early-exit 省 ~30s API. "
+                    f"in_session: TW={_ia_pre._is_market_in_session('TW')}, "
+                    f"JP={_ia_pre._is_market_in_session('JP')}, "
+                    f"KR={_ia_pre._is_market_in_session('KR')}, "
+                    f"US={_ia_pre._is_market_in_session('US')}"
+                )
+                return 0
+        except Exception as _e:
+            print(f"Session pre-check failed (non-fatal, 繼續執行): {_e}", flush=True)
+
+        # I1 fix: 開啟 batched state I/O — monitor mode 內所有 check 共用 cache,
+        # context 結束時一次 flush 到 GSheet. 從每 tick ~12 個 GSheet API call
+        # 降到 2 個 (1 read + 1 write). atexit 註冊保險, 確保即使中途 return/exception
+        # 也會 close + flush.
+        import watchlist_store as _ws_batch
+        import atexit as _atexit
+        _ws_batch.open_batched_state()
+        _atexit.register(_ws_batch.close_batched_state)
+
+        # ===== 系統性大跌警報 (放在 reversal 之前, 讓 reversal 能 dedup) =====
+        # I2 fix: 順序很重要 — crash 先跑, 更新 state, 然後 reversal 讀 state
+        # 若同 symbol 已被 crash 推, reversal 跳過, 避免重複推 2 封.
+        # 觸發條件: 任一監控標的盤中跌 >=3%, 或連2日累計 >=4%
+        # 監控: ^TWII / ^SOX / ^IXIC / TSM (台積電 ADR)
+        try:
+            import index_alerts as _ia
+            crash = _ia.check_systemic_crash()
+            if crash:
+                print(
+                    f"[systemic crash] triggered: {len(crash['triggers'])} 檔, "
+                    f"今日第 {crash.get('alert_index', '?')}/{crash.get('max_per_day', '?')} 次",
+                    flush=True,
+                )
+                # 呼叫 Gemini 給動作建議
+                ai_text = ""
+                if ai_analyzer.gemini_available():
+                    try:
+                        ok, ai_text = ai_analyzer.analyze_systemic_crash(crash)
+                        if not ok:
+                            print(f"[systemic crash] Gemini failed: {ai_text}", flush=True)
+                            ai_text = ""
+                    except Exception as _e:
+                        print(f"[systemic crash] Gemini exception: {_e}", flush=True)
+                        ai_text = ""
+                crash_msg = notifier.fmt_systemic_crash_alert(crash, ai_text=ai_text)
+                if crash_msg:
+                    print(f"[systemic crash] sending TG ({len(crash_msg)} chars)", flush=True)
+                    ok_send, info = notifier.send_message(crash_msg)
+                    print(f"[systemic crash] TG result: ok={ok_send} info={info}", flush=True)
+        except Exception as _e:
+            print(f"[systemic crash] check failed (non-fatal): {_e}", flush=True)
+
+        # ===== 盤中反轉警報 (放在 crash 之後; I2 dedup 會跳過已被 crash 推過的 sym) =====
+        # 觸發條件: 從今日 high 回吐 ≥1% 或 從今日 low 反彈 ≥1%
+        try:
+            import index_alerts as _ia_rev
+            reversal_alerts = _ia_rev.check_intraday_reversal()
+            if reversal_alerts:
+                print(
+                    f"[intraday reversal] triggered {len(reversal_alerts)} 個方向變化: "
+                    + ", ".join(
+                        f"{a.get('symbol')}({a.get('type')})" for a in reversal_alerts
+                    ),
+                    flush=True,
+                )
+                rev_msg = notifier.fmt_intraday_reversal_alerts(reversal_alerts)
+                if rev_msg:
+                    ok_rev, info_rev = notifier.send_message(rev_msg)
+                    print(f"[intraday reversal] TG result: ok={ok_rev} info={info_rev}", flush=True)
+        except Exception as _e:
+            import traceback
+            print(f"[intraday reversal] check failed (non-fatal): {_e}", flush=True)
+            traceback.print_exc()
+
         try:
             import watchlist_alerts
             import index_alerts

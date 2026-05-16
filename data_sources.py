@@ -309,24 +309,64 @@ def fetch_yf_quote(symbol: str) -> Dict:
         return {}
 
 
+# ===========================================================
+# G9 fix: yfinance fetch in-memory cache
+# ===========================================================
+# 為什麼: 同一個 monitor cron tick (~1 min) 內, 多個 check function 對同 symbol
+#         重複呼叫 yfinance:
+#           ^TWII: reversal + crash + index_alerts = 3-4 calls
+#           ^SOX:  同上 = 3-4 calls
+#         GH Actions 共用 IP 易被 Yahoo rate-limit. 加 5min in-memory cache 後,
+#         同 (symbol, period, interval) 在 cache 內只實打 1 次 yfinance.
+# 注意:
+#   - 跨 cron tick 沒效 (process restart, cache 清空) — 跨 tick 用 yfinance own cache
+#   - streamlit `@st.cache_data(ttl=120)` 在 streamlit runtime 內優先 (cache 在那邊命中)
+#   - 失敗 (empty) 也 cache 但 TTL 短 (30s), 避免一直 retry 觸發 rate limit
+_YF_FETCH_CACHE: Dict = {}
+_YF_CACHE_TTL_OK = 300       # 成功 fetch cache 5 分鐘
+_YF_CACHE_TTL_EMPTY = 30     # 空結果 cache 30 秒 (避免持續打 yfinance)
+
+
 @st.cache_data(ttl=120, show_spinner=False)
 def fetch_yf_history(symbol: str, period: str = "6mo", interval: str = "1d",
                       max_retries: int = 3) -> pd.DataFrame:
-    """yfinance 抓歷史資料，失敗自動 retry + sleep (避開 Yahoo rate limit)."""
-    if yf is None:
-        return pd.DataFrame()
+    """yfinance 抓歷史資料, 失敗自動 retry + sleep (避開 Yahoo rate limit).
+
+    G9 cache: 跨 streamlit / 跨呼叫者 共享 in-memory cache (5 min for OK, 30s for empty).
+    """
     import time
+
+    # === G9 cache hit check ===
+    cache_key = (symbol, period, interval)
+    now = time.time()
+    cached = _YF_FETCH_CACHE.get(cache_key)
+    if cached is not None:
+        cached_ts, cached_df = cached
+        is_empty = cached_df is None or (hasattr(cached_df, "empty") and cached_df.empty)
+        ttl = _YF_CACHE_TTL_EMPTY if is_empty else _YF_CACHE_TTL_OK
+        if now - cached_ts < ttl:
+            # 回 copy 避免 caller 修改影響後續使用者
+            return cached_df.copy() if (cached_df is not None and not is_empty) else pd.DataFrame()
+
+    # === 沒命中 → 實際 fetch ===
+    if yf is None:
+        _YF_FETCH_CACHE[cache_key] = (now, pd.DataFrame())
+        return pd.DataFrame()
+
     last_err = None
+    result_df = pd.DataFrame()
     for attempt in range(max_retries):
         try:
             df = yf.download(symbol, period=period, interval=interval,
                               progress=False, auto_adjust=False)
             if df is None or df.empty:
-                # 空資料但沒 throw → 直接回 (不算錯誤)
-                return pd.DataFrame()
+                # 空資料但沒 throw → 直接回 (不算錯誤). cache 短 TTL 避免反覆打.
+                result_df = pd.DataFrame()
+                break
             df = df.reset_index()
             df.columns = [c if isinstance(c, str) else c[0] for c in df.columns]
-            return df
+            result_df = df
+            break
         except Exception as e:
             last_err = e
             err_str = str(e).lower()
@@ -340,7 +380,24 @@ def fetch_yf_history(symbol: str, period: str = "6mo", interval: str = "1d",
                     continue
             # 非 rate limit 錯誤 → 立刻放棄
             break
-    return pd.DataFrame()
+
+    # === 寫 cache ===
+    _YF_FETCH_CACHE[cache_key] = (now, result_df.copy() if not result_df.empty else result_df)
+    return result_df
+
+
+def _yf_cache_stats() -> Dict:
+    """給 heartbeat / debug 用. 回 cache 大小 + 命中率 (粗略)."""
+    return {
+        "cache_entries": len(_YF_FETCH_CACHE),
+        "ok_ttl_seconds": _YF_CACHE_TTL_OK,
+        "empty_ttl_seconds": _YF_CACHE_TTL_EMPTY,
+    }
+
+
+def _yf_cache_clear() -> None:
+    """清空 cache (給 testing / 強制 refresh 用)."""
+    _YF_FETCH_CACHE.clear()
 
 
 # ---------------------------------------------------------------------------

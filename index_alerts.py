@@ -133,6 +133,272 @@ CRYPTO_CONFIG = {
 
 
 # ---------------------------------------------------------------------------
+# 盤中反轉警報配置 (從高點回吐 / 從低點反彈)
+# ---------------------------------------------------------------------------
+# 為什麼: 原本 check_index_alerts 用 ATR 動態門檻 + bucket 邏輯, 高波動日門檻反而拉高,
+#         「漲幅減少→反轉」過程的中段沒推. 這個新邏輯獨立追蹤 intraday_high / low,
+#         抓出「從高點掉了 X%」「從低點彈了 X%」, 跟 bucket 邏輯並行不取代.
+# 監控標的: 跟 INDEX_CONFIG 一樣 (^TWII / ^N225 / ^KS11 / ^SOX / ^IXIC)
+# Threshold: 從高/低點累計 1.0% 觸發, 之後每多 0.5pp 才再觸發 (ratchet)
+# Throttle:  cooldown 60 min/sym, max 3 alerts/day/sym
+REVERSAL_THRESHOLD_PCT = 1.0       # 初始觸發門檻 (累計回吐/反彈 ≥ 1.0%)
+REVERSAL_INCREMENT_PCT = 0.5       # 後續每增加 0.5pp 才再觸發
+REVERSAL_COOLDOWN_MIN = 60         # 同 symbol 兩警報間最少間隔 (分)
+REVERSAL_MAX_PER_DAY = 3           # 每 symbol 每日最多警報數
+# Bug #R1 fix: rebound 必須有「真實的下探」才算反彈, 不然連續鎖漲日的 today_low 就是 open,
+# 會把正常漲勢誤判為反彈. 要求 today_low 至少比 today_open 低 0.5% 才考慮 rebound.
+REVERSAL_MIN_DIP_FOR_REBOUND_PCT = 0.5
+
+
+def _fetch_intraday_anchor_data(symbol: str) -> Optional[Dict]:
+    """抓盤中反轉判斷需要的數據: today_open / current / 今日 high / 今日 low.
+
+    跟 _fetch_index_today_open_and_current 類似, 但額外回 high/low.
+    Bug #R3 fix: NaN / Inf 偵測 → 回 None, 避免污染 state.
+    """
+    import math
+    import pandas as pd
+
+    df = ds.fetch_yf_history(symbol, period="2d", interval="5m")
+    if df is None or df.empty:
+        return None
+    try:
+        df = df.copy()
+        date_col = "Datetime" if "Datetime" in df.columns else df.columns[0]
+        df["_dt"] = pd.to_datetime(df[date_col])
+        df["_d"] = df["_dt"].dt.date
+        today = df["_d"].max()
+        sys_today = dt.date.today()
+        # stale check: yfinance 最新日期距 server today >= 1 天 → 跳
+        if (sys_today - today).days >= 1:
+            return None
+        today_bars = df[df["_d"] == today].sort_values("_dt")
+        if today_bars.empty:
+            return None
+        today_open = float(today_bars.iloc[0]["Open"])
+        current = float(today_bars.iloc[-1]["Close"])
+        # 用全部今日 bar 算 high/low (而非只用 state 累積 — yfinance 已給完整 5m bars)
+        today_high = float(today_bars["High"].astype(float).max())
+        today_low = float(today_bars["Low"].astype(float).min())
+
+        # Bug #R3 fix: NaN/Inf 偵測 — yfinance 偶爾回 NaN, json.dumps(nan) 會 raise,
+        # state 寫入失敗 → ratchet/cooldown 完全失效. 直接 return None 跳掉這次.
+        for name, v in [("today_open", today_open), ("current", current),
+                        ("today_high", today_high), ("today_low", today_low)]:
+            if math.isnan(v) or math.isinf(v) or v <= 0:
+                print(
+                    f"[reversal] {symbol} got invalid {name}={v}, skip this tick",
+                    flush=True,
+                )
+                return None
+
+        return {
+            "today_open": today_open,
+            "current": current,
+            "today_high": today_high,
+            "today_low": today_low,
+        }
+    except Exception:
+        return None
+
+
+def check_intraday_reversal() -> List[Dict]:
+    """檢測「從高點回吐」「從低點反彈」並回傳 alert list.
+
+    Logic:
+      drawdown_pct = (current / today_high - 1) * 100        ≤ 0
+      rebound_pct  = (current / today_low  - 1) * 100        ≥ 0
+
+      觸發:
+        drawdown: drawdown_pct ≤ -1.0% AND (第一次推 OR 比上次推差 ≥ 0.5pp)
+        rebound:  rebound_pct  ≥  1.0% AND (第一次推 OR 比上次推好 ≥ 0.5pp)
+      Cooldown: 同 symbol 同方向 60 分鐘
+      Daily cap: 每 sym 每天最多 3 則
+
+    State: monitor_state["intraday_reversal"][sym] = {
+       "date": "YYYY-MM-DD",
+       "last_drawdown_pct": float | None,     # 上次推 drawdown 時的 pct (負值)
+       "last_drawdown_at": iso | None,
+       "drawdown_alerts_today": int,
+       "last_rebound_pct": float | None,
+       "last_rebound_at": iso | None,
+       "rebound_alerts_today": int,
+    }
+    """
+    state = watchlist_store.load_monitor_state()
+    rev_state = state.setdefault("intraday_reversal", {})
+    today_str = dt.date.today().strftime("%Y-%m-%d")
+    now_utc = dt.datetime.utcnow()
+
+    # 假日檢查
+    closed_markets: set = set()
+    try:
+        import holiday_check
+        for mk in ["TW", "JP", "KR", "US"]:
+            if holiday_check.is_market_closed_today(mk):
+                closed_markets.add(mk)
+    except Exception:
+        pass
+
+    # I2 fix: 讀 systemic_crash_alerts state — 同 sym 今天已被 crash 推過就跳 reversal
+    # 避免大跌時同一個 symbol 同時收到 「系統性大跌 -3.5%」+「從高點回吐 -2%」兩封.
+    crash_alerts_state = state.get("systemic_crash_alerts", {}) or {}
+
+    alerts: List[Dict] = []
+
+    for sym, cfg in INDEX_CONFIG.items():
+        country = cfg.get("country")
+        if country in closed_markets:
+            continue
+        if not _is_market_in_session(country):
+            continue
+
+        # I2 dedup: 若今天 systemic_crash 已對此 sym fire 過, 跳過 reversal
+        crash_sym = crash_alerts_state.get(sym, {})
+        if (crash_sym.get("date") == today_str
+                and crash_sym.get("alerts_today", 0) > 0):
+            print(
+                f"[reversal] {sym} 今天已被 systemic_crash 推過 ({crash_sym.get('alerts_today')} 次), "
+                f"跳過 reversal 避免重複推播",
+                flush=True,
+            )
+            continue
+
+        snap = _fetch_intraday_anchor_data(sym)
+        if not snap:
+            continue
+        today_open = snap["today_open"]
+        current = snap["current"]
+        today_high = snap["today_high"]
+        today_low = snap["today_low"]
+
+        # 算 drawdown / rebound (相對 intraday high/low)
+        try:
+            drawdown_pct = (current / today_high - 1) * 100 if today_high > 0 else 0.0
+        except Exception:
+            drawdown_pct = 0.0
+        try:
+            rebound_pct = (current / today_low - 1) * 100 if today_low > 0 else 0.0
+        except Exception:
+            rebound_pct = 0.0
+        # 算 vs 開盤跌幅 (給訊息用)
+        try:
+            pct_vs_open = (current / today_open - 1) * 100 if today_open > 0 else 0.0
+        except Exception:
+            pct_vs_open = 0.0
+
+        # 跨日 reset
+        sym_state = rev_state.setdefault(sym, {})
+        if sym_state.get("date") != today_str:
+            sym_state.clear()
+            sym_state.update({
+                "date": today_str,
+                "last_drawdown_pct": None,
+                "last_drawdown_at": None,
+                "drawdown_alerts_today": 0,
+                "last_rebound_pct": None,
+                "last_rebound_at": None,
+                "rebound_alerts_today": 0,
+            })
+
+        # === Drawdown 判斷 ===
+        if drawdown_pct <= -REVERSAL_THRESHOLD_PCT:
+            should_fire = False
+            last_pct = sym_state.get("last_drawdown_pct")
+            last_at = sym_state.get("last_drawdown_at")
+            alerts_today = sym_state.get("drawdown_alerts_today", 0)
+
+            if alerts_today >= REVERSAL_MAX_PER_DAY:
+                pass  # 已達每日上限
+            elif last_pct is None:
+                should_fire = True  # 第一次
+            else:
+                # 比上次推差 ≥ 增量門檻
+                if drawdown_pct <= last_pct - REVERSAL_INCREMENT_PCT:
+                    # 還要過 cooldown
+                    if last_at:
+                        try:
+                            ts = dt.datetime.fromisoformat(last_at)
+                            if (now_utc - ts).total_seconds() >= REVERSAL_COOLDOWN_MIN * 60:
+                                should_fire = True
+                        except Exception:
+                            should_fire = True
+                    else:
+                        should_fire = True
+
+            if should_fire:
+                alerts.append({
+                    "symbol": sym,
+                    "name": cfg["name"],
+                    "country": country,
+                    "type": "drawdown",
+                    "current": round(current, 2),
+                    "today_open": round(today_open, 2),
+                    "today_high": round(today_high, 2),
+                    "today_low": round(today_low, 2),
+                    "drawdown_pct": round(drawdown_pct, 2),
+                    "rebound_pct": round(rebound_pct, 2),
+                    "pct_vs_open": round(pct_vs_open, 2),
+                    "alerts_today": alerts_today + 1,
+                })
+                # Bug #R2 fix: state 存全精度, 顯示才 round, 避免 ratchet 浮點邊界 bug
+                sym_state["last_drawdown_pct"] = drawdown_pct
+                sym_state["last_drawdown_at"] = now_utc.isoformat()
+                sym_state["drawdown_alerts_today"] = alerts_today + 1
+
+        # === Rebound 判斷 ===
+        # Bug #R1 fix: 必須有真實的「下探」才算反彈, 否則連續鎖漲日的 today_low == today_open
+        # 會把正常漲勢誤判為反彈. 要求 today_low 至少比 today_open 低 X%.
+        dip_pct_from_open = (today_low / today_open - 1) * 100 if today_open > 0 else 0.0
+        has_real_dip = dip_pct_from_open <= -REVERSAL_MIN_DIP_FOR_REBOUND_PCT
+        if rebound_pct >= REVERSAL_THRESHOLD_PCT and has_real_dip:
+            should_fire = False
+            last_pct = sym_state.get("last_rebound_pct")
+            last_at = sym_state.get("last_rebound_at")
+            alerts_today = sym_state.get("rebound_alerts_today", 0)
+
+            if alerts_today >= REVERSAL_MAX_PER_DAY:
+                pass
+            elif last_pct is None:
+                should_fire = True
+            else:
+                if rebound_pct >= last_pct + REVERSAL_INCREMENT_PCT:
+                    if last_at:
+                        try:
+                            ts = dt.datetime.fromisoformat(last_at)
+                            if (now_utc - ts).total_seconds() >= REVERSAL_COOLDOWN_MIN * 60:
+                                should_fire = True
+                        except Exception:
+                            should_fire = True
+                    else:
+                        should_fire = True
+
+            if should_fire:
+                alerts.append({
+                    "symbol": sym,
+                    "name": cfg["name"],
+                    "country": country,
+                    "type": "rebound",
+                    "current": round(current, 2),
+                    "today_open": round(today_open, 2),
+                    "today_high": round(today_high, 2),
+                    "today_low": round(today_low, 2),
+                    "drawdown_pct": round(drawdown_pct, 2),
+                    "rebound_pct": round(rebound_pct, 2),
+                    "pct_vs_open": round(pct_vs_open, 2),
+                    "alerts_today": alerts_today + 1,
+                })
+                # Bug #R2 fix: state 存全精度
+                sym_state["last_rebound_pct"] = rebound_pct
+                sym_state["last_rebound_at"] = now_utc.isoformat()
+                sym_state["rebound_alerts_today"] = alerts_today + 1
+
+    state["intraday_reversal"] = rev_state
+    watchlist_store.save_monitor_state(state)
+    return alerts
+
+
+# ---------------------------------------------------------------------------
 # 系統性大跌警報配置 (繞過 ATR / cooldown / daily-cap throttle)
 # ---------------------------------------------------------------------------
 # 觸發條件 (任一):
@@ -150,13 +416,18 @@ CRYPTO_CONFIG = {
 SYSTEMIC_CRASH_CONFIG = {
     "^TWII": {"name": "台灣加權", "country": "TW"},
     "^SOX":  {"name": "費城半導體", "country": "US"},
-    "^GSPC": {"name": "S&P 500", "country": "US"},
+    "^IXIC": {"name": "那斯達克", "country": "US"},   # 改: ^GSPC 跟 TSM 高度相關, 改 Nasdaq 不重複
     "TSM":   {"name": "台積電 ADR", "country": "US"},
 }
 SYSTEMIC_INTRADAY_PCT = -3.0      # 觸發門檻: 盤中 -3%
 SYSTEMIC_TWO_DAY_CUM_PCT = -4.0   # 觸發門檻: 連續 2 日累計 -4%
 SYSTEMIC_COOLDOWN_MIN = 60        # 同 symbol 兩警報間最少間隔 (分)
 SYSTEMIC_MAX_PER_DAY = 2          # 全 symbol 每日最多警報數
+# 是否把「vs 昨收」也納入 intraday 跌幅判斷.
+# True (預設): 取 min(pct_vs_open, pct_vs_prior) — 能抓 gap down 場景, 但對 user 字面意思
+#              「盤中 -3%」較寬鬆
+# False: 只看 pct_vs_open — 嚴格符合「盤中跌幅」字面
+SYSTEMIC_INCLUDE_VS_PRIOR = True
 
 
 def _fetch_systemic_snapshot(symbol: str) -> Optional[Dict]:
@@ -165,6 +436,12 @@ def _fetch_systemic_snapshot(symbol: str) -> Optional[Dict]:
 
     優先用 5m intraday 抓 today_open + current, 然後用 daily 抓 prior closes.
     任一失敗 → 回 None.
+
+    NOTE [Bug #6 已知限制 — 時區邊界]:
+    本函式用 `dt.date.today()` (= server 本地日期, 在 GH Actions = UTC) 跟 yfinance
+    回傳的 latest_d 比對「是否為今天」. 對 TW (UTC+8) 跟 US (UTC-4/-5) 而言, UTC 跨日
+    的 1-2 小時內可能誤判. 實務上 monitor cron `*/15` 一天 96 次, 即使誤判跨日邊界
+    幾個 tick, 也會在 session 真正開始後正確判斷, 不會造成 silent 失敗.
     """
     import pandas as pd
 
@@ -209,7 +486,12 @@ def _fetch_systemic_snapshot(symbol: str) -> Optional[Dict]:
             pass
 
     # 3) 若 intraday 拿不到 → fallback 用 daily (latest)
+    #    但若 daily 的最新 row 不是「今天」(latest_is_today=False),
+    #    用 daily latest 當 current 會跟 prior_close 落在同一天 → 無意義.
+    #    這種情況直接 return None (代表 yfinance 還沒拿到今天的 data).
     if today_open is None or current is None:
+        if not latest_is_today:
+            return None  # 沒有今日真實數據, 不冒風險用昨日 daily 當「今日」
         try:
             today_open = float(df_d["Open"].iloc[-1])
             current = float(df_d["Close"].iloc[-1])
@@ -279,6 +561,10 @@ def check_systemic_crash() -> Optional[Dict]:
     all_snapshots: List[Dict] = []
 
     for sym, cfg in SYSTEMIC_CRASH_CONFIG.items():
+        # === Fix #1: 同一 tick 內也要尊重全局每日上限 ===
+        if (total_today + len(triggers)) >= SYSTEMIC_MAX_PER_DAY:
+            break
+
         country = cfg.get("country", "")
         # 該市場必須在 session 內 (避免抓 stale close 觸發假警報)
         if not _is_market_in_session(country):
@@ -291,7 +577,7 @@ def check_systemic_crash() -> Optional[Dict]:
         prior_close = snap["prior_close"]
         prior_prior = snap.get("prior_prior_close")
 
-        # 算盤中跌幅 vs 開盤 / vs 昨收 (取較大的負值)
+        # 算盤中跌幅 vs 開盤 / vs 昨收
         try:
             pct_vs_open = (current / today_open - 1) * 100 if today_open else 0.0
         except Exception:
@@ -300,7 +586,11 @@ def check_systemic_crash() -> Optional[Dict]:
             pct_vs_prior = (current / prior_close - 1) * 100 if prior_close else 0.0
         except Exception:
             pct_vs_prior = 0.0
-        intraday_pct = min(pct_vs_open, pct_vs_prior)
+        # Fix #3: vs prior_close 包含 gap down. 由 SYSTEMIC_INCLUDE_VS_PRIOR 開關控制.
+        if SYSTEMIC_INCLUDE_VS_PRIOR:
+            intraday_pct = min(pct_vs_open, pct_vs_prior)
+        else:
+            intraday_pct = pct_vs_open
 
         # 算 2 日累計 (前日 close → 今日 close, 並把昨日 close vs 前前日 close 加上)
         two_day_pct = None

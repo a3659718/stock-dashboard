@@ -473,7 +473,6 @@ def fmt_crypto_picks_tg(data: Dict) -> str:
         lines.append("")
 
     lines.append("<i>⚠ 加密波動高於股票, 部位請較股票低 30-50%. 7 天內未達標應檢視 thesis.</i>")
-    out = "\n".join(lines)
-    if len(out) > 3900:
-        out = out[:3900] + "\n…(節錄)"
-    return out
+    # G7 fix: 用 notifier._truncate_tg_msg 統一 byte-length 截斷, 避免 TG 4096 byte HTTP 400
+    import notifier
+    return notifier._truncate_tg_msg("\n".join(lines))

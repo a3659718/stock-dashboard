@@ -74,6 +74,24 @@ def _safe_float(v, default: float = 0.0) -> float:
     return f
 
 
+def _truncate_tg_msg(out: str, max_bytes: int = 3900) -> str:
+    """Telegram parse_mode=HTML 限 4096 bytes (UTF-8). 中文 3 bytes/char,
+    所以 char-based truncate (out[:3900]) 在中文訊息中常爆 byte 限制 → HTTP 400.
+
+    這個 helper 用 byte-length 切割, errors='ignore' 防斷尾砍到中文中間,
+    取代散落各處的:
+        if len(out) > 3900: out = out[:3900] + ...
+
+    取 max_bytes=3900 留 ~200 bytes 給 (節錄) 標籤 + safety margin.
+    """
+    if not out:
+        return ""
+    out_bytes = out.encode("utf-8")
+    if len(out_bytes) <= max_bytes:
+        return out
+    return out_bytes[:max_bytes].decode("utf-8", errors="ignore") + "\n…(節錄)"
+
+
 def _bot_token() -> str:
     # strip 避免 secret 前後空白導致 401
     return (ds._secret("TELEGRAM_BOT_TOKEN") or "").strip()
@@ -747,10 +765,8 @@ def fmt_tw_open_picks(data: dict, ai_text: str = "") -> str:
             else:
                 lines.append(_esc(line))
 
-    out = "\n".join(lines)
-    if len(out) > 3900:
-        out = out[:3900] + "\n…(節錄)"
-    return out
+    # G7 fix: byte-length truncation (取代舊的 char-based len() 檢查)
+    return _truncate_tg_msg("\n".join(lines))
 
 
 def fmt_monitor_alerts(watchlist_alerts: list, index_alerts: list, crypto_alerts: list) -> str:
@@ -887,10 +903,8 @@ def fmt_monitor_alerts(watchlist_alerts: list, index_alerts: list, crypto_alerts
                 )
         lines.append("")
 
-    out = "\n".join(lines)
-    if len(out) > 3900:
-        out = out[:3900] + "\n…(節錄)"
-    return out
+    # G7 fix: byte-length truncation (取代舊的 char-based len() 檢查)
+    return _truncate_tg_msg("\n".join(lines))
 
 
 def fmt_holiday_news(data: dict) -> str:
@@ -979,10 +993,8 @@ def fmt_holiday_news(data: dict) -> str:
             else:
                 lines.append(_esc(ln))
 
-    out = "\n".join(lines)
-    if len(out) > 3900:
-        out = out[:3900] + "\n…(節錄)"
-    return out
+    # G7 fix: byte-length truncation (取代舊的 char-based len() 檢查)
+    return _truncate_tg_msg("\n".join(lines))
 
 
 def _compute_rr(entry_low, entry_high, target, stop) -> Optional[float]:
@@ -1210,10 +1222,8 @@ def fmt_us_close_analysis(data: dict) -> str:
             else:
                 lines.append(_esc(ln))
 
-    out = "\n".join(lines)
-    if len(out) > 3900:
-        out = out[:3900] + "\n…(節錄)"
-    return out
+    # G7 fix: byte-length truncation (取代舊的 char-based len() 檢查)
+    return _truncate_tg_msg("\n".join(lines))
 
 
 def fmt_tw_close_analysis(data: dict) -> str:
@@ -1357,10 +1367,8 @@ def fmt_tw_close_analysis(data: dict) -> str:
         lines.append("")
         lines.append(accuracy_block)
 
-    out = "\n".join(lines)
-    if len(out) > 3900:
-        out = out[:3900] + "\n…(節錄)"
-    return out
+    # G7 fix: byte-length truncation (取代舊的 char-based len() 檢查)
+    return _truncate_tg_msg("\n".join(lines))
 
 
 def fmt_stop_loss_alerts(breaches: list) -> str:
@@ -1413,6 +1421,197 @@ def fmt_stop_loss_alerts(breaches: list) -> str:
             )
         lines.append("")
     return "\n".join(lines).rstrip() if lines else ""
+
+
+def fmt_intraday_reversal_alerts(alerts: list) -> str:
+    """盤中反轉警報訊息 — 從高點回吐 / 從低點反彈.
+
+    alerts: 來自 index_alerts.check_intraday_reversal() 的 list.
+    每個 dict 含: symbol, name, country, type ("drawdown"/"rebound"),
+                  current, today_open, today_high, today_low,
+                  drawdown_pct, rebound_pct, pct_vs_open, alerts_today.
+    """
+    if not alerts:
+        return ""
+
+    drawdowns = [a for a in alerts if a.get("type") == "drawdown"]
+    rebounds = [a for a in alerts if a.get("type") == "rebound"]
+
+    lines = ["<b>🔄 盤中反轉警報</b>", ""]
+
+    if drawdowns:
+        lines.append("<b>📉 從今日高點回吐</b>")
+        for a in drawdowns:
+            country = _esc(a.get("country", ""))
+            name = _esc(a.get("name", ""))
+            sym = _esc(a.get("symbol", ""))
+            try:
+                cur = float(a.get("current", 0) or 0)
+                high = float(a.get("today_high", 0) or 0)
+                dd_pct = float(a.get("drawdown_pct", 0) or 0)
+                vs_open = float(a.get("pct_vs_open", 0) or 0)
+            except (TypeError, ValueError):
+                cur = high = dd_pct = vs_open = 0.0
+            sign_o = "+" if vs_open > 0 else ""
+            lines.append(
+                f"[{country}] {name} <code>{sym}</code> {cur:,.2f}"
+            )
+            lines.append(
+                f"  高點 {high:,.2f} → 回吐 <b>{dd_pct:+.2f}%</b> "
+                f"(vs 開盤 {sign_o}{vs_open:.2f}%)"
+            )
+            alerts_today = a.get("alerts_today")
+            if alerts_today:
+                lines.append(f"  (今日第 {alerts_today}/3 次反轉警報)")
+        lines.append("")
+
+    if rebounds:
+        lines.append("<b>📈 從今日低點反彈</b>")
+        for a in rebounds:
+            country = _esc(a.get("country", ""))
+            name = _esc(a.get("name", ""))
+            sym = _esc(a.get("symbol", ""))
+            try:
+                cur = float(a.get("current", 0) or 0)
+                low = float(a.get("today_low", 0) or 0)
+                rb_pct = float(a.get("rebound_pct", 0) or 0)
+                vs_open = float(a.get("pct_vs_open", 0) or 0)
+            except (TypeError, ValueError):
+                cur = low = rb_pct = vs_open = 0.0
+            sign_o = "+" if vs_open > 0 else ""
+            lines.append(
+                f"[{country}] {name} <code>{sym}</code> {cur:,.2f}"
+            )
+            lines.append(
+                f"  低點 {low:,.2f} → 反彈 <b>+{rb_pct:.2f}%</b> "
+                f"(vs 開盤 {sign_o}{vs_open:.2f}%)"
+            )
+            alerts_today = a.get("alerts_today")
+            if alerts_today:
+                lines.append(f"  (今日第 {alerts_today}/3 次反轉警報)")
+        lines.append("")
+
+    return _truncate_tg_msg("\n".join(lines).rstrip())
+
+
+def fmt_active_etf_change(diff: dict) -> str:
+    """主動式 ETF 持股變動推播 (供 active_etf_monitor 使用).
+
+    diff: 來自 active_etf_monitor.detect_changes() 的回傳.
+          含 is_baseline=True 時 → 「監控已啟動」訊息
+          含 is_baseline=False 時 → 變動明細
+    """
+    if not diff:
+        return ""
+    etf_code = diff.get("etf_code", "")
+    etf_name = diff.get("etf_name", etf_code)
+    issuer = diff.get("etf_issuer", "")
+
+    # Hidden Bug #5: baseline 第一次跑也推一封 (讓 user 知道監控啟動了)
+    if diff.get("is_baseline"):
+        new_d = diff.get("new_data_date", "")
+        n = diff.get("stocks_count", 0)
+        unmapped = diff.get("unmapped_count", 0)
+        baseline_lines = [
+            f"<b>📊 主動式 ETF 監控已啟動</b>",
+            f"<code>{_esc(etf_code)}</code> {_esc(etf_name)} · {_esc(issuer)}",
+            f"資料日期: <b>{_esc(new_d)}</b> · 已記錄 {n} 檔持股",
+            "",
+            "<i>明日起會自動偵測新增/移除/比例變動並推播。</i>",
+        ]
+        if unmapped:
+            baseline_lines.append(
+                f"<i>⚠️ 注意: {unmapped} 個 row 在 MoneyDJ 沒 (XXXX.TW) link, 已略過</i>"
+            )
+        return "\n".join(baseline_lines)
+
+    prev_d = diff.get("prev_data_date", "")
+    new_d = diff.get("new_data_date", "")
+    added = diff.get("added", []) or []
+    removed = diff.get("removed", []) or []
+    changed = diff.get("changed", []) or []
+    unmapped = diff.get("unmapped_count", 0)
+
+    lines = [
+        f"<b>📊 主動式 ETF 持股變動</b>",
+        f"<code>{_esc(etf_code)}</code> {_esc(etf_name)} · {_esc(issuer)}",
+        f"資料日期: {_esc(prev_d)} → <b>{_esc(new_d)}</b>",
+        "",
+    ]
+
+    if added:
+        lines.append(f"<b>🟢 新進 top-10 ({len(added)} 檔)</b>")
+        for s in added:
+            sid = _esc(s.get("sid", ""))
+            name = _esc(s.get("name", ""))
+            try:
+                pct = float(s.get("pct", 0) or 0)
+            except (TypeError, ValueError):
+                pct = 0.0
+            lines.append(f"  • <code>{sid}</code> {name} {pct:.2f}%")
+        lines.append("")
+
+    if removed:
+        lines.append(f"<b>🔴 退出 top-10 ({len(removed)} 檔)</b>")
+        for s in removed:
+            sid = _esc(s.get("sid", ""))
+            name = _esc(s.get("name", ""))
+            try:
+                pct = float(s.get("pct", 0) or 0)
+            except (TypeError, ValueError):
+                pct = 0.0
+            lines.append(f"  • <code>{sid}</code> {name} (上次 {pct:.2f}%)")
+        lines.append("")
+
+    if changed:
+        lines.append(f"<b>📈 持股比例變動 ≥0.5pp ({len(changed)} 檔)</b>")
+        for s in changed:
+            sid = _esc(s.get("sid", ""))
+            name = _esc(s.get("name", ""))
+            try:
+                old_p = float(s.get("old_pct", 0) or 0)
+                new_p = float(s.get("new_pct", 0) or 0)
+                delta = float(s.get("delta_pp", 0) or 0)
+            except (TypeError, ValueError):
+                old_p = new_p = delta = 0.0
+            arrow = "↑" if delta > 0 else "↓"
+            lines.append(
+                f"  • <code>{sid}</code> {name} {old_p:.2f}%→{new_p:.2f}% "
+                f"<b>{arrow}{abs(delta):.2f}pp</b>"
+            )
+        lines.append("")
+
+    if unmapped:
+        lines.append(
+            f"<i>⚠️ 本期有 {unmapped} 個 row 在 MoneyDJ 沒 (XXXX.TW) link, "
+            f"diff 可能有 false positive</i>"
+        )
+    lines.append("<i>資料來源: MoneyDJ · 僅供參考</i>")
+    out = "\n".join(lines)
+    return _truncate_tg_msg(out)
+
+
+def _md_to_tg_html(text: str) -> str:
+    """把 markdown (## header, **bold**, *italic*) 轉成 Telegram HTML.
+
+    先 _esc() 處理掉 <, >, & 等危險字元, 再用 regex 套上 HTML 標籤.
+    這個順序很重要: 反過來會把我們自己加的 <b> 跳脫成 &lt;b&gt;.
+
+    支援:
+      ## H2     → <b>H2</b>
+      # H1      → <b>H1</b>
+      **bold**  → <b>bold</b>
+    """
+    if not text:
+        return ""
+    import re
+    s = _esc(text)
+    # Header: ## 或 # 開頭整行轉粗體
+    s = re.sub(r"^##\s+(.+)$", r"<b>\1</b>", s, flags=re.MULTILINE)
+    s = re.sub(r"^#\s+(.+)$", r"<b>\1</b>", s, flags=re.MULTILINE)
+    # **bold**
+    s = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", s)
+    return s
 
 
 def fmt_systemic_crash_alert(crash_data: dict, ai_text: str = "") -> str:
@@ -1492,11 +1691,18 @@ def fmt_systemic_crash_alert(crash_data: dict, ai_text: str = "") -> str:
         lines.append(rule_hint)
         lines.append("")
 
+    # Fix #5: 國際新聞抓取失敗時, 提醒 AI 判斷可信度降低
+    macro_news = ctx.get("macro_news")
+    news_missing = (not macro_news) or (not str(macro_news).strip())
+    if news_missing and ai_text:
+        lines.append("<i>⚠️ 國際新聞抓取失敗, AI 判斷僅依價量資料, 可信度降低</i>")
+        lines.append("")
+
     # ===== Gemini 深入分析 =====
     if ai_text:
         lines.append("<b>🤖 Gemini 動作建議</b>")
-        # Gemini 輸出已自帶 markdown 標題 — escape 後直接附上
-        lines.append(_esc(ai_text))
+        # Fix #4: markdown → TG HTML (## 轉 <b>, **bold** 轉 <b>)
+        lines.append(_md_to_tg_html(ai_text))
         lines.append("")
     else:
         lines.append("<i>(Gemini 暫不可用, 僅顯示規則式快評)</i>")
@@ -1504,10 +1710,7 @@ def fmt_systemic_crash_alert(crash_data: dict, ai_text: str = "") -> str:
 
     lines.append("⚠️ 僅供參考, 不構成投資建議")
 
-    out = "\n".join(lines)
-    if len(out) > 3900:
-        out = out[:3900] + "\n…(節錄)"
-    return out
+    return _truncate_tg_msg("\n".join(lines))
 
 
 def _rule_based_crash_verdict(triggers: list, ctx: dict) -> str:
@@ -1715,10 +1918,8 @@ def fmt_holdings_daily(holdings: list) -> str:
 
         lines.append("")
 
-    out = "\n".join(lines)
-    if len(out) > 3900:
-        out = out[:3900] + "\n…(節錄)"
-    return out
+    # G7 fix: byte-length truncation (取代舊的 char-based len() 檢查)
+    return _truncate_tg_msg("\n".join(lines))
 
 
 
@@ -1828,10 +2029,8 @@ def fmt_us_open_picks(data: dict, ai_text: str = "") -> str:
             else:
                 lines.append(_esc(line))
 
-    out = "\n".join(lines)
-    if len(out) > 3900:
-        out = out[:3900] + "\n…(節錄)"
-    return out
+    # G7 fix: byte-length truncation (取代舊的 char-based len() 檢查)
+    return _truncate_tg_msg("\n".join(lines))
 
 
 def fmt_ai_analysis(stock_id: str, name: str, ai_text: str) -> str:

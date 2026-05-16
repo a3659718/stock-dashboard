@@ -17,9 +17,11 @@ watchlist_store.py
 
 from __future__ import annotations
 
+import copy
 import datetime as dt
 import json
 import os
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -31,6 +33,79 @@ import data_sources as ds
 WATCHLIST_FILE = Path("watchlist.json")
 MONITOR_STATE_FILE = Path("monitor_state.json")
 MAX_WATCHLIST = 15
+
+
+# ===================================================================
+# I1 fix: 批次 state I/O (避免每 check 都打 GSheet API 一次)
+# ===================================================================
+# 預設 mode: load_monitor_state / save_monitor_state 各打一次 GSheet (4 reads + 6 writes/tick)
+# 批次 mode (in batched_state_writes() context):
+#   - 第一次 load 從 GSheet 抓, 之後從 cache 拿
+#   - save 只更新 cache, 不立即 GSheet write
+#   - context 結束時 atomic flush 一次 GSheet write
+# = 從每 tick ~10 個 GSheet API call 降到 2 個 (1 read + 1 write)
+_BATCH_MODE = False
+_BATCH_CACHE: Optional[Dict] = None
+_BATCH_DIRTY = False
+
+
+@contextmanager
+def batched_state_writes():
+    """Context manager 版 (給可以 indent 的新 code 用).
+
+    在 context 內: load 共享 cache, save 只更新 cache, 不立即寫 GSheet.
+    Context 結束時一次性 flush.
+
+    For existing code with deep nested try/except/return, use open_batched_state()
+    + close_batched_state() + try/finally 的 pattern.
+    """
+    open_batched_state()
+    try:
+        yield
+    finally:
+        close_batched_state()
+
+
+def open_batched_state() -> None:
+    """開啟 batched mode. 必須跟 close_batched_state 配對 (用 try/finally 保護)."""
+    global _BATCH_MODE, _BATCH_CACHE, _BATCH_DIRTY
+    if _BATCH_MODE:
+        # 巢狀 open — 已在 batch 內, no-op
+        return
+    _BATCH_MODE = True
+    _BATCH_CACHE = None
+    _BATCH_DIRTY = False
+
+
+def close_batched_state() -> None:
+    """關閉 batched mode + flush 已修改的 state. Idempotent (重複呼叫 OK)."""
+    global _BATCH_MODE, _BATCH_CACHE, _BATCH_DIRTY
+    if not _BATCH_MODE:
+        return  # 不在 batch 內 (重複呼叫 / 沒開過)
+    _BATCH_MODE = False
+    if _BATCH_DIRTY and _BATCH_CACHE is not None:
+        try:
+            _flush_state(_BATCH_CACHE)
+        except Exception as _e:
+            print(f"[watchlist_store] batched flush failed: {_e}", flush=True)
+    _BATCH_CACHE = None
+    _BATCH_DIRTY = False
+
+
+def _flush_state(state: Dict) -> None:
+    """實際寫入 state (本地檔案 + GSheet). 跟舊版 save_monitor_state 邏輯相同."""
+    blob = json.dumps(state, ensure_ascii=False, indent=2)
+    try:
+        _atomic_write_text(MONITOR_STATE_FILE, blob)
+    except Exception as _e:
+        print(f"[watchlist_store] monitor_state local write failed: {_e}", flush=True)
+    sheet = _get_sheet("monitor_state")
+    if sheet is not None:
+        try:
+            sheet.clear()
+            sheet.update_acell("A1", blob)
+        except Exception as _e:
+            print(f"[watchlist_store] monitor_state gsheets update failed: {_e}", flush=True)
 
 
 def _atomic_write_text(path: Path, blob: str) -> None:
@@ -181,37 +256,55 @@ def load_monitor_state() -> Dict:
       "index_alerts": {sym: {last_level: float, last_direction: str, last_alert: str}},
       "crypto_alerts": {sym: {last_pct: float, base_price: float, base_date: str}},
     }
+
+    I1 fix: 在 batched_state_writes() context 內共享 cache, 避免重複 GSheet read.
     """
+    global _BATCH_CACHE
+    # 在 batch mode 內 — 直接拿 cache 副本
+    if _BATCH_MODE and _BATCH_CACHE is not None:
+        return copy.deepcopy(_BATCH_CACHE)
+
+    # 不在 batch mode 或 cache 還沒裝 — 走實際 load
     sheet = _get_sheet("monitor_state")
     if sheet is not None:
         try:
             cell = sheet.acell("A1").value
             if cell:
-                return json.loads(cell)
+                loaded = json.loads(cell)
+                if _BATCH_MODE:
+                    _BATCH_CACHE = copy.deepcopy(loaded)
+                return loaded
         except Exception:
             pass
     if MONITOR_STATE_FILE.exists():
         try:
-            return json.loads(MONITOR_STATE_FILE.read_text(encoding="utf-8"))
+            loaded = json.loads(MONITOR_STATE_FILE.read_text(encoding="utf-8"))
+            if _BATCH_MODE:
+                _BATCH_CACHE = copy.deepcopy(loaded)
+            return loaded
         except Exception:
             pass
-    return {"watchlist_alerts": {}, "index_alerts": {}, "crypto_alerts": {}}
+    default = {"watchlist_alerts": {}, "index_alerts": {}, "crypto_alerts": {}}
+    if _BATCH_MODE:
+        _BATCH_CACHE = copy.deepcopy(default)
+    return default
 
 
 def save_monitor_state(state: Dict) -> None:
-    """儲存 monitor state (atomic write, 防併發 cron 互相覆蓋)."""
-    blob = json.dumps(state, ensure_ascii=False, indent=2)
-    try:
-        _atomic_write_text(MONITOR_STATE_FILE, blob)
-    except Exception as _e:
-        print(f"[watchlist_store] monitor_state local write failed: {_e}", flush=True)
-    sheet = _get_sheet("monitor_state")
-    if sheet is not None:
-        try:
-            sheet.clear()
-            sheet.update_acell("A1", blob)
-        except Exception as _e:
-            print(f"[watchlist_store] monitor_state gsheets update failed: {_e}", flush=True)
+    """儲存 monitor state.
+
+    I1 fix:
+      - 預設模式: 立刻寫本地檔案 + GSheet (跟舊版相同)
+      - batched_state_writes() context 內: 只更新 cache, context 結束時 flush.
+    """
+    global _BATCH_CACHE, _BATCH_DIRTY
+    if _BATCH_MODE:
+        # 批次模式 — 只更新 cache, 不打 GSheet
+        _BATCH_CACHE = copy.deepcopy(state)
+        _BATCH_DIRTY = True
+        return
+    # 預設 — 立刻 flush
+    _flush_state(state)
 
 
 # ---------------------------------------------------------------------------
