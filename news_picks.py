@@ -114,25 +114,59 @@ def _kline_score(daily: pd.DataFrame) -> tuple:
 
 
 def run_news_growth_picks(top_n: int = 10, themes_filter: List[str] = None) -> dict:
-    """跨熱門題材池 → K 線健康度評分 → Top 10."""
+    """跨熱門題材池 → K 線健康度評分 → Top 10.
+
+    Returns:
+        {
+          "picks": pd.DataFrame (top picks 或 empty),
+          "diagnostic": str (人類可讀的執行摘要 + 失敗原因),
+          "stats": {n_universe, n_daily_fetched, n_with_score, n_picks}
+        }
+    """
+    diagnostic_lines = []
+    stats = {"n_universe": 0, "n_daily_fetched": 0, "n_with_score": 0, "n_picks": 0}
+
+    # Step 1: 抓股票清單
     info = ds.get_taiwan_stock_info()
     if info.empty:
-        return {"picks": pd.DataFrame()}
+        return {
+            "picks": pd.DataFrame(),
+            "diagnostic": (
+                "❌ FinMind 取台股清單失敗 (空 DataFrame).\n"
+                "可能原因: (1) FINMIND_TOKEN 過期 → 到 finmindtrade.com 重新生成;\n"
+                "         (2) FinMind 服務暫時不可用;\n"
+                "         (3) Streamlit cache 卡了舊空結果 → 點下方「強制清 cache」按鈕"
+            ),
+            "stats": stats,
+        }
+    diagnostic_lines.append(f"✅ Step 1: FinMind 取台股清單 OK ({len(info)} 檔)")
+
     info = ds.filter_tradeable_stocks(info)
     name_map = info.set_index("stock_id")["stock_name"].to_dict() if "stock_name" in info.columns else {}
+    diagnostic_lines.append(f"   → filter_tradeable 後 {len(name_map)} 檔可交易")
 
-    # 池子 = 所有熱門題材股 (去重)
-    candidates: Dict[str, str] = {}  # stock_id -> 主要題材
+    # Step 2: 配對熱門題材池
+    candidates: Dict[str, str] = {}
     for theme, ids in sector_pulse.TW_THEMES.items():
         if themes_filter and theme not in themes_filter:
             continue
         for sid in ids:
             if sid in name_map and sid not in candidates:
                 candidates[sid] = theme
+    stats["n_universe"] = len(candidates)
     if not candidates:
-        return {"picks": pd.DataFrame()}
+        return {
+            "picks": pd.DataFrame(),
+            "diagnostic": (
+                "\n".join(diagnostic_lines) + "\n"
+                "❌ Step 2: 沒匹配到熱門題材池.\n"
+                "可能原因: sector_pulse.TW_THEMES 是空的, 或所有題材股都被 filter_tradeable 過濾掉."
+            ),
+            "stats": stats,
+        }
+    diagnostic_lines.append(f"✅ Step 2: 配對熱門題材池 {len(candidates)} 檔候選")
 
-    # 抓日線 (per-stock)
+    # Step 3: 抓日線
     today = dt.date.today()
     end = today.strftime("%Y-%m-%d")
     start = (today - dt.timedelta(days=120)).strftime("%Y-%m-%d")
@@ -140,15 +174,32 @@ def run_news_growth_picks(top_n: int = 10, themes_filter: List[str] = None) -> d
         "TaiwanStockPrice", list(candidates.keys()), start, end, max_workers=5
     )
     if daily_all.empty:
-        return {"picks": pd.DataFrame()}
+        return {
+            "picks": pd.DataFrame(),
+            "diagnostic": (
+                "\n".join(diagnostic_lines) + "\n"
+                "❌ Step 3: FinMind 抓日線資料失敗 (空 DataFrame).\n"
+                "可能原因: (1) FinMind quota 用完 (每小時 600 calls);\n"
+                "         (2) FinMind 服務暫時不可用;\n"
+                "         (3) Token 仍有效但 TaiwanStockPrice dataset 需付費 Sponsor 等級"
+            ),
+            "stats": stats,
+        }
+    stats["n_daily_fetched"] = daily_all["stock_id"].nunique() if "stock_id" in daily_all.columns else 0
+    diagnostic_lines.append(
+        f"✅ Step 3: 抓日線 {stats['n_daily_fetched']} 檔 ({len(daily_all)} rows)"
+    )
     if "max" in daily_all.columns and "high" not in daily_all.columns:
         daily_all = daily_all.rename(columns={"max": "high", "min": "low"})
 
+    # Step 4: K 線評分
     rows = []
+    n_zero_score = 0
     for sid, g in daily_all.groupby("stock_id"):
         g = g.sort_values("date")
         score, reasons = _kline_score(g)
         if score <= 0:
+            n_zero_score += 1
             continue
         last = float(g["close"].iloc[-1])
         rows.append({
@@ -161,9 +212,25 @@ def run_news_growth_picks(top_n: int = 10, themes_filter: List[str] = None) -> d
             "score": score,
             "理由": " · ".join(reasons),
         })
+    stats["n_with_score"] = len(rows)
+    diagnostic_lines.append(
+        f"✅ Step 4: K 線評分 — {len(rows)} 檔正分 / {n_zero_score} 檔零分被濾掉"
+    )
+
     if not rows:
-        return {"picks": pd.DataFrame()}
+        return {
+            "picks": pd.DataFrame(),
+            "diagnostic": (
+                "\n".join(diagnostic_lines) + "\n"
+                "⚠️ Step 4 結果: 全部候選都被 K 線健康度篩選掉了 (score ≤ 0).\n"
+                "可能原因: 大盤整體弱勢 (大多數股票跌破月線 / KD 死叉等), 或評分門檻太嚴."
+            ),
+            "stats": stats,
+        }
+
     picks = pd.DataFrame(rows).sort_values("score", ascending=False).head(top_n).reset_index(drop=True)
+    stats["n_picks"] = len(picks)
+    diagnostic_lines.append(f"✅ Step 5: 排序並取 top {len(picks)}")
 
     # 補催化劑
     try:
@@ -177,7 +244,11 @@ def run_news_growth_picks(top_n: int = 10, themes_filter: List[str] = None) -> d
             })
         cat_map = stock_catalyst.annotate_picks_with_catalysts(records, market="TW")
         picks["催化劑"] = picks["代號"].astype(str).map(cat_map).fillna("")
-    except Exception:
-        pass
+    except Exception as _e:
+        diagnostic_lines.append(f"⚠️ Step 6 (催化劑) 失敗 (non-fatal): {_e}")
 
-    return {"picks": picks}
+    return {
+        "picks": picks,
+        "diagnostic": "\n".join(diagnostic_lines),
+        "stats": stats,
+    }

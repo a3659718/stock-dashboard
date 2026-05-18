@@ -907,6 +907,77 @@ def fmt_monitor_alerts(watchlist_alerts: list, index_alerts: list, crypto_alerts
     return _truncate_tg_msg("\n".join(lines))
 
 
+def fmt_weekend_recap(data: dict) -> str:
+    """週末重點摘要 (Sat/Sun 22:00 TPE).
+
+    複用 fmt_holiday_news 的主要區塊 + 加入 weekend-specific 內容:
+    - 7d 全球指數表現
+    - Crypto 7d
+    - ETF 持股 snapshot
+    - Gemini 下週展望
+    """
+    if not data:
+        return "週末摘要: 資料不足"
+
+    # 先拿 fmt_holiday_news 的基底 (但改標題)
+    base = fmt_holiday_news(data)
+    # 把第一行從「台股休市日 · 全球重大消息整理」改成「週末重點摘要」
+    base = base.replace("台股休市日 · 全球重大消息整理", "週末重點摘要 · 全球市場與下週展望", 1)
+
+    extras = ["", "------ 一週表現 (5d) ------"]
+    week_perf = data.get("week_perf") or {}
+    if week_perf:
+        for sym, info in week_perf.items():
+            try:
+                name = _esc(info.get("name", sym))
+                last = float(info.get("last", 0) or 0)
+                pct = float(info.get("pct_5d", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+            arrow = "📈" if pct >= 0 else "📉"
+            extras.append(f"{arrow} {name}: {last:,.2f} ({pct:+.2f}%)")
+
+    crypto_perf = data.get("crypto_perf") or {}
+    if crypto_perf:
+        extras.append("")
+        extras.append("------ 加密 7d ------")
+        for sym, info in crypto_perf.items():
+            try:
+                name = _esc(info.get("name", sym))
+                last = float(info.get("last", 0) or 0)
+                pct = float(info.get("pct_5d", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+            arrow = "📈" if pct >= 0 else "📉"
+            extras.append(f"{arrow} {name}: ${last:,.0f} ({pct:+.2f}%)")
+
+    etf_snapshot = data.get("etf_snapshot") or []
+    if etf_snapshot:
+        extras.append("")
+        extras.append("------ 主動式 ETF top 5 持股 ------")
+        for e in etf_snapshot:
+            code = _esc(e.get("etf_code", ""))
+            name = _esc(e.get("etf_name", ""))
+            dd = _esc(e.get("data_date", "—"))
+            extras.append(f"<b>{code}</b> {name} ({dd})")
+            for s in e.get("top5", [])[:5]:
+                try:
+                    sid = _esc(s.get("sid", ""))
+                    sn = _esc(s.get("name", ""))
+                    pct = float(s.get("pct", 0) or 0)
+                    extras.append(f"  <code>{sid}</code> {sn}: {pct:.2f}%")
+                except (TypeError, ValueError):
+                    continue
+
+    outlook = data.get("next_week_outlook") or ""
+    if outlook:
+        extras.append("")
+        extras.append("------ 🔭 下週展望 (Gemini) ------")
+        extras.append(_md_to_tg_html(outlook))
+
+    return _truncate_tg_msg(base + "\n" + "\n".join(extras))
+
+
 def fmt_holiday_news(data: dict) -> str:
     """假日 22:00 重大消息推播."""
     if not data:
@@ -1643,14 +1714,23 @@ def fmt_systemic_crash_alert(crash_data: dict, ai_text: str = "") -> str:
         ttype = t.get("trigger_type", "")
         try:
             tval = float(t.get("trigger_value", 0) or 0)
-        except (TypeError, ValueError):
-            tval = 0.0
-        try:
             cur = float(t.get("current", 0) or 0)
+            today_open = float(t.get("today_open", 0) or 0)
+            prior_close = float(t.get("prior_close", 0) or 0)
+            pct_vs_open = float(t.get("pct_vs_open", 0) or 0)
+            pct_vs_prior = float(t.get("pct_vs_prior", 0) or 0)
         except (TypeError, ValueError):
-            cur = 0.0
+            tval = cur = today_open = prior_close = pct_vs_open = pct_vs_prior = 0.0
+        # SOX fix: 同時顯示 vs 開盤 + vs 昨收 兩個 %, 避免跟新聞報的數字對不上
         ttype_zh = "盤中" if ttype == "intraday" else "連2日累計"
-        lines.append(f"• {name} <code>{sym}</code> {cur:,.2f}, {ttype_zh} <b>{tval:+.2f}%</b>")
+        lines.append(
+            f"• {name} <code>{sym}</code> {cur:,.2f} "
+            f"({ttype_zh}觸發 <b>{tval:+.2f}%</b>)"
+        )
+        lines.append(
+            f"  vs 開盤 {today_open:,.2f}: <b>{pct_vs_open:+.2f}%</b> · "
+            f"vs 昨收 {prior_close:,.2f}: <b>{pct_vs_prior:+.2f}%</b>"
+        )
     lines.append("")
 
     # 全部監控標的 (給全局視野)

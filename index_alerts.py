@@ -414,12 +414,13 @@ def check_intraday_reversal() -> List[Dict]:
 #   "date": "YYYY-MM-DD", "last_alert_at": iso, "alerts_today": int
 # }
 SYSTEMIC_CRASH_CONFIG = {
-    "^TWII": {"name": "台灣加權", "country": "TW"},
-    "^SOX":  {"name": "費城半導體", "country": "US"},
-    "^IXIC": {"name": "那斯達克", "country": "US"},   # 改: ^GSPC 跟 TSM 高度相關, 改 Nasdaq 不重複
-    "TSM":   {"name": "台積電 ADR", "country": "US"},
+    # 為什麼 SOX 用 -2.0%: 費半波動較大 + 對台股傳導性強, 使用者要求 30-60 min 內 -2% 就推
+    "^TWII": {"name": "台灣加權", "country": "TW", "intraday_threshold": -3.0},
+    "^SOX":  {"name": "費城半導體", "country": "US", "intraday_threshold": -2.0},
+    "^IXIC": {"name": "那斯達克", "country": "US", "intraday_threshold": -3.0},
+    "TSM":   {"name": "台積電 ADR", "country": "US", "intraday_threshold": -3.0},
 }
-SYSTEMIC_INTRADAY_PCT = -3.0      # 觸發門檻: 盤中 -3%
+SYSTEMIC_INTRADAY_PCT = -3.0      # 預設觸發門檻 (若 config 沒設 intraday_threshold)
 SYSTEMIC_TWO_DAY_CUM_PCT = -4.0   # 觸發門檻: 連續 2 日累計 -4%
 SYSTEMIC_COOLDOWN_MIN = 60        # 同 symbol 兩警報間最少間隔 (分)
 SYSTEMIC_MAX_PER_DAY = 2          # 全 symbol 每日最多警報數
@@ -630,9 +631,12 @@ def check_systemic_crash() -> Optional[Dict]:
             except Exception:
                 pass
 
+        # SOX fix: per-symbol intraday threshold (default -3%, SOX 用 -2%)
+        sym_intraday_threshold = cfg.get("intraday_threshold", SYSTEMIC_INTRADAY_PCT)
+
         trigger_type = None
         trigger_value = None
-        if intraday_pct <= SYSTEMIC_INTRADAY_PCT:
+        if intraday_pct <= sym_intraday_threshold:
             trigger_type = "intraday"
             trigger_value = intraday_pct
         elif two_day_pct is not None and two_day_pct <= SYSTEMIC_TWO_DAY_CUM_PCT:
@@ -644,6 +648,7 @@ def check_systemic_crash() -> Optional[Dict]:
                 **snap_full,
                 "trigger_type": trigger_type,
                 "trigger_value": round(trigger_value, 2),
+                "threshold_used": sym_intraday_threshold,  # SOX fix: 顯示用了哪個門檻
             })
             sym_state["last_alert_at"] = now_utc.isoformat()
             sym_state["alerts_today"] = sym_state.get("alerts_today", 0) + 1

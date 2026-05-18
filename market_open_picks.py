@@ -1042,6 +1042,122 @@ def get_holiday_news_summary() -> Dict:
     }
 
 
+def get_weekend_recap_summary() -> Dict:
+    """週末重點摘要 = holiday_news 內容 + 7d 全球表現 + crypto 週狀態 + ETF 對比 + Gemini 下週展望.
+
+    跟 get_holiday_news_summary 共用 base, 但加更多 weekend-specific 內容.
+    """
+    base = get_holiday_news_summary()
+
+    # ===== 7 日全球指數表現 =====
+    week_perf: Dict = {}
+    INDICES_7D = {
+        "^GSPC":  "S&P 500",
+        "^IXIC":  "Nasdaq",
+        "^SOX":   "費城半導體",
+        "^TWII":  "台灣加權",
+        "^N225":  "日經 225",
+        "^KS11":  "韓國 KOSPI",
+    }
+    for sym, name in INDICES_7D.items():
+        try:
+            df = ds.fetch_yf_history(sym, period="10d", interval="1d")
+            if df is None or df.empty or len(df) < 5:
+                continue
+            c = df["Close"].astype(float)
+            last = float(c.iloc[-1])
+            # 5d ago (大約 1 週前 — 跳過週末沒交易日)
+            wk_ago = float(c.iloc[-6]) if len(c) >= 6 else float(c.iloc[0])
+            pct_5d = (last / wk_ago - 1) * 100
+            week_perf[sym] = {"name": name, "last": last, "pct_5d": round(pct_5d, 2)}
+        except Exception as e:
+            print(f"[weekend_recap] week_perf {sym} failed: {e}", flush=True)
+
+    # ===== 加密貨幣 7 日 =====
+    crypto_perf: Dict = {}
+    for sym, name in [("BTC-USD", "BTC"), ("ETH-USD", "ETH")]:
+        try:
+            df = ds.fetch_yf_history(sym, period="10d", interval="1d")
+            if df is None or df.empty or len(df) < 5:
+                continue
+            c = df["Close"].astype(float)
+            last = float(c.iloc[-1])
+            wk_ago = float(c.iloc[-6]) if len(c) >= 6 else float(c.iloc[0])
+            pct_5d = (last / wk_ago - 1) * 100
+            crypto_perf[sym] = {"name": name, "last": last, "pct_5d": round(pct_5d, 2)}
+        except Exception as e:
+            print(f"[weekend_recap] crypto_perf {sym} failed: {e}", flush=True)
+
+    # ===== ETF 持股對比 (從 monitor_state.active_etf_holdings 讀目前持股) =====
+    etf_snapshot: list = []
+    try:
+        import watchlist_store
+        import active_etf_monitor
+        state = watchlist_store.load_monitor_state()
+        etf_state = state.get("active_etf_holdings", {})
+        for code, cfg in active_etf_monitor.ETF_CONFIG.items():
+            entry = etf_state.get(code, {})
+            stocks = entry.get("stocks", {})
+            if not stocks:
+                continue
+            # top 5 持股
+            sorted_stocks = sorted(
+                stocks.items(), key=lambda x: -float(x[1].get("pct", 0) or 0)
+            )[:5]
+            etf_snapshot.append({
+                "etf_code": code,
+                "etf_name": cfg.get("name", code),
+                "data_date": entry.get("last_data_date", "—"),
+                "top5": [
+                    {"sid": sid, "name": s.get("name", ""), "pct": s.get("pct", 0)}
+                    for sid, s in sorted_stocks
+                ],
+            })
+    except Exception as e:
+        print(f"[weekend_recap] etf_snapshot failed: {e}", flush=True)
+
+    # ===== Gemini 下週展望 =====
+    next_week_outlook = ""
+    try:
+        import ai_analyzer as _ai
+        if _ai.gemini_available():
+            import google.generativeai as genai
+            genai.configure(api_key=_ai.get_gemini_key())
+            news = base.get("news") or []
+            news_titles = "\n".join(
+                f"  - {n.get('title','')[:90]}" for n in news[:6]
+            )
+            week_perf_str = "\n".join(
+                f"  {w['name']}: {w['pct_5d']:+.2f}%"
+                for w in week_perf.values()
+            )
+            prompt = (
+                f"今週全球指數表現:\n{week_perf_str}\n\n"
+                f"重要新聞:\n{news_titles}\n\n"
+                f"請用繁體中文寫「下週台股展望」, 嚴格 ≤250 字:\n"
+                f"## 🌐 本週回顧 (1-2句)\n"
+                f"## 🔭 下週關注 (3-4 點重要事件 / 數據 / 風險)\n"
+                f"## 📊 操作節奏 (2 句, 短線 / 中線建議)\n"
+                f"結尾加 '僅供參考'."
+            )
+            m = genai.GenerativeModel("gemini-2.5-flash")
+            resp = m.generate_content(
+                prompt,
+                generation_config={"temperature": 0.4, "max_output_tokens": 800},
+                safety_settings=_ai.get_safety_settings(),
+            )
+            next_week_outlook = (getattr(resp, "text", "") or "").strip()
+    except Exception as e:
+        print(f"[weekend_recap] gemini next_week failed: {e}", flush=True)
+
+    base["week_perf"] = week_perf
+    base["crypto_perf"] = crypto_perf
+    base["etf_snapshot"] = etf_snapshot
+    base["next_week_outlook"] = next_week_outlook
+    base["is_weekend_recap"] = True
+    return base
+
+
 def get_us_close_analysis() -> Dict:
     """美股收盤 +2 小時全日綜合 + 對台股次日影響推理."""
     sectors = ds.fetch_sector_rotation()

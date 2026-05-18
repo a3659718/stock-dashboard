@@ -260,10 +260,67 @@ with st.sidebar:
                     st.cache_resource.clear()
                 except Exception:
                     pass
+                # 也清 yfinance in-mem cache (G9)
+                try:
+                    import data_sources as _ds_clear
+                    if hasattr(_ds_clear, "_yf_cache_clear"):
+                        _ds_clear._yf_cache_clear()
+                except Exception:
+                    pass
                 st.toast("快取已清，重新跑一次", icon="✅")
                 st.rerun()
             except Exception as _e:
                 st.error(f"清快取失敗: {_e}")
+
+    # ===== 系統健康狀態 (探外部 API, 解決「按鈕沒反應」根因) =====
+    # 為什麼: 多個按鈕 (growth / pulse / theme / tw_open 等) 都依賴 FinMind / yfinance / Gemini.
+    #         若任一外部 API 失效, 對應按鈕會「silent return empty」, 看起來像沒反應.
+    #         這個 sidebar 一目了然顯示哪個 API 壞了, 省得每個按鈕單獨測試.
+    with st.expander("🔧 系統狀態 (API 健康)", expanded=False):
+        if st.button("🩺 測一次", use_container_width=True, key="sidebar_health_check",
+                      help="會打 FinMind / yfinance / Gemini 各一次 (約 3-5 秒)"):
+            with st.spinner("探測中..."):
+                try:
+                    import heartbeat as _hb
+                    yf_ok, yf_info = _hb._probe_yfinance()
+                    fm_ok, fm_info = _hb._probe_finmind()
+                    gm_ok, gm_info = _hb._probe_gemini()
+                    tg_ok, tg_info = _hb._probe_telegram_config()
+                    # 儲存到 session_state 給後續 render
+                    st.session_state["_sys_status"] = {
+                        "yf": (yf_ok, yf_info),
+                        "fm": (fm_ok, fm_info),
+                        "gm": (gm_ok, gm_info),
+                        "tg": (tg_ok, tg_info),
+                        "ts": dt.datetime.now().strftime("%H:%M:%S"),
+                    }
+                except Exception as _hbe:
+                    st.error(f"探測失敗: {_hbe}")
+        sys_status = st.session_state.get("_sys_status")
+        if sys_status:
+            for label, (probe_key, probe_name) in [
+                ("yfinance", ("yf", "yfinance (盤中行情)")),
+                ("finmind", ("fm", "FinMind (台股清單/日線)")),
+                ("gemini",  ("gm", "Gemini (AI 分析)")),
+                ("tg",      ("tg", "Telegram (推播)")),
+            ]:
+                ok, info = sys_status.get(probe_key, (False, "未測試"))
+                icon = "✅" if ok else "❌"
+                st.markdown(f"{icon} **{probe_name}**: {info}")
+            st.caption(f"上次測試: {sys_status.get('ts', '—')}")
+            # 給「按鈕沒反應」的指引
+            if not sys_status["fm"][0]:
+                st.warning(
+                    "⚠️ FinMind 失效 → 大部分台股按鈕 (篩選/題材/成長動能) 都會 silent fail. "
+                    "到 https://finmindtrade.com/ 重新生成 token 並更新 Streamlit secrets."
+                )
+            if not sys_status["yf"][0]:
+                st.warning(
+                    "⚠️ yfinance 失效 → 大盤點數 / 美股 / 加密幣相關按鈕會 silent fail. "
+                    "通常是 IP 被 rate-limit, 等 1-2 hr 自動恢復."
+                )
+        else:
+            st.caption("尚未測試. 點上方 🩺 按鈕做一次健康檢查.")
 
     # 部位規模設定 — 用於 picks card 給張數建議
     with st.expander("💰 部位規模設定 (用於目標價推薦)"):
@@ -1821,24 +1878,62 @@ with tab_growth:
         "從熱門題材股池 (約 100+ 檔) 評估每檔的 K 線健康度：站上月線 / 起漲位 / KD 黃交 / MACD 翻紅 / 量能配合 …"
         "排除已大漲(5d>20%) 與跌破月線者。"
     )
-    cG1, cG2 = st.columns([1, 1])
+    cG1, cG2, cG3 = st.columns([1, 1, 1])
     with cG1:
         growth_btn = st.button("🔄 更新成長動能榜", use_container_width=True, type="primary")
     with cG2:
         send_growth_tg = st.button("✈️ Send to TG", use_container_width=True, key="send_growth",
                                     disabled=not notifier.is_configured())
+    with cG3:
+        # 強制清 cache — 若 FinMind 上次 cache 到空結果, 強制重抓
+        if st.button("🗑️ 強制清 cache", use_container_width=True, key="growth_clear_cache",
+                      help="若「沒反應」連續好幾次, 點這個強制清 Streamlit cache + yfinance cache"):
+            try:
+                st.cache_data.clear()
+                import data_sources as _ds
+                if hasattr(_ds, "_yf_cache_clear"):
+                    _ds._yf_cache_clear()
+                # 也清 session_state 的 growth 結果
+                st.session_state.pop("growth", None)
+                st.success("✅ Cache 已清空, 請再點「更新成長動能榜」")
+            except Exception as _ce:
+                st.error(f"清 cache 失敗: {_ce}")
 
     if growth_btn:
         try:
             with st.spinner("評估題材股 K 線健康度中…約 30 秒"):
                 st.session_state["growth"] = news_picks.run_news_growth_picks(top_n=10)
         except Exception as e:
+            import traceback
             st.error(f"成長動能分析失敗：{e}")
+            st.code(traceback.format_exc(), language="python")
 
     growth = st.session_state.get("growth", {})
     picks = growth.get("picks")
-    if picks is None or picks.empty:
-        st.info("按上方按鈕開始分析。")
+    diagnostic = growth.get("diagnostic", "")
+    stats = growth.get("stats", {})
+
+    # 顯示 diagnostic — picks 空時自動展開, 否則折疊
+    is_empty = picks is None or picks.empty
+    if diagnostic and (growth_btn or is_empty):
+        with st.expander("🔍 執行診斷 (找出為什麼沒結果)", expanded=is_empty):
+            st.code(diagnostic, language=None)
+            if stats:
+                st.markdown(
+                    f"**統計**: 候選池 {stats.get('n_universe', 0)} 檔 / "
+                    f"抓到日線 {stats.get('n_daily_fetched', 0)} 檔 / "
+                    f"K 線正分 {stats.get('n_with_score', 0)} 檔 / "
+                    f"最終 picks {stats.get('n_picks', 0)} 檔"
+                )
+
+    if is_empty:
+        if not growth_btn:
+            st.info("按上方按鈕開始分析。")
+        else:
+            st.warning(
+                "⚠️ 本次分析沒抓到任何 picks. 看上方「執行診斷」找原因. "
+                "若是 FinMind / cache 問題, 點「強制清 cache」後重試."
+            )
     else:
         st.dataframe(picks, use_container_width=True, hide_index=True)
         if "催化劑" in picks.columns and picks["催化劑"].astype(str).str.len().sum() > 0:

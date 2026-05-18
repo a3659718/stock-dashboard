@@ -176,6 +176,21 @@ def main() -> int:
             print(f"=== Holiday Check ===")
             print(f"monitor mode: 24x7 執行，不檢查假日")
             print(f"=====================\n")
+        elif market in ("heartbeat",):
+            # heartbeat 每天跑, 不檢查假日
+            print(f"=== Holiday Check ===")
+            print(f"heartbeat mode: 每日執行, 不檢查假日")
+            print(f"=====================\n")
+        elif market == "weekend_recap":
+            # 只在 Sat / Sun fire
+            import datetime as _dt
+            if _dt.date.today().weekday() < 5:
+                print(f"=== Weekend Recap Check ===")
+                print(f"今日 weekday ({_dt.date.today().strftime('%A')}), weekend_recap mode 跳過此次推播.")
+                return 0
+            print(f"=== Weekend Recap Check ===")
+            print(f"今日 weekend ({_dt.date.today().strftime('%A')}), 執行週末摘要推播")
+            print(f"=====================\n")
         elif market == "holiday_news":
             # 反向邏輯: TW 開盤日才跳過 (其他正常推播會處理), 休市日才跑
             if not holiday_check.is_market_closed_today("TW"):
@@ -485,8 +500,52 @@ def main() -> int:
         if data.get("ai_text"):
             print(f"Gemini reasoning: {len(data['ai_text'])} chars")
         msg = notifier.fmt_us_close_analysis(data)
+    elif market == "weekend_recap":
+        # 週末重點摘要 (Sat/Sun 22:00 TPE) — 比 holiday_news 早 30 min
+        # 觸發後設 state flag, holiday_news 30 min 後若 flag 是今天就 skip (dedup)
+        print("Running weekend recap (Sat/Sun 22:00 TPE)...")
+        import datetime as _dt
+        today_str = _dt.date.today().strftime("%Y-%m-%d")
+        try:
+            data = market_open_picks.get_weekend_recap_summary()
+            if data.get("next_week_outlook"):
+                print(f"Gemini next_week_outlook: {len(data['next_week_outlook'])} chars")
+            print(f"Got {len(data.get('news', []))} news items, "
+                  f"{len(data.get('week_perf', {}))} indices, "
+                  f"{len(data.get('etf_snapshot', []))} ETFs")
+            msg = notifier.fmt_weekend_recap(data)
+            # 設 dedup flag — 讓 30 min 後的 holiday_news cron 知道週末摘要已推, 不要重複
+            try:
+                import watchlist_store
+                state = watchlist_store.load_monitor_state()
+                state["weekend_recap_last_fired"] = today_str
+                watchlist_store.save_monitor_state(state)
+                print(f"[weekend_recap] dedup flag set: weekend_recap_last_fired={today_str}")
+            except Exception as _e:
+                print(f"[weekend_recap] flag set failed (non-fatal): {_e}")
+        except Exception as e:
+            import traceback
+            print(f"weekend_recap fatal: {e}", flush=True)
+            traceback.print_exc()
+            return 1
+
     elif market == "holiday_news":
         print("Running TW holiday news summary (22:30 台北)...")
+        # I2-like dedup: 若今天 weekend_recap 已推, 跳過 holiday_news 避免雙推
+        try:
+            import watchlist_store
+            import datetime as _dt
+            today_str = _dt.date.today().strftime("%Y-%m-%d")
+            state = watchlist_store.load_monitor_state()
+            last_recap = state.get("weekend_recap_last_fired")
+            if last_recap == today_str:
+                print(
+                    f"[holiday_news] weekend_recap already fired today ({last_recap}), "
+                    f"skip holiday_news 避免雙推"
+                )
+                return 0
+        except Exception as _e:
+            print(f"[holiday_news] dedup check failed (non-fatal, 繼續執行): {_e}")
         data = market_open_picks.get_holiday_news_summary()
         if data.get("ai_text"):
             print(f"Gemini reasoning: {len(data['ai_text'])} chars")
