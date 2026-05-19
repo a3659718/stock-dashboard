@@ -39,14 +39,21 @@ import watchlist_store
 
 
 # 配置
+# 欄位:
+#   threshold:           bucket alert 基礎點數門檻
+#   disable_atr_boost:   True 時不套 ATR 動態 boost (避免高波動日門檻反而升高)
+#   reversal_pct:        per-symbol reversal 門檻 (default REVERSAL_THRESHOLD_PCT = 1.0)
+# 為什麼 TWII 用 200 + disable_atr_boost: 使用者反映高波動日 ATR boost 拉到 240-300 點,
+#                                          200-400 點波動全被吞掉; 改固定 200 + 反轉 0.5%
 INDEX_CONFIG = {
     # 亞股
-    "^N225":  {"name": "日經 225",     "threshold": 150.0, "country": "JP"},
-    "^KS11":  {"name": "韓國 KOSPI",   "threshold": 50.0,  "country": "KR"},
-    "^TWII":  {"name": "台灣加權",     "threshold": 100.0, "country": "TW"},
+    "^N225":  {"name": "日經 225",   "threshold": 150.0, "country": "JP"},
+    "^KS11":  {"name": "韓國 KOSPI", "threshold": 50.0,  "country": "KR"},
+    "^TWII":  {"name": "台灣加權",   "threshold": 200.0, "country": "TW",
+               "disable_atr_boost": True, "reversal_pct": 0.5},
     # 美股 (台股 leading indicator)
-    "^SOX":   {"name": "費城半導體",   "threshold": 100.0, "country": "US"},
-    "^IXIC":  {"name": "那斯達克",     "threshold": 200.0, "country": "US"},
+    "^SOX":   {"name": "費城半導體", "threshold": 100.0, "country": "US"},
+    "^IXIC":  {"name": "那斯達克",   "threshold": 200.0, "country": "US"},
 }
 
 
@@ -301,8 +308,11 @@ def check_intraday_reversal() -> List[Dict]:
                 "rebound_alerts_today": 0,
             })
 
+        # per-symbol reversal threshold (TWII 用 0.5%, 其他用 default 1.0%)
+        sym_reversal_threshold = float(cfg.get("reversal_pct", REVERSAL_THRESHOLD_PCT))
+
         # === Drawdown 判斷 ===
-        if drawdown_pct <= -REVERSAL_THRESHOLD_PCT:
+        if drawdown_pct <= -sym_reversal_threshold:
             should_fire = False
             last_pct = sym_state.get("last_drawdown_pct")
             last_at = sym_state.get("last_drawdown_at")
@@ -351,7 +361,8 @@ def check_intraday_reversal() -> List[Dict]:
         # 會把正常漲勢誤判為反彈. 要求 today_low 至少比 today_open 低 X%.
         dip_pct_from_open = (today_low / today_open - 1) * 100 if today_open > 0 else 0.0
         has_real_dip = dip_pct_from_open <= -REVERSAL_MIN_DIP_FOR_REBOUND_PCT
-        if rebound_pct >= REVERSAL_THRESHOLD_PCT and has_real_dip:
+        # rebound 也用 per-symbol threshold (跟 drawdown 對稱)
+        if rebound_pct >= sym_reversal_threshold and has_real_dip:
             should_fire = False
             last_pct = sym_state.get("last_rebound_pct")
             last_at = sym_state.get("last_rebound_at")
@@ -805,17 +816,20 @@ def check_index_alerts() -> List[Dict]:
         # (2) 時間 throttle — 兩次警報間至少 30 分鐘 (避免 5 分鐘內連環推)
         # (3) 每日上限 — 每 index 一天最多 4 次警報 (避免一整天一直跳)
         threshold = cfg["threshold"]
-        try:
-            atr14 = _compute_atr(sym, period_days="2mo", n=14)
-            if atr14 is not None:
-                # 原 0.3 太敏感 (TWII ATR 300×0.3=90 vs static 100), 改 0.8
-                # 80% 標準差 = 一天典型大波段, 合理
-                dyn = atr14 * 0.8
-                upper_cap = threshold * 3  # 門檻最多 3 倍 (極高波動期才會 hit)
-                if dyn > threshold:
-                    threshold = round(min(dyn, upper_cap), 1)
-        except Exception:
-            pass
+        # per-symbol fix: TWII 因高 ATR boost 把門檻拉到 240-300, 200-400 點波動全過濾掉
+        #                 → disable_atr_boost=True 改用固定門檻
+        if not cfg.get("disable_atr_boost", False):
+            try:
+                atr14 = _compute_atr(sym, period_days="2mo", n=14)
+                if atr14 is not None:
+                    # 原 0.3 太敏感 (TWII ATR 300×0.3=90 vs static 100), 改 0.8
+                    # 80% 標準差 = 一天典型大波段, 合理
+                    dyn = atr14 * 0.8
+                    upper_cap = threshold * 3  # 門檻最多 3 倍 (極高波動期才會 hit)
+                    if dyn > threshold:
+                        threshold = round(min(dyn, upper_cap), 1)
+            except Exception:
+                pass
 
         # 取 bucket: -300, -150, 0, 150, 300, ...
         if diff >= 0:

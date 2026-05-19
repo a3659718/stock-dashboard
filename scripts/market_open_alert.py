@@ -631,60 +631,79 @@ def main() -> int:
         _ws_batch.open_batched_state()
         _atexit.register(_ws_batch.close_batched_state)
 
-        # ===== 系統性大跌警報 (放在 reversal 之前, 讓 reversal 能 dedup) =====
-        # I2 fix: 順序很重要 — crash 先跑, 更新 state, 然後 reversal 讀 state
-        # 若同 symbol 已被 crash 推, reversal 跳過, 避免重複推 2 封.
-        # 觸發條件: 任一監控標的盤中跌 >=3%, 或連2日累計 >=4%
-        # 監控: ^TWII / ^SOX / ^IXIC / TSM (台積電 ADR)
+        # ===== Phase 1: 三個 index-class 警報合併成一封 TG =====
+        # 為什麼: 之前 crash / reversal / bucket-alert 各自 send TG, 美股開盤 1 hr 內
+        #         同 symbol 可能觸發 3-5 封. 合併後同 symbol 在「一封」訊息裡顯示所有觸發類型,
+        #         大幅減少 TG noise.
+        # 順序: crash 先 (state 更新給 reversal dedup 用), 再 reversal, 再 bucket
+        crash_data = None
+        crash_ai_text = ""
+        reversal_alerts = []
+        bucket_alerts = []
+
         try:
             import index_alerts as _ia
-            crash = _ia.check_systemic_crash()
-            if crash:
+            crash_data = _ia.check_systemic_crash()
+            if crash_data:
                 print(
-                    f"[systemic crash] triggered: {len(crash['triggers'])} 檔, "
-                    f"今日第 {crash.get('alert_index', '?')}/{crash.get('max_per_day', '?')} 次",
+                    f"[systemic crash] triggered: {len(crash_data['triggers'])} 檔, "
+                    f"今日第 {crash_data.get('alert_index', '?')}/{crash_data.get('max_per_day', '?')} 次",
                     flush=True,
                 )
-                # 呼叫 Gemini 給動作建議
-                ai_text = ""
+                # Gemini 動作建議 (只在 crash 觸發時跑)
                 if ai_analyzer.gemini_available():
                     try:
-                        ok, ai_text = ai_analyzer.analyze_systemic_crash(crash)
+                        ok, crash_ai_text = ai_analyzer.analyze_systemic_crash(crash_data)
                         if not ok:
-                            print(f"[systemic crash] Gemini failed: {ai_text}", flush=True)
-                            ai_text = ""
+                            print(f"[systemic crash] Gemini failed: {crash_ai_text}", flush=True)
+                            crash_ai_text = ""
                     except Exception as _e:
                         print(f"[systemic crash] Gemini exception: {_e}", flush=True)
-                        ai_text = ""
-                crash_msg = notifier.fmt_systemic_crash_alert(crash, ai_text=ai_text)
-                if crash_msg:
-                    print(f"[systemic crash] sending TG ({len(crash_msg)} chars)", flush=True)
-                    ok_send, info = notifier.send_message(crash_msg)
-                    print(f"[systemic crash] TG result: ok={ok_send} info={info}", flush=True)
+                        crash_ai_text = ""
         except Exception as _e:
             print(f"[systemic crash] check failed (non-fatal): {_e}", flush=True)
 
-        # ===== 盤中反轉警報 (放在 crash 之後; I2 dedup 會跳過已被 crash 推過的 sym) =====
-        # 觸發條件: 從今日 high 回吐 ≥1% 或 從今日 low 反彈 ≥1%
         try:
             import index_alerts as _ia_rev
-            reversal_alerts = _ia_rev.check_intraday_reversal()
+            reversal_alerts = _ia_rev.check_intraday_reversal() or []
             if reversal_alerts:
                 print(
-                    f"[intraday reversal] triggered {len(reversal_alerts)} 個方向變化: "
+                    f"[intraday reversal] triggered {len(reversal_alerts)}: "
                     + ", ".join(
                         f"{a.get('symbol')}({a.get('type')})" for a in reversal_alerts
                     ),
                     flush=True,
                 )
-                rev_msg = notifier.fmt_intraday_reversal_alerts(reversal_alerts)
-                if rev_msg:
-                    ok_rev, info_rev = notifier.send_message(rev_msg)
-                    print(f"[intraday reversal] TG result: ok={ok_rev} info={info_rev}", flush=True)
         except Exception as _e:
             import traceback
             print(f"[intraday reversal] check failed (non-fatal): {_e}", flush=True)
             traceback.print_exc()
+
+        try:
+            import index_alerts as _ia_idx
+            bucket_alerts = _ia_idx.check_index_alerts() or []
+            if bucket_alerts:
+                print(
+                    f"[index bucket] triggered {len(bucket_alerts)}: "
+                    + ", ".join(a.get("symbol", "") for a in bucket_alerts),
+                    flush=True,
+                )
+        except Exception as _e:
+            print(f"[index bucket] check failed (non-fatal): {_e}", flush=True)
+
+        # === 合併為 1 封 TG (取代之前 3 封獨立推播) ===
+        combined_msg = notifier.fmt_combined_intraday_alerts(
+            crash_data=crash_data,
+            reversal_alerts=reversal_alerts,
+            bucket_alerts=bucket_alerts,
+            crash_ai_text=crash_ai_text,
+        )
+        if combined_msg:
+            print(f"[combined intraday] sending merged TG ({len(combined_msg)} chars)", flush=True)
+            ok_c, info_c = notifier.send_message(combined_msg)
+            print(f"[combined intraday] TG result: ok={ok_c} info={info_c}", flush=True)
+        else:
+            print("[combined intraday] 無 index-class 警報觸發", flush=True)
 
         try:
             import watchlist_alerts
@@ -706,7 +725,9 @@ def main() -> int:
                 print(f"  (session debug failed: {_e})")
 
             wl = watchlist_alerts.check_watchlist_alerts()
-            idx = index_alerts.check_index_alerts()
+            # 重要: idx 已在 Phase 1 由 combined_msg 處理過, 這邊不再呼叫
+            #       避免重複 fetch + state thrash (cache 內也已有結果, 但保險不重複呼叫)
+            idx = []  # 已被 combined_msg 涵蓋
             cry = index_alerts.check_crypto_alerts()
             # 持倉停損 (盤中即時)
             try:

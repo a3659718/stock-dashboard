@@ -1494,6 +1494,157 @@ def fmt_stop_loss_alerts(breaches: list) -> str:
     return "\n".join(lines).rstrip() if lines else ""
 
 
+def fmt_combined_intraday_alerts(
+    crash_data: Optional[dict],
+    reversal_alerts: Optional[list],
+    bucket_alerts: Optional[list],
+    crash_ai_text: str = "",
+) -> str:
+    """合併 3 種大盤類警報為一封 TG (per cron tick).
+
+    減少訊息頻率: 同 cron tick 即使 crash + reversal + bucket 全觸發, 只推 1 封.
+    Same symbol 的多個觸發類型 group 在一起顯示.
+
+    Args:
+      crash_data: index_alerts.check_systemic_crash() return (None 表示沒觸發)
+      reversal_alerts: index_alerts.check_intraday_reversal() return (list, 空表示沒)
+      bucket_alerts: index_alerts.check_index_alerts() return (list, 空表示沒)
+      crash_ai_text: Gemini 對 crash 的分析 (有 crash 才放, 不重複到 reversal 等)
+    """
+    has_crash = bool(crash_data and crash_data.get("triggers"))
+    has_reversal = bool(reversal_alerts)
+    has_bucket = bool(bucket_alerts)
+
+    if not (has_crash or has_reversal or has_bucket):
+        return ""
+
+    # 集合所有 symbol — index by symbol, 把各種警報塞進去
+    per_sym: Dict[str, Dict] = {}
+
+    if has_crash:
+        for t in crash_data.get("triggers", []) or []:
+            sym = t.get("symbol", "")
+            if not sym:
+                continue
+            per_sym.setdefault(sym, {"name": t.get("name", sym), "country": t.get("country", "")})
+            per_sym[sym]["crash"] = t
+
+    if has_reversal:
+        for a in reversal_alerts or []:
+            sym = a.get("symbol", "")
+            if not sym:
+                continue
+            per_sym.setdefault(sym, {"name": a.get("name", sym), "country": a.get("country", "")})
+            per_sym[sym].setdefault("reversals", []).append(a)
+
+    if has_bucket:
+        for a in bucket_alerts or []:
+            sym = a.get("symbol", "")
+            if not sym:
+                continue
+            per_sym.setdefault(sym, {"name": a.get("name", sym), "country": a.get("country", "")})
+            per_sym[sym]["bucket"] = a
+
+    if not per_sym:
+        return ""
+
+    # ===== 訊息標題 — 用最高優先級的圖示 =====
+    if has_crash:
+        title = "🚨 盤中重要事件 (含系統性大跌)"
+    elif has_reversal:
+        title = "🔄 盤中反轉警報"
+    else:
+        title = "📈 盤中警報"
+
+    lines = [f"<b>{title}</b>", ""]
+
+    for sym, info in per_sym.items():
+        sym_esc = _esc(sym)
+        name_esc = _esc(info.get("name", sym))
+        country = _esc(info.get("country", ""))
+        country_tag = f"[{country}] " if country else ""
+
+        # symbol 主行 — 取 current 從任一 alert
+        cur = None
+        for src in ("crash", "reversals", "bucket"):
+            data = info.get(src)
+            if isinstance(data, dict):
+                cur = cur or data.get("current")
+            elif isinstance(data, list) and data:
+                cur = cur or data[0].get("current")
+        try:
+            cur_str = f"{float(cur):,.2f}" if cur is not None else "—"
+        except (TypeError, ValueError):
+            cur_str = "—"
+
+        lines.append(f"{country_tag}<b>{name_esc}</b> <code>{sym_esc}</code> {cur_str}")
+
+        # === Crash 觸發 (最高優先, 訊息最豐富) ===
+        crash_t = info.get("crash")
+        if crash_t:
+            try:
+                tval = float(crash_t.get("trigger_value", 0) or 0)
+                pct_o = float(crash_t.get("pct_vs_open", 0) or 0)
+                pct_p = float(crash_t.get("pct_vs_prior", 0) or 0)
+                today_open = float(crash_t.get("today_open", 0) or 0)
+                prior_close = float(crash_t.get("prior_close", 0) or 0)
+            except (TypeError, ValueError):
+                tval = pct_o = pct_p = today_open = prior_close = 0.0
+            ttype = crash_t.get("trigger_type", "intraday")
+            ttype_zh = "盤中" if ttype == "intraday" else "連2日累計"
+            lines.append(
+                f"  🚨 系統性: {ttype_zh}觸發 <b>{tval:+.2f}%</b>"
+            )
+            lines.append(
+                f"     vs 開盤 {today_open:,.2f}: {pct_o:+.2f}% · "
+                f"vs 昨收 {prior_close:,.2f}: {pct_p:+.2f}%"
+            )
+
+        # === Reversal 觸發 ===
+        for rev in info.get("reversals", []):
+            try:
+                rtype = rev.get("type", "")
+                high = float(rev.get("today_high", 0) or 0)
+                low = float(rev.get("today_low", 0) or 0)
+                dd = float(rev.get("drawdown_pct", 0) or 0)
+                rb = float(rev.get("rebound_pct", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+            if rtype == "drawdown":
+                lines.append(f"  📉 反轉: 從高點 {high:,.2f} 回吐 <b>{dd:+.2f}%</b>")
+            elif rtype == "rebound":
+                lines.append(f"  📈 反轉: 從低點 {low:,.2f} 反彈 <b>+{rb:.2f}%</b>")
+
+        # === Bucket 觸發 (原有 index_alerts) ===
+        bucket_t = info.get("bucket")
+        if bucket_t:
+            try:
+                diff = float(bucket_t.get("diff", 0) or 0)
+                leg = float(bucket_t.get("leg_pts", 0) or 0)
+                direction = _esc(bucket_t.get("direction", ""))
+                consecutive = int(bucket_t.get("consecutive", 1) or 1)
+            except (TypeError, ValueError):
+                diff = leg = 0.0
+                direction = ""
+                consecutive = 1
+            sign_t = "+" if diff > 0 else ""
+            extra = f" (連{consecutive}次同方向{direction})" if consecutive >= 2 else ""
+            lines.append(
+                f"  📊 點數: 開盤至今 {sign_t}{int(diff)}點{extra}"
+            )
+
+        lines.append("")
+
+    # === Gemini 分析 — 只在 crash 觸發時放, 放在最後 ===
+    if has_crash and crash_ai_text:
+        lines.append("<b>🤖 Gemini 動作建議</b>")
+        lines.append(_md_to_tg_html(crash_ai_text))
+        lines.append("")
+
+    lines.append("⚠️ 僅供參考, 不構成投資建議")
+    return _truncate_tg_msg("\n".join(lines))
+
+
 def fmt_intraday_reversal_alerts(alerts: list) -> str:
     """盤中反轉警報訊息 — 從高點回吐 / 從低點反彈.
 
