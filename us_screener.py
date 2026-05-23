@@ -151,7 +151,7 @@ _US_CORRELATED_GROUPS = [
     {"PLTR", "AI", "BBAI", "SOUN"},           # AI 軟體
     {"IONQ", "RGTI", "QBTS"},                  # 量子運算
     {"AMD", "INTC", "MU"},                     # CPU/Memory
-}
+]
 
 
 def _dedup_correlated(scored_rows: List[Dict], score_key: str = "score",
