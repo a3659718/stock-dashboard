@@ -304,7 +304,8 @@ def get_tw_open_picks(top_themes_n: int = 3, picks_per_theme: int = 3) -> Dict:
                 extras={"theme": r.get("_theme", ""), "today_pct": r.get("今日%")},
             )
             # 有催化劑利多 → 3 天漲
-            if cat and "利多" in cat or (cat and "催化" in cat):
+            # B11 修正: 加括號明確化布林優先級, 避免後續 refactor 出錯
+            if cat and ("利多" in cat or "催化" in cat):
                 signal_tracker.record_signal(
                     "catalyst", sid, name=r.get("stock_name", ""),
                     predicted_price=cur_price, expected_direction="up",

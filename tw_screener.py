@@ -36,7 +36,10 @@ class TWParams:
     # 新增 4 個條件參數
     consecutive_buy_days: int = 3  # 投信連續買超 N 天
     five_day_acc_lots: int = 100   # 5 日累計買超門檻 (張)
-    capital_ratio_pct: float = 0.5  # 投本比門檻 (%)
+    # B7 修正: 投本比改用 20 日累計買超 / 流通股本, 門檻提到 1.5%
+    # (原本 5 日 0.5% 太低, 任何投信小幅買進都會觸發)
+    capital_ratio_pct: float = 1.5  # 投本比門檻 (%) - 20 日累計買超 / 流通股本
+    capital_ratio_window: int = 20  # 投本比計算的窗口 (天)
     above_ma_window: int = 20       # MA 視窗 (預設月線)
     above_ma_slope_days: int = 5    # MA 斜率回看天數 (向上判斷)
 
@@ -55,7 +58,7 @@ CONDITION_LABELS = {
     "invtrust_first_buy":  "投信 30 日首買",
     "invtrust_consecutive":"投信連續 3 天買超",
     "invtrust_5d_acc":     "5 日投信累計 ≥ 100 張",
-    "capital_ratio":       "投本比 ≥ 0.5%",
+    "capital_ratio":       "投本比 ≥ 1.5% (20日累計)",
     "above_ma_uptrend":    "MA20 上方且趨勢向上",
     "kd_golden_cross":     "KD 黃金交叉",
     "macd_turn_positive":  "MACD 翻紅",
@@ -71,13 +74,36 @@ def latest_trading_date(df: pd.DataFrame) -> pd.Timestamp | None:
     return df["date"].max()
 
 
+def _last_trading_day_tw(today: dt.date | None = None) -> dt.date:
+    """回傳「最近一個台股交易日」(週末 / 假日 → 往前推).
+    B3 修正: 用 holiday_check 判斷, 失敗時 fallback 到只跳週末.
+    """
+    today = today or dt.date.today()
+    try:
+        import holiday_check
+        # 從今天往前最多回 14 天找最近交易日
+        d = today
+        for _ in range(14):
+            if not holiday_check.is_market_closed_today("TW", d):
+                return d
+            d -= dt.timedelta(days=1)
+    except Exception:
+        # fallback: 只跳週末
+        d = today
+        while d.weekday() >= 5:  # 5=Sat, 6=Sun
+            d -= dt.timedelta(days=1)
+        return d
+    return today
+
+
 def today_data_ready(df: pd.DataFrame) -> bool:
-    """檢查資料是否已包含「今天」(交易日尚未盤後落地時 latest != today)."""
-    today = pd.Timestamp(dt.date.today())
+    """檢查資料是否已包含「最近一個交易日」(B3 修正: 假日 / 週末改用上一個交易日比對).
+    """
+    last_td = pd.Timestamp(_last_trading_day_tw())
     last = latest_trading_date(df)
     if last is None:
         return False
-    return last.normalize() == today.normalize()
+    return last.normalize() == last_td.normalize()
 
 
 # ---------------------------------------------------------------------------
@@ -200,13 +226,17 @@ def screen_invtrust_first_buy(inst: pd.DataFrame, params: TWParams) -> pd.DataFr
             continue
         today_net = float(g[g["date"] == last_date]["net"].sum())
         prior = g[g["date"] < last_date]
+        # B4 修正: 真正的「首次買超」= 過去 30 日內沒有任何一天 net > 0
+        # (原邏輯只看累計 <= 0, 會把 "5 天大買 5 天大賣淨額為負, 今天又買" 誤判為首買)
+        prior_buy_days = int((prior["net"] > 0).sum())
         cum_prior = float(prior["net"].sum())
-        if today_net > 0 and cum_prior <= 0:
+        if today_net > 0 and prior_buy_days == 0:
             rows.append(
                 {
                     "stock_id": sid,
                     "today_net_buy": int(today_net),
                     "prior_30d_cum": int(cum_prior),
+                    "prior_buy_days": prior_buy_days,  # 應為 0
                 }
             )
     return pd.DataFrame(rows)
@@ -267,9 +297,16 @@ def screen_invtrust_5d_accumulation(inst: pd.DataFrame, params: TWParams) -> pd.
 
 
 # ---------------------------------------------------------------------------
-# 7) 投本比 ≥ X%  (5 日投信淨買 / 流通股本千張 × 100)
+# 7) 投本比 ≥ X%  (B7 修正: 改用 20 日累計投信淨買 / 流通股本)
 # ---------------------------------------------------------------------------
 def screen_invtrust_capital_ratio(inst: pd.DataFrame, shares_map: dict, params: TWParams) -> pd.DataFrame:
+    """投本比 = 投信 N 日累計淨買 (張) / 流通股本 (張) × 100 (%).
+
+    B7 修正:
+      - 視窗從 5 日改為 20 日 (params.capital_ratio_window), 5 日易被單日大買噪音帶偏
+      - 門檻從 0.5% 改為 1.5% (見 TWParams 預設值)
+      - 加入「短期防呆」: 若 N 日淨買 < 50 張, 直接跳過 (避免投信只買幾張就觸發)
+    """
     if inst.empty or not shares_map:
         return pd.DataFrame()
     df = inst[inst["name"] == "Investment_Trust"].copy()
@@ -277,12 +314,21 @@ def screen_invtrust_capital_ratio(inst: pd.DataFrame, shares_map: dict, params: 
         return pd.DataFrame()
     df["net"] = df["buy"].astype(float) - df["sell"].astype(float)
     last_date = df["date"].max()
+    window = getattr(params, "capital_ratio_window", 20)
+    # L4 修正: window 內的「實際資料筆數」要 >= window * 0.5 才算數,
+    # 否則樣本不足 (例如新上市股或投信完全沒進出), 不應該觸發訊號.
+    min_required_rows = max(5, int(window * 0.5))
     rows = []
     for sid, g in df.groupby("stock_id"):
         g = g.sort_values("date")
         if g["date"].max() != last_date:
             continue
-        cum = float(g.tail(5)["net"].sum())
+        last_window = g.tail(window)
+        if len(last_window) < min_required_rows:
+            continue  # L4: 資料天數不足, 跳過
+        cum = float(last_window["net"].sum())
+        if cum < 50:
+            continue  # 短期防呆: 投信只買幾張, 投本比再高也沒意義
         shares = shares_map.get(str(sid))
         if not shares or shares <= 0:
             continue
@@ -291,7 +337,8 @@ def screen_invtrust_capital_ratio(inst: pd.DataFrame, shares_map: dict, params: 
             rows.append({
                 "stock_id": sid,
                 "shares_kilo": int(shares),
-                "5d_cum_net": int(cum),
+                f"{window}d_cum_net": int(cum),
+                f"{window}d_data_rows": len(last_window),
                 "capital_ratio_%": round(ratio, 3),
             })
     return pd.DataFrame(rows)
@@ -502,7 +549,9 @@ def run_all_screens(
             ld = d["date"].max()
             if latest_date is None or ld > latest_date:
                 latest_date = ld
-    ready = (latest_date is not None and pd.Timestamp(latest_date).normalize() == pd.Timestamp(today).normalize())
+    # B3 修正: ready 判斷改為「資料最新日 == 最近一個交易日」, 假日 / 週末就用上一個交易日.
+    last_td = pd.Timestamp(_last_trading_day_tw(today))
+    ready = (latest_date is not None and pd.Timestamp(latest_date).normalize() == last_td.normalize())
 
     # 跑各 screen
     _p("計算各條件命中…", 80)
@@ -596,17 +645,26 @@ def run_all_screens(
                 it = it.drop_duplicates(subset=["stock_id", "date"], keep="last")
                 it["net"] = it["buy"].astype(float) - it["sell"].astype(float)
                 last_date = it["date"].max()
+                # B12 修正: int() 對 NaN 會炸 ValueError, 用 _safe_int 包.
+                def _safe_int(v, default=0):
+                    try:
+                        if v is None or pd.isna(v):
+                            return default
+                        return int(v)
+                    except (TypeError, ValueError):
+                        return default
+
                 acc5_map = (
                     it.sort_values("date")
                     .groupby("stock_id")["net"]
-                    .apply(lambda s: int(s.tail(5).sum()))
+                    .apply(lambda s: _safe_int(s.tail(5).sum()))
                     .to_dict()
                 )
                 today_map = (
                     it[it["date"] == last_date]
                     .groupby("stock_id")["net"]
                     .last()
-                    .apply(lambda v: int(v))
+                    .map(_safe_int)
                     .to_dict()
                 )
                 combined["投信5日(張)"] = combined["stock_id"].map(acc5_map)

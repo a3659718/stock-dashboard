@@ -1564,20 +1564,45 @@ def fmt_combined_intraday_alerts(
         country = _esc(info.get("country", ""))
         country_tag = f"[{country}] " if country else ""
 
-        # symbol 主行 — 取 current 從任一 alert
-        cur = None
-        for src in ("crash", "reversals", "bucket"):
-            data = info.get(src)
-            if isinstance(data, dict):
-                cur = cur or data.get("current")
-            elif isinstance(data, list) and data:
-                cur = cur or data[0].get("current")
-        try:
-            cur_str = f"{float(cur):,.2f}" if cur is not None else "—"
-        except (TypeError, ValueError):
-            cur_str = "—"
+        # 收集所有 anchor 價格 (從任一觸發源取得; reversal 通常最完整)
+        anchors: dict = {}
+        srcs = [info.get("crash"), info.get("bucket")]
+        srcs.extend(info.get("reversals", []) or [])
+        for src in srcs:
+            if not isinstance(src, dict):
+                continue
+            for k in ("today_open", "today_high", "today_low", "current", "prior_close"):
+                if k not in anchors and src.get(k) not in (None, ""):
+                    try:
+                        anchors[k] = float(src[k])
+                    except (TypeError, ValueError):
+                        pass
+        today_open = anchors.get("today_open")
+        today_high = anchors.get("today_high")
+        today_low = anchors.get("today_low")
+        current = anchors.get("current")
+        prior_close = anchors.get("prior_close")
 
-        lines.append(f"{country_tag}<b>{name_esc}</b> <code>{sym_esc}</code> {cur_str}")
+        # === Symbol 主行: 加 ▼▲ 點數 + % vs 開盤 ===
+        cur_str = f"{current:,.2f}" if current is not None else "—"
+        header_extra = ""
+        if today_open is not None and current is not None and today_open > 0:
+            diff_open = current - today_open
+            pct_open = (current / today_open - 1) * 100
+            arrow_h = "▲" if diff_open > 0 else ("▼" if diff_open < 0 else "—")
+            sign_p = "+" if pct_open > 0 else ""
+            header_extra = f"  {arrow_h}{abs(diff_open):,.0f} 點 ({sign_p}{pct_open:.2f}% vs 開)"
+        lines.append(f"{country_tag}<b>{name_esc}</b> <code>{sym_esc}</code> {cur_str}{header_extra}")
+
+        # === 日內走勢 line (4 個 key 價位, 視覺一目了然) ===
+        if today_open is not None and current is not None:
+            path_parts = [f"開 {today_open:,.0f}"]
+            if today_high is not None:
+                path_parts.append(f"高 {today_high:,.0f}")
+            if today_low is not None:
+                path_parts.append(f"低 {today_low:,.0f}")
+            path_parts.append(f"現 {current:,.0f}")
+            lines.append(f"  📊 日內: " + " / ".join(path_parts))
 
         # === Crash 觸發 (最高優先, 訊息最豐富) ===
         crash_t = info.get("crash")
@@ -1586,34 +1611,52 @@ def fmt_combined_intraday_alerts(
                 tval = float(crash_t.get("trigger_value", 0) or 0)
                 pct_o = float(crash_t.get("pct_vs_open", 0) or 0)
                 pct_p = float(crash_t.get("pct_vs_prior", 0) or 0)
-                today_open = float(crash_t.get("today_open", 0) or 0)
-                prior_close = float(crash_t.get("prior_close", 0) or 0)
+                today_open_c = float(crash_t.get("today_open", today_open or 0) or 0)
+                prior_close_c = float(crash_t.get("prior_close", prior_close or 0) or 0)
+                cur_c = float(crash_t.get("current", current or 0) or 0)
             except (TypeError, ValueError):
-                tval = pct_o = pct_p = today_open = prior_close = 0.0
+                tval = pct_o = pct_p = today_open_c = prior_close_c = cur_c = 0.0
             ttype = crash_t.get("trigger_type", "intraday")
             ttype_zh = "盤中" if ttype == "intraday" else "連2日累計"
+            diff_o = cur_c - today_open_c
+            diff_p = cur_c - prior_close_c
+            lines.append(f"  🚨 <b>系統性大跌觸發</b> ({ttype_zh} {tval:+.2f}%)")
             lines.append(
-                f"  🚨 系統性: {ttype_zh}觸發 <b>{tval:+.2f}%</b>"
+                f"     vs 開盤 {today_open_c:,.0f}: ▼{abs(diff_o):,.0f} 點 ({pct_o:+.2f}%)"
             )
             lines.append(
-                f"     vs 開盤 {today_open:,.2f}: {pct_o:+.2f}% · "
-                f"vs 昨收 {prior_close:,.2f}: {pct_p:+.2f}%"
+                f"     vs 昨收 {prior_close_c:,.0f}: ▼{abs(diff_p):,.0f} 點 ({pct_p:+.2f}%)"
             )
 
-        # === Reversal 觸發 ===
+        # === Reversal 觸發 — 直觀化: 從高/低 → 現價 顯示點數差 ===
         for rev in info.get("reversals", []):
             try:
                 rtype = rev.get("type", "")
-                high = float(rev.get("today_high", 0) or 0)
-                low = float(rev.get("today_low", 0) or 0)
+                high = float(rev.get("today_high", today_high or 0) or 0)
+                low = float(rev.get("today_low", today_low or 0) or 0)
+                cur_r = float(rev.get("current", current or 0) or 0)
                 dd = float(rev.get("drawdown_pct", 0) or 0)
                 rb = float(rev.get("rebound_pct", 0) or 0)
             except (TypeError, ValueError):
                 continue
             if rtype == "drawdown":
-                lines.append(f"  📉 反轉: 從高點 {high:,.2f} 回吐 <b>{dd:+.2f}%</b>")
+                pts_drop = cur_r - high  # 負值
+                lines.append(
+                    f"  🔻 <b>反轉警報 (從高點回吐)</b>"
+                )
+                lines.append(
+                    f"     高 {high:,.0f} ↘ 現 {cur_r:,.0f} = "
+                    f"<b>▼{abs(pts_drop):,.0f} 點 ({dd:+.2f}%)</b>"
+                )
             elif rtype == "rebound":
-                lines.append(f"  📈 反轉: 從低點 {low:,.2f} 反彈 <b>+{rb:.2f}%</b>")
+                pts_up = cur_r - low  # 正值
+                lines.append(
+                    f"  🔺 <b>反彈警報 (從低點彈升)</b>"
+                )
+                lines.append(
+                    f"     低 {low:,.0f} ↗ 現 {cur_r:,.0f} = "
+                    f"<b>▲{pts_up:,.0f} 點 (+{rb:.2f}%)</b>"
+                )
 
         # === Bucket 觸發 (原有 index_alerts) ===
         bucket_t = info.get("bucket")
@@ -1627,11 +1670,14 @@ def fmt_combined_intraday_alerts(
                 diff = leg = 0.0
                 direction = ""
                 consecutive = 1
-            sign_t = "+" if diff > 0 else ""
-            extra = f" (連{consecutive}次同方向{direction})" if consecutive >= 2 else ""
+            arrow_b = "▲" if diff > 0 else "▼"
+            extra = f" · 連{consecutive}次同方向{direction}" if consecutive >= 2 else ""
+            # 點數警報跟主行的「vs 開盤」其實同樣資料, 但 bucket 強調「跨越門檻」
             lines.append(
-                f"  📊 點數: 開盤至今 {sign_t}{int(diff)}點{extra}"
+                f"  📊 點數警報: {arrow_b}{abs(int(diff)):,} 點跨越門檻{extra}"
             )
+            # 移除舊版重複的 leg 顯示 (太重複)
+            _ = leg  # silence unused warning; 若需要 leg 邏輯之後可加回
 
         lines.append("")
 

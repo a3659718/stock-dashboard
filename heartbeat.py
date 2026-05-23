@@ -234,4 +234,13 @@ def build_heartbeat_message() -> str:
             "你會收到大量重複警報. 請設定 Google Sheets credentials.</i>"
         )
 
-    return "\n".join(lines)
+    # M3 fix: 走 byte-length truncate, 避免 ETF 監控擴張後超過 TG 4096 byte 上限
+    try:
+        import notifier as _n
+        return _n._truncate_tg_msg("\n".join(lines))
+    except Exception:
+        # notifier 載入失敗時 fallback 用 char-length truncate (粗略)
+        out = "\n".join(lines)
+        if len(out.encode("utf-8")) > 3900:
+            out = out.encode("utf-8")[:3900].decode("utf-8", errors="ignore") + "\n…(節錄)"
+        return out

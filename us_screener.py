@@ -125,9 +125,75 @@ def _theme_score_for(symbol: str, news_pool: List[Dict]) -> Dict:
 
 
 # ---------------------------------------------------------------------------
+# B13 修正: 完整的 ETF / ADR / 高相關股過濾
+# ---------------------------------------------------------------------------
+# 排除清單 — 純 ETF, 不該出現在「個股推薦」
+_US_ETF_BLACKLIST = {
+    # 大盤 ETF
+    "SPY", "QQQ", "IWM", "DIA", "VOO", "VTI", "VTV", "VUG", "VEA", "VWO",
+    # 板塊 ETF
+    "XLK", "XLE", "XLF", "XLV", "XLY", "XLP", "XLI", "XLB", "XLU", "XLRE", "XLC",
+    # 三倍槓桿 ETF
+    "TQQQ", "SQQQ", "SOXL", "SOXS", "TNA", "TZA", "UPRO", "SPXU", "FAS", "FAZ",
+    # 主題 ETF
+    "ARKK", "ARKW", "ARKG", "ARKF", "ARKQ", "SMH", "XSD", "IBB", "XBI",
+    # 商品 / 債券 ETF
+    "GLD", "SLV", "USO", "UNG", "TLT", "HYG", "LQD",
+}
+
+# 高度相關股清單 — 同一族群只取 1 檔避免 Top 5 重複曝險
+# 用「代表性最強」的標的當 anchor, 其他列為其同類
+_US_CORRELATED_GROUPS = [
+    {"NVDA", "TSM", "ASML", "AVGO"},          # AI 半導體 (高度同向)
+    {"MSFT", "GOOGL", "META", "AAPL"},        # mega-cap tech (相關係數 > 0.8)
+    {"COIN", "MSTR", "MARA", "RIOT"},          # 加密貨幣概念
+    {"OKLO", "SMR", "CEG", "VST", "NEE"},     # 核電 / 公用事業
+    {"PLTR", "AI", "BBAI", "SOUN"},           # AI 軟體
+    {"IONQ", "RGTI", "QBTS"},                  # 量子運算
+    {"AMD", "INTC", "MU"},                     # CPU/Memory
+}
+
+
+def _dedup_correlated(scored_rows: List[Dict], score_key: str = "score",
+                       min_kept: int = 5) -> List[Dict]:
+    """同一相關性 group 只保留分數最高的那檔, 避免推薦過度集中.
+
+    B13 + M3 修正: 若 dedup 後不足 min_kept 檔, 把被砍掉的「同 group 次高分」
+    依序補回, 直到湊滿 min_kept 或用完候選為止.
+    防止「Top 10 都在 mega-cap tech group → dedup 後只剩 1 檔」的問題.
+    """
+    sorted_rows = sorted(scored_rows, key=lambda r: r.get(score_key, 0), reverse=True)
+    kept = []
+    deferred = []  # 被 dedup 砍掉的, 留作備援
+    used_groups = []
+    for row in sorted_rows:
+        sym = row.get("symbol", "")
+        my_group = None
+        for g in _US_CORRELATED_GROUPS:
+            if sym in g:
+                my_group = g
+                break
+        if my_group is not None and my_group in used_groups:
+            deferred.append(row)  # 先記下, 不足時補回
+            continue
+        kept.append(row)
+        if my_group is not None:
+            used_groups.append(my_group)
+
+    # M3 fallback: 不足 min_kept 時補回 deferred (仍按分數)
+    if len(kept) < min_kept and deferred:
+        need = min_kept - len(kept)
+        kept.extend(deferred[:need])
+        # 重新排序確保高分在前
+        kept.sort(key=lambda r: r.get(score_key, 0), reverse=True)
+    return kept
+
+
+# ---------------------------------------------------------------------------
 # 主流程
 # ---------------------------------------------------------------------------
-def run_us_recommendation(top_n: int = 5) -> dict:
+def run_us_recommendation(top_n: int = 5, dedup_correlated: bool = True) -> dict:
+    """B13: dedup_correlated=True 時, 同一相關性族群只取分數最高的那檔."""
     syms = _watchlist()
     spy_df = ds.fetch_yf_history("SPY", period="3mo")
     fg = ds.fetch_fear_greed()
@@ -136,7 +202,8 @@ def run_us_recommendation(top_n: int = 5) -> dict:
 
     rows = []
     for sym in syms:
-        if sym in {"SPY", "QQQ", "IWM", "DIA"}:
+        # B13: 用 ETF blacklist 取代寫死的 4 檔
+        if sym in _US_ETF_BLACKLIST:
             continue
         df = ds.fetch_yf_history(sym, period="6mo")
         if df.empty or len(df) < 30:
@@ -186,6 +253,10 @@ def run_us_recommendation(top_n: int = 5) -> dict:
 
     if not rows:
         return {"top_picks": pd.DataFrame(), "fear_greed": fg, "sectors": sector, "news": news_pool}
+
+    # B13 + M3: 同族群去重 (避免 Top 5 都是 AI 半導體), 但不足時自動補回
+    if dedup_correlated:
+        rows = _dedup_correlated(rows, score_key="score", min_kept=top_n)
 
     df_all = pd.DataFrame(rows).sort_values("score", ascending=False).reset_index(drop=True)
     top_df = df_all.head(top_n).copy()

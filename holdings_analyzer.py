@@ -224,7 +224,7 @@ def _gemini_holding_advice(item: Dict, tech: Dict, chip: Dict, news: List[Dict])
 【籌碼面】
   外資 5 日累計 {fi.get('5d_total',0):+,} 張, 連續 {fi.get('consecutive_days',0)} 天
   投信 5 日累計 {it.get('5d_total',0):+,} 張
-  融資 30 日變化 {margin.get('融資30日變化%',0):+.1f}%
+  融資 30 日變化 {(margin.get('融資30日變化%') or 0):+.1f}%
 {news_str}
 
 請以嚴格 JSON 格式回應 (不加 markdown), 包含:
@@ -357,7 +357,8 @@ def _analyze_one(item: Dict) -> Optional[Dict]:
             "fi_5d": (chip.get("institutional", {}).get("Foreign_Investor", {}).get("5d_total", 0)) if chip else 0,
             "it_5d": (chip.get("institutional", {}).get("Investment_Trust", {}).get("5d_total", 0)) if chip else 0,
             "fi_consec": (chip.get("institutional", {}).get("Foreign_Investor", {}).get("consecutive_days", 0)) if chip else 0,
-            "margin_30d_pct": (chip.get("margin", {}).get("融資30日變化%", 0)) if chip else 0,
+            # 修正: chip_analyzer 在「30 日前餘額為 0 / 無資料」時回 None, 此處 fallback 0
+            "margin_30d_pct": (chip.get("margin", {}).get("融資30日變化%") or 0) if chip else 0,
         },
         "news": news,
         "advice": advice,

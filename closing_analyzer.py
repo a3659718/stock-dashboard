@@ -119,7 +119,9 @@ def _fetch_one_chip(sid: str, name: str, days: int = 10) -> Optional[Dict]:
                 "fi_consec": chip.get("institutional", {}).get("Foreign_Investor", {}).get("consecutive_days", 0),
                 "today_pct": chip.get("price", {}).get("今日%", 0),
                 "vol_ratio": chip.get("price", {}).get("量比", 1),
-                "margin_30d": chip.get("margin", {}).get("融資30日變化%", 0),
+                # 修正: 我把 chip_analyzer 的 None 意義 (資料缺失) 在此 fallback 為 0,
+                # 避免下面 format spec :+.0f 對 None 炸 TypeError.
+                "margin_30d": chip.get("margin", {}).get("融資30日變化%") or 0,
             },
         }
     except Exception as _e:

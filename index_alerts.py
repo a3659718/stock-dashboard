@@ -247,9 +247,11 @@ def check_intraday_reversal() -> List[Dict]:
     except Exception:
         pass
 
-    # I2 fix: 讀 systemic_crash_alerts state — 同 sym 今天已被 crash 推過就跳 reversal
-    # 避免大跌時同一個 symbol 同時收到 「系統性大跌 -3.5%」+「從高點回吐 -2%」兩封.
-    crash_alerts_state = state.get("systemic_crash_alerts", {}) or {}
+    # M1 fix: 之前 I2 dedup (crash 已推則 reversal 跳) 是在 alerts 各自獨立推 TG 時設計的.
+    # 現在 crash + reversal 已合併到同一封 TG (fmt_combined_intraday_alerts), reversal 段
+    # 是 crash 段的 *互補資訊* (告訴用戶從高點掉多少 vs crash 只告訴大跌總幅度).
+    # 拿掉 dedup 後, 合併訊息會同時顯示兩段, 資訊更完整.
+    # 註: reversal 自身的 ratchet / cooldown / daily-cap 仍保留 (避免單一 reversal 連推).
 
     alerts: List[Dict] = []
 
@@ -258,17 +260,6 @@ def check_intraday_reversal() -> List[Dict]:
         if country in closed_markets:
             continue
         if not _is_market_in_session(country):
-            continue
-
-        # I2 dedup: 若今天 systemic_crash 已對此 sym fire 過, 跳過 reversal
-        crash_sym = crash_alerts_state.get(sym, {})
-        if (crash_sym.get("date") == today_str
-                and crash_sym.get("alerts_today", 0) > 0):
-            print(
-                f"[reversal] {sym} 今天已被 systemic_crash 推過 ({crash_sym.get('alerts_today')} 次), "
-                f"跳過 reversal 避免重複推播",
-                flush=True,
-            )
             continue
 
         snap = _fetch_intraday_anchor_data(sym)

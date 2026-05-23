@@ -692,18 +692,24 @@ def main() -> int:
             print(f"[index bucket] check failed (non-fatal): {_e}", flush=True)
 
         # === 合併為 1 封 TG (取代之前 3 封獨立推播) ===
-        combined_msg = notifier.fmt_combined_intraday_alerts(
-            crash_data=crash_data,
-            reversal_alerts=reversal_alerts,
-            bucket_alerts=bucket_alerts,
-            crash_ai_text=crash_ai_text,
-        )
-        if combined_msg:
-            print(f"[combined intraday] sending merged TG ({len(combined_msg)} chars)", flush=True)
-            ok_c, info_c = notifier.send_message(combined_msg)
-            print(f"[combined intraday] TG result: ok={ok_c} info={info_c}", flush=True)
-        else:
-            print("[combined intraday] 無 index-class 警報觸發", flush=True)
+        # M2 fix: 包 try/except 避免 formatter / send_message 失敗讓 Phase 2 (watchlist/crypto) 中斷
+        try:
+            combined_msg = notifier.fmt_combined_intraday_alerts(
+                crash_data=crash_data,
+                reversal_alerts=reversal_alerts,
+                bucket_alerts=bucket_alerts,
+                crash_ai_text=crash_ai_text,
+            )
+            if combined_msg:
+                print(f"[combined intraday] sending merged TG ({len(combined_msg)} chars)", flush=True)
+                ok_c, info_c = notifier.send_message(combined_msg)
+                print(f"[combined intraday] TG result: ok={ok_c} info={info_c}", flush=True)
+            else:
+                print("[combined intraday] 無 index-class 警報觸發", flush=True)
+        except Exception as _ce:
+            import traceback
+            print(f"[combined intraday] formatter/send 失敗 (non-fatal, Phase 2 仍會跑): {_ce}", flush=True)
+            traceback.print_exc()
 
         try:
             import watchlist_alerts
