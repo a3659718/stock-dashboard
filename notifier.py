@@ -302,17 +302,17 @@ def fmt_tw_combined(combined_df, latest_date_str: str, market_label: str, max_n:
     return "\n".join(lines)
 
 
-def fmt_us_top_picks(df, fg: dict) -> str:
+def fmt_us_top_picks(df, fg: dict, top_n: int = 10) -> str:
     if df is None or df.empty:
-        return "美股 Top 5 推薦：今日無符合篩選條件的標的。"
+        return f"美股 Top {top_n} 推薦：今日無符合篩選條件的標的。"
     score = fg.get("score") if fg else None
     rating = fg.get("rating") if fg else None
     try:
         fg_line = f"恐慌指數 {round(float(score),1)} ({_esc(rating)})" if score is not None else "恐慌指數 N/A"
     except (TypeError, ValueError):
         fg_line = "恐慌指數 N/A"
-    lines = [f"<b>美股 Top 5 推薦</b> · {fg_line}", ""]
-    for i, row in df.head(5).iterrows():
+    lines = [f"<b>美股 Top {top_n} 推薦</b> · {fg_line}", ""]
+    for i, row in df.head(top_n).iterrows():
         # pandas Series .get(key, default) 缺 key 時回 default; 但 None 值仍會回 None
         # → 用 `or "—"` 同時擋 None 跟空字串
         sym = row.get("symbol") or "—"

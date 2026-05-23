@@ -2428,7 +2428,7 @@ with tab_stock:
 
 
 with tab_us:
-    st.subheader("美股 Top 5 推薦 (技術 + 動能 + 題材 + 市場情緒)")
+    st.subheader("美股 Top 10 推薦 (技術 + 動能 + 題材 + 市場情緒)")
     st.caption("候選池可在 Streamlit secrets 加入 `US_WATCHLIST=AAPL,MSFT,...` 自訂。")
 
     cA, cB = st.columns([1, 1])
@@ -2442,7 +2442,7 @@ with tab_us:
     if us_btn:
         try:
             with st.spinner("掃描美股候選池中…(約 30~90 秒)"):
-                st.session_state["us_result"] = us_screener.run_us_recommendation(top_n=5)
+                st.session_state["us_result"] = us_screener.run_us_recommendation(top_n=10)
         except Exception as e:
             st.error(f"美股掃描失敗：{e}")
 
@@ -2484,7 +2484,7 @@ with tab_us:
                 st.markdown("---")
 
         if send_us_tg:
-            _send_tg(notifier.fmt_us_top_picks(top_picks, fg), "美股 Top 5")
+            _send_tg(notifier.fmt_us_top_picks(top_picks, fg), "美股 Top 10")
 
 
 # =============================================================================

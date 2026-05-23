@@ -466,6 +466,12 @@ def fetch_sector_rotation() -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 @st.cache_data(ttl=900, show_spinner=False)
 def fetch_yahoo_news(symbol: str, max_n: int = 6) -> List[Dict]:
+    """抓單檔 Yahoo Finance news.
+
+    修正 (2026-05): yfinance 0.2.40+ 改回 {"content": {title, ...}} 巢狀格式.
+    舊版是 flat {title, publisher, link, providerPublishTime, relatedTickers}.
+    這裡同時相容兩種格式, 否則「候選個股近期新聞 / 題材」全空.
+    """
     if yf is None:
         return []
     try:
@@ -474,12 +480,52 @@ def fetch_yahoo_news(symbol: str, max_n: int = 6) -> List[Dict]:
         items = []
     out = []
     for it in items[:max_n]:
+        if not isinstance(it, dict):
+            continue
+        content = it.get("content")
+        if isinstance(content, dict):
+            # 新版巢狀格式 (yfinance >= 0.2.40)
+            title = content.get("title") or it.get("title")
+            provider_obj = content.get("provider") or {}
+            publisher = (provider_obj.get("displayName") if isinstance(provider_obj, dict)
+                          else str(provider_obj)) or it.get("publisher", "")
+            # link 在新版可能在 content.canonicalUrl 或 content.clickThroughUrl
+            link = None
+            for key in ("canonicalUrl", "clickThroughUrl"):
+                v = content.get(key)
+                if isinstance(v, dict):
+                    link = v.get("url")
+                    if link:
+                        break
+                elif isinstance(v, str):
+                    link = v
+                    break
+            link = link or it.get("link")
+            # 時間: pubDate / displayTime (ISO string) 或舊版 providerPublishTime (epoch)
+            pub_time = (content.get("pubDate") or content.get("displayTime")
+                          or it.get("providerPublishTime"))
+            if isinstance(pub_time, str):
+                try:
+                    pub_time = int(dt.datetime.fromisoformat(
+                        pub_time.replace("Z", "+00:00")).timestamp())
+                except Exception:
+                    pub_time = None
+            related = (content.get("relatedTickers") or it.get("relatedTickers") or [])
+        else:
+            # 舊版平格式
+            title = it.get("title")
+            publisher = it.get("publisher", "")
+            link = it.get("link")
+            pub_time = it.get("providerPublishTime")
+            related = it.get("relatedTickers", [])
+        if not title:
+            continue
         out.append({
-            "title": it.get("title"),
-            "publisher": it.get("publisher"),
-            "link": it.get("link"),
-            "providerPublishTime": it.get("providerPublishTime"),
-            "relatedTickers": it.get("relatedTickers", []),
+            "title": title,
+            "publisher": publisher,
+            "link": link,
+            "providerPublishTime": pub_time,
+            "relatedTickers": related,
         })
     return out
 
@@ -525,6 +571,7 @@ def fetch_tw_market_pulse() -> Dict:
         last = float(close.iloc[-1])
         ret_5d = (last / float(close.iloc[-6]) - 1) * 100 if len(close) >= 6 else 0
         ret_20d = (last / float(close.iloc[-21]) - 1) * 100 if len(close) >= 21 else 0
+
 
         daily_ret = close.pct_change().dropna()
         vol_20d = float(daily_ret.iloc[-20:].std() * 100) if len(daily_ret) >= 20 else 1.0

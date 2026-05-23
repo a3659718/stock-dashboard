@@ -510,3 +510,103 @@ def vpt_uptrend(close: pd.Series, volume: pd.Series, lookback: int = 20) -> bool
     recent = vpt.iloc[-lookback:]
     # 線性回歸斜率 (簡化用 first-last 比較)
     return bool(recent.iloc[-1] > recent.iloc[0])
+
+
+# ===========================================================================
+# 長線目標價計算 (Fibonacci extension + Measured Move)
+# 給 us_upside_screener 用, 補足 ATR-based 短線目標
+# ===========================================================================
+
+def fibonacci_extension_targets(close: pd.Series, lookback: int = 252,
+                                  pivot_window: int = 10) -> Dict:
+    """從近 lookback 日找最重要的 swing low → swing high → pullback,
+    投影出 1.272 / 1.618 / 2.618 fib extension 目標.
+
+    用法: 從歷史 swing 找出「波段」, 然後 extension 預測突破後的目標.
+    例: RKLB $4 (low) → $34 (high) → $20 (pullback). Extension:
+        1.272: $20 + 1.272 * (34-4) = $58
+        1.618: $20 + 1.618 * 30 = $69
+        2.618: $20 + 2.618 * 30 = $98
+
+    回傳 {fib_127, fib_162, fib_262, swing_low, swing_high, swing_pullback}
+    或 {} 若無足夠 swing.
+    """
+    if close is None or len(close) < min(lookback, 60):
+        return {}
+    c = close.astype(float).tail(min(lookback, len(close))).reset_index(drop=True)
+    highs_idx, lows_idx = find_local_extremes(c, window=pivot_window)
+    if not highs_idx or not lows_idx:
+        return {}
+    # 找最近一個 major swing: 最近一個 high, 與之前的 low (距離至少 20 天)
+    last_high_idx = highs_idx[-1]
+    # 找這個 high 之前的最低點
+    prior_lows = [i for i in lows_idx if i < last_high_idx]
+    if not prior_lows:
+        return {}
+    swing_low_idx = prior_lows[-1] if (last_high_idx - prior_lows[-1]) >= 20 else (
+        prior_lows[-2] if len(prior_lows) >= 2 else prior_lows[-1]
+    )
+    swing_low = float(c.iloc[swing_low_idx])
+    swing_high = float(c.iloc[last_high_idx])
+    if swing_high <= swing_low:
+        return {}
+    swing_range = swing_high - swing_low
+    # pullback = swing_high 後最低點 (若無則用最後價當 pullback)
+    after_high = c.iloc[last_high_idx + 1:]
+    if len(after_high) > 0:
+        pullback = float(after_high.min())
+    else:
+        pullback = float(c.iloc[-1])
+    # 確保 pullback 介於 low 和 high 之間, 否則用 50% 回撤當預設
+    if pullback >= swing_high or pullback <= swing_low:
+        pullback = swing_low + 0.5 * swing_range
+    return {
+        "swing_low": round(swing_low, 2),
+        "swing_high": round(swing_high, 2),
+        "swing_pullback": round(pullback, 2),
+        "fib_127": round(pullback + 1.272 * swing_range, 2),
+        "fib_162": round(pullback + 1.618 * swing_range, 2),
+        "fib_262": round(pullback + 2.618 * swing_range, 2),
+    }
+
+
+def measured_move_target(close: pd.Series, base_lookback: int = 60,
+                           min_base_days: int = 15) -> Dict:
+    """Measured Move: 找近期整理區, 用「整理區高度」投影突破後的目標.
+
+    整理區 = 近 N 日的高低點區間, 條件: 區間幅度 < 30% (是整理不是趨勢)
+    突破後預期: target = breakout_price + base_height
+    保守版: target_conservative = breakout_price + 0.7 * base_height
+
+    回傳 {base_high, base_low, base_height_pct, target, target_conservative}
+    或 {} 若不是整理區.
+    """
+    if close is None or len(close) < base_lookback:
+        return {}
+    c = close.astype(float)
+    # 用近 base_lookback 日 EXCEPT 最近 3 日 (避免突破日本身影響)
+    base_window = c.iloc[-(base_lookback):-3] if len(c) > base_lookback + 3 else c.iloc[-(base_lookback):]
+    if len(base_window) < min_base_days:
+        return {}
+    base_high = float(base_window.max())
+    base_low = float(base_window.min())
+    if base_low <= 0:
+        return {}
+    base_height = base_high - base_low
+    base_height_pct = base_height / base_low * 100
+    # 太寬 (>30%) 不是整理, 是趨勢; 太窄 (<3%) 推不出有意義目標
+    if base_height_pct > 30 or base_height_pct < 3:
+        return {}
+    cur = float(c.iloc[-1])
+    # 確認突破: 現價 > base_high
+    if cur <= base_high:
+        return {}
+    target = base_high + base_height
+    target_conservative = base_high + 0.7 * base_height
+    return {
+        "base_high": round(base_high, 2),
+        "base_low": round(base_low, 2),
+        "base_height_pct": round(base_height_pct, 1),
+        "target": round(target, 2),
+        "target_conservative": round(target_conservative, 2),
+    }

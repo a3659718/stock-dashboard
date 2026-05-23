@@ -1,32 +1,17 @@
 """
 theme_analyzer.py
-題材 / 催化劑 / 板塊熱度評分 — 給 us_upside_screener / actionable_picks 共用.
+Theme / catalyst / sector heat scoring — shared by us_upside_screener / actionable_picks.
 
-為什麼需要這個:
-  美股「爆發」很大成分是 narrative-driven (AI / 核能 / 量子 / 加密 / 機器人...).
-  純技術面會錯過「題材剛起來但價格還沒噴」的標的, 也無法區分:
-    - NVDA breakout + AI narrative 強 → 高勝率
-    - XYZ breakout 但沒題材 → 容易假突破
+Score composition (0-100):
+  - Stock narrative heat (news + keyword): 0-50 (incl. multi-narrative bonus)
+  - Sector rotation rank (XLK/XLE/...): 0-25
+  - Earnings proximity (within 7 days = boost): 0-15
+  - Stock news heat (recent count): 0-20
 
-分數組成 (0-100):
-  - 個股題材熱度 (news + keyword): 0-40
-  - 板塊輪動排名 (XLK/XLE/... 1d 漲跌): 0-25
-  - 財報接近度 (財報前 7 天有 boost, 但需謹慎): 0-15
-  - 個股新聞熱度 (recent news count): 0-20
-
-對外接口:
+API:
     theme_score(symbol, sector_etf=None) -> dict
-        {
-            "total_score": 0-100,
-            "narrative_tags": ["AI", "Quantum", ...],
-            "theme_strength": "strong" | "moderate" | "weak" | "none",
-            "news_count": int,
-            "earnings_in_days": int or None,
-            "sector_rotation_rank": int or None,
-            "components": {...詳細分數...}
-        }
-
-    batch_theme_scores(symbols: List[str]) -> Dict[str, dict]
+    batch_theme_scores(symbols) -> dict
+    theme_multiplier(theme_result) -> float
 """
 from __future__ import annotations
 
@@ -43,7 +28,7 @@ try:
 except Exception:
     _YF_OK = False
 
-# Streamlit cache
+# Streamlit cache (no-op fallback for non-streamlit context)
 try:
     import streamlit as st  # type: ignore
 except Exception:
@@ -57,9 +42,7 @@ except Exception:
     st = _NoOp()  # type: ignore
 
 
-# ---------------------------------------------------------------------------
-# 題材關鍵字 (2024-2026 主流 narrative)
-# ---------------------------------------------------------------------------
+# --- Theme keywords (2024-2026 leading narratives) ---
 THEME_KEYWORDS = {
     "AI / LLM": [
         "ai", "artificial intelligence", "gpt", "llm", "chatbot", "generative",
@@ -110,59 +93,59 @@ THEME_KEYWORDS = {
     ],
 }
 
-# 高熱度題材 (有重大 catalyst 的, 加分權重提高)
+# High-heat themes (catalysts that historically drive bigger moves)
 HIGH_HEAT_THEMES = {"AI / LLM", "Semiconductors / HBM", "Nuclear / Energy",
                     "Quantum", "Robotics / Autonomous", "Crypto / Web3"}
 
 
-# 個股 → 主要板塊 ETF mapping (粗略, 用來查 sector rotation rank)
+# Symbol -> sector ETF mapping (aligned with us_upside_screener DEFAULT_US_UNIVERSE)
 SYMBOL_TO_SECTOR_ETF = {
-    # Tech
     **{s: "XLK" for s in [
         "AAPL", "MSFT", "NVDA", "AVGO", "AMD", "ORCL", "CRM", "ADBE", "PLTR",
         "SMCI", "ARM", "MRVL", "QCOM", "TXN", "MU", "INTC", "PANW", "CRWD",
         "ZS", "NET", "DDOG", "MDB", "SNOW", "OKTA", "S", "FTNT", "ANET",
-        "AMAT", "LRCX", "KLAC",
+        "AMAT", "LRCX", "KLAC", "MCHP", "SWKS", "QRVO", "AMBA", "RMBS", "ON",
+        "ALAB", "ASML",
+        "IONQ", "RGTI", "QBTS", "SOUN", "BBAI", "AI", "TEM", "OUST", "CRWV",
+        "U", "TWLO",
     ]},
-    # Communication services
     **{s: "XLC" for s in [
-        "GOOGL", "META", "NFLX", "DIS", "TMUS", "CMCSA", "RDDT",
+        "GOOGL", "META", "NFLX", "DIS", "TMUS", "CMCSA", "RDDT", "PINS",
     ]},
-    # Consumer discretionary
     **{s: "XLY" for s in [
         "AMZN", "TSLA", "HD", "MCD", "NKE", "ABNB", "UBER", "SBUX", "BKNG",
-        "RIVN", "LCID", "F", "GM",
+        "RIVN", "LCID", "F", "GM", "SHOP", "MELI", "CART", "DKNG", "BIRK",
+        "DUOL", "TOST", "BROS", "RBLX", "GRAB",
     ]},
-    # Financial
     **{s: "XLF" for s in [
-        "JPM", "BAC", "V", "MA", "GS", "MS", "C", "BLK", "AXP", "WFC",
-        "COIN", "HOOD", "SOFI",
+        "JPM", "BAC", "V", "MA", "GS", "MS", "C", "BLK", "AXP", "WFC", "BRK-B",
+        "COIN", "HOOD", "SOFI", "AFRM", "PYPL", "SQ", "MSTR",
+        "MARA", "RIOT", "HUT",
     ]},
-    # Energy
     **{s: "XLE" for s in [
         "XOM", "CVX", "COP", "EOG", "OXY", "PSX", "MPC", "SLB",
     ]},
-    # Healthcare
     **{s: "XLV" for s in [
         "UNH", "LLY", "JNJ", "MRK", "ABBV", "TMO", "PFE", "ABT", "NVO",
         "REGN", "VRTX",
     ]},
-    # Industrials
+    # XLI includes Space stocks (RKLB / ASTS) — RKLB 2024 was this category
     **{s: "XLI" for s in [
         "GE", "BA", "CAT", "DE", "UNP", "RTX", "HON", "LMT", "NOC",
+        "RKLB", "ASTS",
+        "CPRT",
     ]},
-    # Utilities (nuclear / power)
     **{s: "XLU" for s in [
         "NEE", "SO", "DUK", "VST", "CEG", "OKLO", "SMR",
+    ]},
+    **{s: "XLP" for s in [
+        "WMT", "COST", "PG", "KO", "PEP", "MO", "PM",
     ]},
 }
 
 
-# ---------------------------------------------------------------------------
-# 個別評分 component
-# ---------------------------------------------------------------------------
 def _detect_narratives_from_titles(titles_concat: str) -> List[str]:
-    """從新聞標題串 concat 偵測命中哪些 narrative."""
+    """Detect which narratives appear in concatenated news titles."""
     if not titles_concat:
         return []
     text = titles_concat.lower()
@@ -171,16 +154,16 @@ def _detect_narratives_from_titles(titles_concat: str) -> List[str]:
         for kw in kws:
             if kw.lower() in text:
                 found.append(theme)
-                break  # 同 theme 命中一個關鍵字就算
+                break
     return found
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def _fetch_news_for(symbol: str, max_n: int = 8) -> List[Dict]:
-    """抓單檔股票最近的 yahoo finance news. Cache 30 分鐘.
+    """Fetch recent Yahoo Finance news for a symbol. Cache 30min.
 
-    M4 修正: yfinance 0.2.40+ 改回 {"content": {title, provider, ...}, ...} 巢狀格式.
-    同時支援新舊兩種格式以保持相容.
+    Supports both old flat format (it['title']) and new nested
+    format (it['content']['title']) from yfinance 0.2.40+.
     """
     if not _YF_OK:
         return []
@@ -191,18 +174,14 @@ def _fetch_news_for(symbol: str, max_n: int = 8) -> List[Dict]:
         items = []
     out = []
     for it in items[:max_n]:
-        # M4: 同時相容平的舊格式 (it["title"]) 與新巢狀格式 (it["content"]["title"])
         content = it.get("content") if isinstance(it, dict) else None
         if isinstance(content, dict):
-            # 新版巢狀格式 (yfinance >= 0.2.40)
             title = content.get("title") or it.get("title", "")
             provider_obj = content.get("provider") or {}
             publisher = (provider_obj.get("displayName") if isinstance(provider_obj, dict)
                           else str(provider_obj)) or it.get("publisher", "")
-            # publish 時間欄位也改名了
             publish_time = (content.get("pubDate") or content.get("displayTime")
                               or it.get("providerPublishTime"))
-            # 若是 ISO 字串轉成 unix timestamp
             if isinstance(publish_time, str):
                 try:
                     publish_time = int(dt.datetime.fromisoformat(
@@ -211,13 +190,12 @@ def _fetch_news_for(symbol: str, max_n: int = 8) -> List[Dict]:
                     publish_time = None
             related = (content.get("relatedTickers") or it.get("relatedTickers") or [])
         else:
-            # 舊版平格式
             title = it.get("title", "")
             publisher = it.get("publisher", "")
             publish_time = it.get("providerPublishTime")
             related = it.get("relatedTickers", [])
         if not title:
-            continue  # 完全沒 title 的 entry skip
+            continue
         out.append({
             "title": title,
             "publisher": publisher,
@@ -229,22 +207,19 @@ def _fetch_news_for(symbol: str, max_n: int = 8) -> List[Dict]:
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def _earnings_in_days(symbol: str) -> Optional[int]:
-    """回傳到下次財報日的天數 (None = 抓不到 / 未來無排程).
+    """Days until next earnings. None if unavailable.
 
-    M1 修正: yfinance Ticker.calendar 在不同版本回 3 種格式:
-      (a) dict: {"Earnings Date": [date, date], ...}  (舊版 0.1.x)
-      (b) dict: {"earningsDate": date, ...}            (中間版)
-      (c) DataFrame index=["Earnings Date", ...]       (新版 0.2.x)
-      (d) None / 空                                      (該股無排程)
-    全部都要處理. 失敗會 log (不再 silent), 方便排查.
+    Handles 3 yfinance calendar formats:
+      (a) dict: {"Earnings Date": [date, ...]}      (old)
+      (b) dict: {"earningsDate": date}              (mid)
+      (c) DataFrame index=["Earnings Date", ...]     (new 0.2.x)
     """
     if not _YF_OK:
         return None
     try:
         t = yf.Ticker(symbol)
         cal = t.calendar
-    except Exception as e:
-        # 抓不到本身就不算錯, 不 log
+    except Exception:
         return None
     if cal is None:
         return None
@@ -252,7 +227,6 @@ def _earnings_in_days(symbol: str) -> Optional[int]:
     next_earn = None
     parse_error = None
     try:
-        # Case (a) / (b): dict
         if isinstance(cal, dict):
             for key in ("Earnings Date", "earningsDate", "earnings_date"):
                 v = cal.get(key)
@@ -264,12 +238,10 @@ def _earnings_in_days(symbol: str) -> Optional[int]:
                     next_earn = v
                 if next_earn is not None:
                     break
-        # Case (c): DataFrame
         elif hasattr(cal, "loc"):
             for key in ("Earnings Date", "earnings_date"):
                 try:
                     row = cal.loc[key]
-                    # row 可能是 Series 或 scalar
                     if hasattr(row, "iloc"):
                         next_earn = row.iloc[0]
                     else:
@@ -278,36 +250,34 @@ def _earnings_in_days(symbol: str) -> Optional[int]:
                         break
                 except (KeyError, IndexError):
                     continue
-        # Case: 其他未知型別
         else:
-            parse_error = f"unknown calendar type: {type(cal).__name__}"
+            parse_error = "unknown calendar type: " + type(cal).__name__
     except Exception as e:
-        parse_error = f"parse error: {e}"
+        parse_error = "parse error: " + str(e)
 
     if parse_error:
-        print(f"[theme_analyzer] {symbol} earnings parse: {parse_error}", flush=True)
+        print("[theme_analyzer] " + symbol + " earnings parse: " + parse_error, flush=True)
         return None
     if next_earn is None:
         return None
 
-    # 轉成 date
     try:
         from pandas import Timestamp
         d = Timestamp(next_earn).date()
     except Exception as e:
-        print(f"[theme_analyzer] {symbol} earnings date convert failed: {e}", flush=True)
+        print("[theme_analyzer] " + symbol + " earnings convert failed: " + str(e), flush=True)
         return None
 
     today = dt.date.today()
     delta = (d - today).days
     if delta < -30 or delta > 365:
-        return None  # 不合理範圍 (可能 yfinance 回了舊資料)
+        return None
     return delta
 
 
 @st.cache_data(ttl=600, show_spinner=False)
 def _sector_rotation_map() -> Dict[str, int]:
-    """回傳 {sector_etf: rank by 1d_%}. rank 1 = 表現最好."""
+    """Return {sector_etf: rank by 1d_%}. rank 1 = best."""
     df = ds.fetch_sector_rotation()
     if df is None or df.empty:
         return {}
@@ -317,17 +287,10 @@ def _sector_rotation_map() -> Dict[str, int]:
     return {row["symbol"]: i + 1 for i, row in sorted_df.iterrows()}
 
 
-# ---------------------------------------------------------------------------
-# 主接口
-# ---------------------------------------------------------------------------
 def theme_score(symbol: str, sector_etf: Optional[str] = None) -> Dict:
-    """單檔股票的題材 / 催化劑 / 板塊熱度綜合分數.
+    """Composite theme / catalyst / sector heat score for a single symbol.
 
-    Args:
-        symbol: 美股 ticker
-        sector_etf: 該股對應的板塊 ETF (e.g. "XLK"). None 時自動從 mapping 查.
-    Returns:
-        dict with total_score (0-100), narrative_tags, components, etc.
+    Returns dict with total_score (0-100), narrative_tags, components, etc.
     """
     sym = symbol.upper()
     if sector_etf is None:
@@ -335,10 +298,9 @@ def theme_score(symbol: str, sector_etf: Optional[str] = None) -> Dict:
 
     components = {}
 
-    # === 1. 新聞題材熱度 (0-40) ===
+    # 1. News narrative heat (0-50, incl. multi-narrative bonus)
     news = _fetch_news_for(sym, max_n=8)
     news_count = len(news)
-    # 只看近 7 天新聞
     cutoff = time.time() - 7 * 86400
     recent_news = [n for n in news if (n.get("publish_time") or 0) >= cutoff]
     titles_concat = " ".join(n.get("title", "") for n in news)
@@ -347,38 +309,45 @@ def theme_score(symbol: str, sector_etf: Optional[str] = None) -> Dict:
     narrative_score = 0
     for nm in narratives:
         narrative_score += 12 if nm in HIGH_HEAT_THEMES else 6
-    narrative_score = min(narrative_score, 40)
+    # Multi-narrative convergence bonus: stocks hitting 3+ narratives
+    # often have cross-thematic catalysts (e.g., RKLB = Space + Defense + AI)
+    n_distinct = len(set(narratives))
+    if n_distinct >= 4:
+        narrative_score += 10
+    elif n_distinct >= 3:
+        narrative_score += 5
+    narrative_score = min(narrative_score, 50)
     components["narrative_score"] = narrative_score
+    components["distinct_narratives"] = n_distinct
 
-    # === 2. 板塊輪動排名 (0-25) ===
+    # 2. Sector rotation rank (0-25)
     sector_score = 0
     sector_rank = None
     if sector_etf:
         rmap = _sector_rotation_map()
         sector_rank = rmap.get(sector_etf)
         if sector_rank:
-            # 11 個板塊: rank 1=25, 2=22, 3=19, ..., 11=0
             sector_score = max(0, 25 - (sector_rank - 1) * 2.5)
     components["sector_score"] = round(sector_score, 1)
     components["sector_etf"] = sector_etf
     components["sector_rank"] = sector_rank
 
-    # === 3. 財報接近度 (0-15, 也可能為 0 或負加分) ===
+    # 3. Earnings proximity (0-15)
     earn_days = _earnings_in_days(sym)
     earnings_score = 0
     if earn_days is not None:
         if 0 <= earn_days <= 7:
-            earnings_score = 15  # 1 週內財報, 最高加分 (但同時是 binary risk!)
+            earnings_score = 15
         elif 8 <= earn_days <= 14:
             earnings_score = 10
         elif 15 <= earn_days <= 30:
             earnings_score = 5
         elif -7 <= earn_days < 0:
-            earnings_score = 8  # 剛公佈財報 (可能 gap up/down 仍在發酵)
+            earnings_score = 8
     components["earnings_score"] = earnings_score
     components["earnings_in_days"] = earn_days
 
-    # === 4. 個股新聞熱度 (0-20) ===
+    # 4. Stock news heat (0-20)
     news_heat_score = 0
     if news_count >= 6:
         news_heat_score = 20
@@ -407,7 +376,7 @@ def theme_score(symbol: str, sector_etf: Optional[str] = None) -> Dict:
         "symbol": sym,
         "total_score": total,
         "theme_strength": strength,
-        "narrative_tags": list(dict.fromkeys(narratives)),  # dedup 保序
+        "narrative_tags": list(dict.fromkeys(narratives)),
         "news_count": news_count,
         "earnings_in_days": earn_days,
         "sector_rotation_rank": sector_rank,
@@ -418,9 +387,7 @@ def theme_score(symbol: str, sector_etf: Optional[str] = None) -> Dict:
 
 
 def batch_theme_scores(symbols: List[str], max_workers: int = 5) -> Dict[str, Dict]:
-    """批次評分. 用 ThreadPoolExecutor 平行抓 yfinance news.
-    Cache 內部各 API 都有, 重複呼叫不再打網路.
-    """
+    """Batch score with ThreadPoolExecutor. Cache hits keep this cheap."""
     from concurrent.futures import ThreadPoolExecutor, as_completed
     out = {}
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
@@ -434,21 +401,22 @@ def batch_theme_scores(symbols: List[str], max_workers: int = 5) -> Dict[str, Di
     return out
 
 
-# ---------------------------------------------------------------------------
-# 給上層 (us_upside_screener) 用的 score multiplier
-# ---------------------------------------------------------------------------
 def theme_multiplier(theme_result: Dict) -> float:
-    """把題材總分 (0-100) 轉成 multiplier (0.8 - 1.5).
-    用在最終 score = base_score * theme_multiplier.
-    無題材 (0-20): 0.8 (打折, 純技術較弱)
-    弱 (20-45):    1.0 (中性, 不加減)
-    中等 (45-70):  1.2 (加成)
-    強 (>70):      1.5 (顯著加成)
+    """Convert theme total_score (0-100) into multiplier (0.85 - 1.5)
+    for upstream score = base_score * theme_multiplier.
+
+    No theme (0-20): 0.85
+    Weak (20-45):    1.0
+    Moderate (45-70): 1.2
+    Strong (>=70):   1.5
     """
     if not theme_result:
         return 1.0
     t = theme_result.get("total_score", 0)
-    if t >= 70: return 1.5
-    if t >= 45: return 1.2
-    if t >= 20: return 1.0
-    return 0.85  # 沒題材但有純技術 setup 的, 略打折但不消滅
+    if t >= 70:
+        return 1.5
+    if t >= 45:
+        return 1.2
+    if t >= 20:
+        return 1.0
+    return 0.85
