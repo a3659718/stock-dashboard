@@ -610,3 +610,80 @@ def measured_move_target(close: pd.Series, base_lookback: int = 60,
         "target": round(target, 2),
         "target_conservative": round(target_conservative, 2),
     }
+
+
+# ===========================================================================
+# 多時間框架共振 — 週線 MA 同向 + 日線突破
+# ===========================================================================
+def weekly_alignment_confirm(close: pd.Series, ma_period: int = 20,
+                              slope_weeks: int = 4) -> Tuple[bool, dict]:
+    """週線 MA 同向確認: 把日線 resample 成週線, 看週 MA20 是否在「上升」.
+
+    用法: 日線突破訊號太多假突破, 加上「週線 MA 上升」過濾後, 命中率大幅提升.
+    例: 日線突破 MA20 + 週線 MA20 連 4 週上升 → 高信心進場
+    """
+    if close is None or len(close) < ma_period * 7 + slope_weeks * 7:
+        return False, {}
+    try:
+        # 確保 close 有 date index, 若沒有就用 last N days 推算
+        c = close.astype(float)
+        if not isinstance(c.index, pd.DatetimeIndex):
+            # 假設每日一筆, 從今天倒推
+            c = c.copy()
+            c.index = pd.date_range(end=pd.Timestamp.now().normalize(),
+                                      periods=len(c), freq='B')
+        # Resample to weekly (取週五 close)
+        weekly = c.resample('W-FRI').last().dropna()
+        if len(weekly) < ma_period + slope_weeks:
+            return False, {}
+        wma = weekly.rolling(ma_period).mean()
+        if pd.isna(wma.iloc[-1]) or pd.isna(wma.iloc[-1 - slope_weeks]):
+            return False, {}
+        wma_now = float(wma.iloc[-1])
+        wma_prev = float(wma.iloc[-1 - slope_weeks])
+        cur = float(weekly.iloc[-1])
+        is_aligned = (cur > wma_now) and (wma_now > wma_prev)
+        slope_pct = (wma_now / wma_prev - 1) * 100 if wma_prev > 0 else 0
+        return is_aligned, {
+            "weekly_ma": round(wma_now, 2),
+            "weekly_ma_prev": round(wma_prev, 2),
+            "weekly_slope_pct": round(slope_pct, 2),
+            "weekly_close": round(cur, 2),
+            "above_weekly_ma": cur > wma_now,
+            "weekly_ma_up": wma_now > wma_prev,
+        }
+    except Exception:
+        return False, {}
+
+
+def multi_timeframe_score(close: pd.Series) -> dict:
+    """日 + 週 + 月 三時間框架共振分數.
+    回傳 {daily_uptrend, weekly_uptrend, monthly_uptrend, alignment_score (0-3)}
+    alignment_score = 3 表示三個時間框架都向上 (最強訊號)
+    """
+    if close is None or len(close) < 60:
+        return {"alignment_score": 0, "daily_uptrend": False,
+                "weekly_uptrend": False, "monthly_uptrend": False}
+    try:
+        c = close.astype(float)
+        # Daily MA20 上升
+        daily_ma = c.rolling(20).mean()
+        daily_up = bool(daily_ma.iloc[-1] > daily_ma.iloc[-5]) if len(daily_ma) >= 5 else False
+        # Weekly aligned
+        weekly_up, _ = weekly_alignment_confirm(c, ma_period=20, slope_weeks=2)
+        # Monthly MA (粗略: 20 日 MA60 上升)
+        monthly_ma = c.rolling(60).mean() if len(c) >= 60 else None
+        if monthly_ma is not None and len(monthly_ma) >= 20 and not pd.isna(monthly_ma.iloc[-1]) and not pd.isna(monthly_ma.iloc[-20]):
+            monthly_up = bool(monthly_ma.iloc[-1] > monthly_ma.iloc[-20])
+        else:
+            monthly_up = False
+        score = sum([daily_up, weekly_up, monthly_up])
+        return {
+            "alignment_score": score,
+            "daily_uptrend": daily_up,
+            "weekly_uptrend": weekly_up,
+            "monthly_uptrend": monthly_up,
+        }
+    except Exception:
+        return {"alignment_score": 0, "daily_uptrend": False,
+                "weekly_uptrend": False, "monthly_uptrend": False}

@@ -56,6 +56,20 @@ import chip_analyzer
 import data_sources as ds
 import indicators as ind
 
+# T2: 跨市場 narrative 連動 (美股強勢板塊 → 台股族群 boost)
+try:
+    import cross_market_bridge as _cmb
+    _CMB_OK = True
+except Exception:
+    _CMB_OK = False
+
+# T3: 進階籌碼 (千張大戶 / 借券 / 主力券商)
+try:
+    import chip_advanced as _ca
+    _CA_OK = True
+except Exception:
+    _CA_OK = False
+
 # Streamlit cache (deploy 到網站時必須的, 避免每次互動都重打 ~300 個 FinMind API).
 # 若在非 streamlit context (純 python script / 排程) 載入失敗就回 no-op 裝飾器.
 try:
@@ -212,8 +226,14 @@ def _compute_features(stock_id: str, name: str, market: str,
         fi_consec = fi.get("consecutive_days", 0)
         fi_5d = fi.get("5d_total", 0)
 
-        # ATR-based levels (修正 B8)
+        # ATR-based levels (短線)
         levels = ind.atr_based_levels(h, l, c) or {}
+        # T4 新增: Fibonacci extension + Measured Move (中長線)
+        fib_targets = ind.fibonacci_extension_targets(c, lookback=252, pivot_window=10) or {}
+        mm_target = ind.measured_move_target(c, base_lookback=60, min_base_days=15) or {}
+        # T1 新增: 週線 / 多時間框架共振確認
+        weekly_aligned, weekly_info = ind.weekly_alignment_confirm(c, ma_period=20, slope_weeks=4)
+        mtf_score = ind.multi_timeframe_score(c)
 
         return {
             "stock_id": stock_id, "name": name, "market": market,
@@ -244,6 +264,13 @@ def _compute_features(stock_id: str, name: str, market: str,
             "it_consecutive": it_consec, "it_5d_net": it_5d,
             "fi_consecutive": fi_consec, "fi_5d_net": fi_5d,
             "levels": levels,
+            # T4: 中長線目標
+            "fib_targets": fib_targets,
+            "measured_move": mm_target,
+            # T1: 多時間框架共振
+            "weekly_aligned": weekly_aligned,
+            "weekly_info": weekly_info,
+            "mtf_score": mtf_score,
         }
     except Exception as e:
         print(f"[upside_screener] features failed for {stock_id}: {e}", flush=True)
@@ -433,8 +460,38 @@ def _check_reversal(f: Dict) -> Optional[Dict]:
 
 def _build_pick(f: Dict, category: str, score: int,
                  reasons: List[str], warnings: List[str], upside_pct: float) -> Dict:
-    """組裝統一輸出格式."""
+    """組裝統一輸出格式.
+    T1: 週線同向加 5 分; T4: 把 fib + measured move 合進 levels.
+    """
+    # T1: 多時間框架共振加分 / 警示
+    mtf = f.get("mtf_score") or {}
+    mtf_align = mtf.get("alignment_score", 0)
+    if mtf_align >= 3:
+        score += 8
+        reasons.append("日週月三框架共振向上")
+    elif mtf_align >= 2:
+        score += 4
+        reasons.append("日週雙框架共振向上")
+    elif mtf_align == 0 and f.get("weekly_aligned") is False:
+        warnings.append("週線 MA 未上升 (假突破風險高)")
+        score -= 5
+
     score = max(0, min(100, int(score)))
+
+    # T4: 合併中長線目標到 levels
+    merged_levels = dict(f.get("levels") or {})
+    fib = f.get("fib_targets") or {}
+    mm = f.get("measured_move") or {}
+    if fib:
+        merged_levels["target_fib_127"] = fib.get("fib_127")
+        merged_levels["target_fib_162"] = fib.get("fib_162")
+        merged_levels["target_fib_262"] = fib.get("fib_262")
+        merged_levels["fib_swing"] = f"{fib.get('swing_low')}-{fib.get('swing_high')}"
+    if mm:
+        merged_levels["target_measured_move"] = mm.get("target")
+        merged_levels["target_mm_conservative"] = mm.get("target_conservative")
+        merged_levels["mm_base"] = f"{mm.get('base_low')}-{mm.get('base_high')} ({mm.get('base_height_pct')}%)"
+
     metrics = {
         "今日%": f.get("today_pct"), "5日%": f.get("five_pct"),
         "20日%": f.get("twenty_pct"), "60日%": f.get("sixty_pct"),
@@ -448,6 +505,8 @@ def _build_pick(f: Dict, category: str, score: int,
         "chip_health": f.get("chip_health"),
         "chip_consensus": f.get("chip_consensus_direction"),
         "ma_bullish_alignment": f.get("ma_bullish_alignment"),
+        "weekly_aligned": f.get("weekly_aligned"),
+        "mtf_alignment_score": mtf_align,
     }
     return {
         "stock_id": f["stock_id"], "name": f["name"], "market": f["market"],
@@ -457,7 +516,7 @@ def _build_pick(f: Dict, category: str, score: int,
         "upside_pct": round(float(upside_pct), 1),
         "reasons": reasons,
         "warnings": warnings,
-        "levels": f.get("levels") or {},
+        "levels": merged_levels,
         "metrics": metrics,
     }
 
@@ -588,6 +647,99 @@ def _run_upside_screen_impl(market: str = "all", max_stocks: int = DEFAULT_MAX_S
             by_sid[sid] = p
     all_picks = sorted(by_sid.values(), key=lambda x: x["score"], reverse=True)
 
+    # T2 新增: 跨市場 narrative 連動 — 美股強勢板塊 → 台股族群 boost
+    # 對所有 picks 計算 cross_market boost, 強的會被「往上拉」.
+    cmb_boosts_applied = 0
+    if _CMB_OK and all_picks:
+        try:
+            us_strength = _cmb.get_us_sector_strength() or {}
+            for p in all_picks:
+                sid = str(p.get("stock_id", ""))
+                if not sid:
+                    continue
+                boost = _cmb.tw_stock_boost_from_us(sid, us_strength)
+                bs = boost.get("boost_score", 0)
+                if bs > 0:
+                    # boost 直接加到 score (cap at 100)
+                    p["score"] = min(100, p["score"] + bs)
+                    cmb_boosts_applied += 1
+                    p.setdefault("metrics", {})["cross_market_boost"] = bs
+                    p["metrics"]["cross_market_drivers"] = boost.get("drivers", [])
+                    # 加 reason
+                    if boost.get("drivers"):
+                        p.setdefault("reasons", []).append(
+                            f"美股拉動: {' / '.join(boost['drivers'][:2])}"
+                        )
+            # 重新排序 (因為 score 變了)
+            all_picks = sorted(all_picks, key=lambda x: x["score"], reverse=True)
+        except Exception as e:
+            print(f"[upside_screener] cross_market boost failed: {e}", flush=True)
+
+    # T3 新增: 進階籌碼 (千張大戶 / 借券 / 主力券商) — 只對 top 10 高分 picks
+    # 才呼叫 (每檔 3 個 FinMind API, 全跑會撞 quota).
+    chip_adv_applied = 0
+    if _CA_OK and all_picks:
+        try:
+            for p in all_picks[:10]:
+                sid = str(p.get("stock_id", ""))
+                if not sid:
+                    continue
+                adv = _ca.chip_advanced_score(sid)
+                adv_score = adv.get("advanced_score", 0)
+                if adv_score != 0:
+                    # 加到 score (最多 +30, 最少 -15)
+                    p["score"] = max(0, min(100, p["score"] + adv_score))
+                    chip_adv_applied += 1
+                    p.setdefault("metrics", {})["chip_advanced_score"] = adv_score
+                    for r in adv.get("reasons", [])[:2]:
+                        p.setdefault("reasons", []).append(f"進階籌碼: {r}")
+                    for w in adv.get("warnings", [])[:1]:
+                        p.setdefault("warnings", []).append(f"進階籌碼: {w}")
+            all_picks = sorted(all_picks, key=lambda x: x["score"], reverse=True)
+        except Exception as e:
+            print(f"[upside_screener] chip_advanced failed: {e}", flush=True)
+
+    # T4 新增: Gemini-based fundamental long-term target (台股版).
+    # 只對 top 5 score >= 70 的 picks 呼叫 (省 quota), 24h cache.
+    gemini_targets_loaded = 0
+    try:
+        import gemini_target_estimator as _gte
+        top_for_gemini = [p for p in all_picks[:5] if p.get("score", 0) >= 70]
+        if top_for_gemini:
+            feat_map = {}
+            theme_map = {}
+            for p in top_for_gemini:
+                sid = p["stock_id"]
+                m = p.get("metrics") or {}
+                feat_map[sid] = {"current": p.get("current"),
+                                  "pct_from_52w_high": m.get("pct_from_52w_high"),
+                                  "twenty_pct": m.get("20日%"),
+                                  "sixty_pct": m.get("60日%"),
+                                  "rsi": m.get("rsi")}
+                # 台股對 Gemini 的 context 不一定有 narrative, 用 chip_consensus 當訊號
+                theme_map[sid] = {
+                    "narrative_tags": [m.get("chip_consensus", "")],
+                    "total_score": m.get("chip_health", 50),
+                    "theme_strength": "tw_chip",
+                }
+            g_results = _gte.estimate_batch(
+                [p["stock_id"] for p in top_for_gemini],
+                features_map=feat_map, theme_map=theme_map, max_calls=5,
+            )
+            for p in all_picks:
+                g = g_results.get(p["stock_id"])
+                if g:
+                    gemini_targets_loaded += 1
+                    lv = p.setdefault("levels", {})
+                    lv["target_fundamental_3m"] = g.get("target_3m")
+                    lv["target_fundamental_6m"] = g.get("target_6m")
+                    lv["target_fundamental_bull"] = g.get("bull_target")
+                    lv["target_fundamental_bear"] = g.get("bear_target")
+                    lv["fundamental_confidence"] = g.get("confidence")
+                    lv["fundamental_reasoning"] = g.get("reasoning")
+    except Exception as e:
+        print(f"[upside_screener] gemini target failed: {e}", flush=True)
+
     # M5 修正: data_date 用「universe 中最常見的最新日」, 而非死硬寫今天.
     # 多數股當天有更新 → mode(last_dates) = 今天的交易日; 假日跑 = 上個交易日.
     data_date = None
@@ -617,6 +769,9 @@ def _run_upside_screen_impl(market: str = "all", max_stocks: int = DEFAULT_MAX_S
             "early_count": len(early),
             "momentum_count": len(momentum),
             "reversal_count": len(reversal),
+            "gemini_targets_loaded": gemini_targets_loaded,
+            "cross_market_boosts_applied": cmb_boosts_applied,
+            "chip_advanced_applied": chip_adv_applied,
         },
     }
 
@@ -644,47 +799,22 @@ def fmt_pick_md(p: Dict) -> str:
     if m.get("pct_from_52w_high") is not None:
         lines.append(f"- 52w 位置: 距高 {m['pct_from_52w_high']:.1f}% / 距低 +{m.get('pct_from_52w_low', 0):.1f}%")
     lines.append(f"- RSI {m.get('rsi')} | 量比 {m.get('vol_ratio_today')}x | 籌碼健康 {m.get('chip_health')}/100 ({m.get('chip_consensus', '?')})")
+    mid_targets = []
+    if lv.get("target_fib_127"): mid_targets.append(f"Fib1.27 {lv['target_fib_127']}")
+    if lv.get("target_fib_162"): mid_targets.append(f"Fib1.62 {lv['target_fib_162']}")
+    if lv.get("target_measured_move"): mid_targets.append(f"MM {lv['target_measured_move']}")
+    if mid_targets:
+        lines.append(f"- 中線目標: {' / '.join(mid_targets)}")
+    if lv.get("target_fundamental_3m"):
+        lines.append(f"- 長線 (Gemini): 3m {lv['target_fundamental_3m']} | 6m {lv.get('target_fundamental_6m','?')} | 信心 {lv.get('fundamental_confidence', 0)}")
+    if m.get("mtf_alignment_score") is not None:
+        lines.append(f"- 多時間框架: {m['mtf_alignment_score']}/3")
+    if m.get("cross_market_boost"):
+        lines.append(f"- 美股拉動: +{m['cross_market_boost']} 分")
+    if m.get("chip_advanced_score") is not None:
+        lines.append(f"- 進階籌碼分數: {m['chip_advanced_score']:+d}")
     for r in p.get("reasons", [])[:5]:
         lines.append(f"  ✓ {r}")
     for w in p.get("warnings", [])[:2]:
         lines.append(f"  ⚠ {w}")
     return "\n".join(lines)
-
-
-def fmt_summary_tg(result: Dict, per_category: int = 3) -> str:
-    """TG HTML 摘要 — 三類各取前 N 檔."""
-    import html as _html
-    def _esc(s):
-        return _html.escape(str(s) if s is not None else "", quote=False)
-
-    lines = ["<b>🌱 上漲潛力股清單</b>"]
-    meta = result.get("meta", {})
-    lines.append(f"<i>掃描 {meta.get('scanned', '?')} 檔 · 資料日 {meta.get('data_date', '?')}</i>")
-    lines.append("")
-
-    for key in ("early_stage", "momentum", "reversal"):
-        picks = (result.get(key) or [])[:per_category]
-        label = CATEGORY_LABEL.get(key, key)
-        if not picks:
-            lines.append(f"<b>【{label}】無符合標的</b>")
-            lines.append("")
-            continue
-        lines.append(f"<b>【{label}】(共 {len(result.get(key) or [])} 檔, 顯示前 {len(picks)})</b>")
-        for i, p in enumerate(picks, 1):
-            lv = p.get("levels") or {}
-            m = p.get("metrics") or {}
-            lines.append(
-                f"{i}. <b>{_esc(p['stock_id'])} {_esc(p.get('name', ''))}</b> · "
-                f"分數 {p.get('score')} · 空間 ~{p.get('upside_pct')}%"
-            )
-            lines.append(
-                f"   現價 {_esc(p.get('current'))} · 進 {_esc(lv.get('entry_low'))}~{_esc(lv.get('entry_high'))} · "
-                f"目 {_esc(lv.get('target'))} · 損 {_esc(lv.get('stop'))} (R:R {_esc(lv.get('rr'))})"
-            )
-            for r in p.get("reasons", [])[:3]:
-                lines.append(f"   ✓ {_esc(r)}")
-            if p.get("warnings"):
-                lines.append(f"   ⚠ {_esc(p['warnings'][0])}")
-        lines.append("")
-    lines.append("<i>※ 本清單為演算法產出, 不構成投資建議</i>")
-    return "\n".join(lines).rstrip()
