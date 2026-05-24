@@ -516,7 +516,7 @@ watchlist = parse_watchlist(watchlist_raw)
 (tab_wl, tab_actionable, tab_hold, tab_tw, tab_pulse, tab_growth, tab_stock,
  tab_us, tab_crypto, tab_mood, tab_bt, tab_track) = st.tabs(
     ["📋 自選股", "🎯 今日可行動", "💼 持倉分析", "🇹🇼 台股篩選", "🚀 強勢族群",
-     "🌱 成長動能", "🔍 個股分析", "🇺🇸 美股 Top 5", "🪙 加密貨幣", "🧭 市場情緒",
+     "🌱 成長動能", "🔍 個股分析", "🇺🇸 美股 Top 10", "🪙 加密貨幣", "🧭 市場情緒",
      "📊 回測勝率", "📈 推薦追蹤"]
 )
 
@@ -2473,14 +2473,38 @@ with tab_us:
                     cat = row.get("催化劑", "")
                     if cat:
                         st.markdown(f"- **{sym}** — {cat}")
-        with st.expander("📰 候選個股近期新聞 / 題材"):
+        # 加「強制清 cache」按鈕 — yfinance 換 API 格式時舊 cache 會卡住
+        cN1, cN2 = st.columns([1, 4])
+        with cN1:
+            if st.button("🗑️ 清新聞 cache", key="us_news_clear",
+                          help="若新聞欄位顯示空白, 點此清掉 streamlit cache 強制重抓"):
+                st.cache_data.clear()
+                st.session_state.pop("us_result", None)
+                st.success("✅ Cache 已清, 請重新按「更新美股推薦」")
+
+        with st.expander("📰 候選個股近期新聞 / 題材", expanded=True):
             for _, row in top_picks.iterrows():
-                st.markdown(f"**{row['symbol']}** — 題材: {row.get('題材') or '—'}")
-                for n in row.get("近期新聞", []) or []:
+                sym = row.get("symbol", "")
+                theme_v = row.get("題材") or "—"
+                news_list = row.get("近期新聞") or []
+                st.markdown(f"**{sym}** — 題材: {theme_v}  (新聞數: {len(news_list)})")
+                shown = 0
+                for n in news_list:
+                    if not isinstance(n, dict):
+                        continue
                     title = n.get("title")
+                    if not title:
+                        continue
                     link = n.get("link")
-                    if title and link:
-                        st.markdown(f"- [{title}]({link}) · _{n.get('publisher','')}_")
+                    publisher = n.get("publisher", "")
+                    # 修正: title 有但 link 沒有也要顯示 (新版 yfinance 偶爾抓不到 URL)
+                    if link:
+                        st.markdown(f"- [{title}]({link}) · _{publisher}_")
+                    else:
+                        st.markdown(f"- {title} · _{publisher}_  _(無連結)_")
+                    shown += 1
+                if shown == 0:
+                    st.caption("  _(該股無近期新聞 — 若所有股都空, 請點上方「清新聞 cache」並重抓)_")
                 st.markdown("---")
 
         if send_us_tg:
@@ -2764,7 +2788,7 @@ with tab_track:
                 history = tracker.load_history()
                 perf = tracker.evaluate_history_performance(history, days_window=track_window)
             if perf is None or perf.empty:
-                st.info("尚無追蹤紀錄. 進入「強勢族群」/「美股 Top 5」tab 推送過後, 會自動加進追蹤. 或從本 tab 上方匯入歷史 CSV.")
+                st.info("尚無追蹤紀錄. 進入「強勢族群」/「美股 Top 10」tab 推送過後, 會自動加進追蹤. 或從本 tab 上方匯入歷史 CSV.")
             else:
                 st.dataframe(perf, use_container_width=True, hide_index=True)
                 # tracker.evaluate_history_performance 寫入欄位 "return%" (英文),
