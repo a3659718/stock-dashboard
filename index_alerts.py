@@ -188,6 +188,41 @@ def _fetch_intraday_anchor_data(symbol: str) -> Optional[Dict]:
         today_high = float(today_bars["High"].astype(float).max())
         today_low = float(today_bars["Low"].astype(float).min())
 
+        # M2: 抓 today_high / today_low 發生的時間 (用於急殺 vs 緩跌判斷)
+        # 取「最後一次」出現 (高低點重覆時, 近期的更貼近現實)
+        mins_since_high = None
+        mins_since_low = None
+        try:
+            tb = today_bars.copy()
+            tb["_high_f"] = tb["High"].astype(float)
+            tb["_low_f"] = tb["Low"].astype(float)
+            high_rows = tb[tb["_high_f"] >= today_high - 1e-9]
+            low_rows = tb[tb["_low_f"] <= today_low + 1e-9]
+            last_dt = pd.to_datetime(tb["_dt"].iloc[-1])
+            if not high_rows.empty:
+                high_dt = pd.to_datetime(high_rows["_dt"].iloc[-1])
+                mins_since_high = max(0.0, (last_dt - high_dt).total_seconds() / 60.0)
+            if not low_rows.empty:
+                low_dt = pd.to_datetime(low_rows["_dt"].iloc[-1])
+                mins_since_low = max(0.0, (last_dt - low_dt).total_seconds() / 60.0)
+        except Exception:
+            pass
+
+        # M2: 量比 (今日累計 / 過去 5 日同期累計平均) — 判斷量增殺出 vs 量縮回吐
+        vol_ratio = None
+        try:
+            today_vol_cum = float(today_bars["Volume"].astype(float).sum())
+            prev = df[df["_d"] < today].copy()
+            if not prev.empty:
+                last_hm = pd.to_datetime(today_bars["_dt"].iloc[-1]).strftime("%H:%M")
+                prev["_hm"] = prev["_dt"].dt.strftime("%H:%M")
+                cum = prev[prev["_hm"] <= last_hm].groupby("_d")["Volume"].sum().tail(5)
+                avg_prev_cum = float(cum.mean()) if not cum.empty else 0.0
+                if avg_prev_cum > 0:
+                    vol_ratio = today_vol_cum / avg_prev_cum
+        except Exception:
+            pass
+
         # Bug #R3 fix: NaN/Inf 偵測 — yfinance 偶爾回 NaN, json.dumps(nan) 會 raise,
         # state 寫入失敗 → ratchet/cooldown 完全失效. 直接 return None 跳掉這次.
         for name, v in [("today_open", today_open), ("current", current),
@@ -204,9 +239,195 @@ def _fetch_intraday_anchor_data(symbol: str) -> Optional[Dict]:
             "current": current,
             "today_high": today_high,
             "today_low": today_low,
+            "mins_since_high": mins_since_high,
+            "mins_since_low": mins_since_low,
+            "vol_ratio": vol_ratio,
         }
     except Exception:
         return None
+
+
+# ---------------------------------------------------------------------------
+# Enrichment helpers (M2: severity / market_state / speed)
+# ---------------------------------------------------------------------------
+def _classify_severity(abs_pct: float) -> str:
+    """abs_pct = 回吐/反彈絕對幅度. 回傳 mild / medium / severe."""
+    a = abs(abs_pct)
+    if a >= 2.5:
+        return "severe"
+    if a >= 1.5:
+        return "medium"
+    return "mild"
+
+
+def _classify_market_state_drawdown(pct_vs_open: float) -> str:
+    """drawdown 時的盤勢狀態 (用 pct_vs_open 判斷):
+       still_green: 仍在紅 K (高開回吐)
+       turned_black: 已翻黑 (溫和壓回平盤下)
+       accelerating_down: 加速殺低 (vs 開盤 ≤ -1%)
+    """
+    if pct_vs_open > 0:
+        return "still_green"
+    if pct_vs_open > -1.0:
+        return "turned_black"
+    return "accelerating_down"
+
+
+def _classify_market_state_rebound(pct_vs_open: float) -> str:
+    """rebound 時的盤勢狀態:
+       recovered: 已收復 (vs 開盤 ≥ 0)
+       near_recover: 接近收復 (-1% < vs 開盤 < 0)
+       still_red: 仍在黑 K (vs 開盤 ≤ -1%)
+    """
+    if pct_vs_open >= 0:
+        return "recovered"
+    if pct_vs_open > -1.0:
+        return "near_recover"
+    return "still_red"
+
+
+def _classify_speed(abs_pct: float, mins_since_extreme: Optional[float]) -> str:
+    """急殺 vs 緩跌. 用「pct / 分鐘」速率判斷.
+       fast: 30 分內幅度 ≥ 1.5%, 或 60 分內 ≥ 2.0%
+       slow: 其他
+       unknown: 沒時間資料
+    """
+    if mins_since_extreme is None or mins_since_extreme < 1:
+        return "unknown"
+    a = abs(abs_pct)
+    if mins_since_extreme <= 30 and a >= 1.5:
+        return "fast"
+    if mins_since_extreme <= 60 and a >= 2.0:
+        return "fast"
+    return "slow"
+
+
+def _classify_volume(vol_ratio: Optional[float]) -> str:
+    """量能狀態. vol_ratio = 今日累計 / 過去 5 日同期累計平均.
+       heavy: ≥ 1.3 (量增放出)
+       normal: 0.8 ~ 1.3
+       light: < 0.8 (量縮觀望)
+       unknown: 無資料
+    """
+    if vol_ratio is None:
+        return "unknown"
+    if vol_ratio >= 1.3:
+        return "heavy"
+    if vol_ratio < 0.8:
+        return "light"
+    return "normal"
+
+
+# ---------------------------------------------------------------------------
+# 同向轉弱個股掃描 (TWII drawdown 觸發時用)
+# ---------------------------------------------------------------------------
+def _single_stock_weak_metrics(stock_id: str) -> Optional[Dict]:
+    """單檔: 今日%, 距高點%, 量比.
+    用 5m intraday + 過去 5 日 daily 累計做.
+    """
+    try:
+        import pandas as pd
+        df = None
+        for suffix in [".TW", ".TWO"]:
+            tmp = ds.fetch_yf_history(f"{stock_id}{suffix}", period="5d", interval="5m")
+            if tmp is not None and not tmp.empty and len(tmp) >= 5:
+                df = tmp
+                break
+        if df is None:
+            return None
+        date_col = "Datetime" if "Datetime" in df.columns else df.columns[0]
+        df = df.copy()
+        df["_dt"] = pd.to_datetime(df[date_col])
+        df["_d"] = df["_dt"].dt.date
+        today = df["_d"].max()
+        today_bars = df[df["_d"] == today].sort_values("_dt")
+        prev_bars = df[df["_d"] < today]
+        if today_bars.empty:
+            return None
+        today_open = float(today_bars["Open"].iloc[0])
+        current = float(today_bars["Close"].iloc[-1])
+        today_high = float(today_bars["High"].astype(float).max())
+        prev_close = float(prev_bars["Close"].iloc[-1]) if not prev_bars.empty else today_open
+        if prev_close <= 0 or today_open <= 0 or today_high <= 0:
+            return None
+        today_pct = (current / prev_close - 1) * 100
+        dd_from_high = (current / today_high - 1) * 100
+        # 量比 (cumulative today vs 過去 5 日當日總量平均)
+        today_vol = float(today_bars["Volume"].astype(float).sum())
+        if not prev_bars.empty:
+            prev_daily = prev_bars.groupby("_d")["Volume"].sum()
+            avg_dv = float(prev_daily.tail(5).mean()) if len(prev_daily) >= 1 else 0
+        else:
+            avg_dv = 0
+        vol_ratio = today_vol / avg_dv if avg_dv > 0 else 0
+        return {
+            "stock_id": stock_id,
+            "current": round(current, 2),
+            "today_pct": round(today_pct, 2),
+            "drawdown_from_high_pct": round(dd_from_high, 2),
+            "vol_ratio": round(vol_ratio, 2),
+        }
+    except Exception:
+        return None
+
+
+def _scan_companion_weak_stocks_tw(top_n: int = 5, max_workers: int = 8) -> List[Dict]:
+    """指數反轉時, 掃台股權值 universe 找同向轉弱的個股.
+
+    篩選條件:
+      - 今日跌幅 ≤ -1.0% (或距高點回吐 ≥ 1.5%)
+      - 排除「漲反而很多」的 (today_pct > 0)
+    取跌幅最深的前 top_n 檔. 用 ThreadPoolExecutor 並行.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    # 跟 strong_stock_alert 同 universe (大型權值 + AI/半導體 + 重電 + 航運 等)
+    universe = [
+        "2330", "2317", "2454", "2412", "2308", "2382", "2891", "2882", "2881",
+        "3231", "2376", "6669", "3017", "3661", "2379", "3711", "8046",
+        "1513", "1519", "1503", "1504", "1514",
+        "2603", "2609", "2618", "2207", "1536",
+        "3491", "6285", "3178", "4585",
+        "3037",
+        "8069", "6531", "1216", "2912",
+    ]
+    # 加 user watchlist
+    try:
+        wl = watchlist_store.load_watchlist() or []
+        universe = list(dict.fromkeys(universe + wl))
+    except Exception:
+        pass
+
+    results: List[Dict] = []
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        futures = {ex.submit(_single_stock_weak_metrics, sid): sid for sid in universe}
+        for fut in as_completed(futures):
+            m = fut.result()
+            if m is None:
+                continue
+            tp = m.get("today_pct", 0)
+            dd = m.get("drawdown_from_high_pct", 0)
+            # 同向轉弱條件: 今日已跌 ≥ 1% 或 從高點回吐 ≥ 1.5%
+            if tp <= -1.0 or dd <= -1.5:
+                # 弱勢分數 (越負越弱): today_pct + 0.5 × drawdown_from_high_pct
+                # 補強訊號: 量大殺出加重 (vol_ratio 越高越像真出貨)
+                vr = m.get("vol_ratio", 0)
+                vol_factor = 1.0 + max(0.0, vr - 1.0) * 0.3
+                weakness = (tp + 0.5 * dd) * vol_factor
+                m["weakness"] = round(weakness, 2)
+                results.append(m)
+
+    # weakness 越負越弱 → 升冪排序取前 top_n
+    results.sort(key=lambda x: x.get("weakness", 0))
+    # 補上股名
+    try:
+        info = ds.get_taiwan_stock_info()
+        if info is not None and not info.empty:
+            name_map = info.set_index("stock_id")["stock_name"].to_dict()
+            for r in results:
+                r["name"] = name_map.get(str(r.get("stock_id", "")), "")
+    except Exception:
+        pass
+    return results[:top_n]
 
 
 def check_intraday_reversal() -> List[Dict]:
@@ -255,20 +476,41 @@ def check_intraday_reversal() -> List[Dict]:
 
     alerts: List[Dict] = []
 
+    # M2: 預抓所有指數 snapshot, 建立 cross_market 對照表
+    # 同時跑也讓「同向轉弱個股」掃描有依據 (TWII 觸發 drawdown 才掃)
+    all_snaps: Dict[str, Dict] = {}
     for sym, cfg in INDEX_CONFIG.items():
         country = cfg.get("country")
         if country in closed_markets:
             continue
         if not _is_market_in_session(country):
             continue
-
         snap = _fetch_intraday_anchor_data(sym)
         if not snap:
             continue
+        try:
+            pct_vs_open_ = (snap["current"] / snap["today_open"] - 1) * 100 \
+                           if snap["today_open"] > 0 else 0.0
+        except Exception:
+            pct_vs_open_ = 0.0
+        snap["_pct_vs_open"] = pct_vs_open_
+        snap["_country"] = country
+        snap["_name"] = cfg.get("name", sym)
+        all_snaps[sym] = snap
+
+    for sym, cfg in INDEX_CONFIG.items():
+        if sym not in all_snaps:
+            continue
+        country = cfg.get("country")
+        snap = all_snaps[sym]
         today_open = snap["today_open"]
         current = snap["current"]
         today_high = snap["today_high"]
         today_low = snap["today_low"]
+        mins_since_high = snap.get("mins_since_high")
+        mins_since_low = snap.get("mins_since_low")
+        vol_ratio = snap.get("vol_ratio")
+        pct_vs_open = snap["_pct_vs_open"]
 
         # 算 drawdown / rebound (相對 intraday high/low)
         try:
@@ -279,11 +521,18 @@ def check_intraday_reversal() -> List[Dict]:
             rebound_pct = (current / today_low - 1) * 100 if today_low > 0 else 0.0
         except Exception:
             rebound_pct = 0.0
-        # 算 vs 開盤跌幅 (給訊息用)
-        try:
-            pct_vs_open = (current / today_open - 1) * 100 if today_open > 0 else 0.0
-        except Exception:
-            pct_vs_open = 0.0
+
+        # 跨市場對照 (排除自己) — 給訊息用判斷「系統性 vs 獨自走弱」
+        cross_market = []
+        for other_sym, other_snap in all_snaps.items():
+            if other_sym == sym:
+                continue
+            cross_market.append({
+                "symbol": other_sym,
+                "name": other_snap["_name"],
+                "country": other_snap["_country"],
+                "pct_vs_open": round(other_snap["_pct_vs_open"], 2),
+            })
 
         # 跨日 reset
         sym_state = rev_state.setdefault(sym, {})
@@ -328,6 +577,15 @@ def check_intraday_reversal() -> List[Dict]:
                         should_fire = True
 
             if should_fire:
+                # M2: 同向轉弱個股 (只在 TWII drawdown 觸發, US 暫不掃)
+                companion_stocks: List[Dict] = []
+                if sym == "^TWII":
+                    try:
+                        companion_stocks = _scan_companion_weak_stocks_tw(
+                            top_n=5, max_workers=8,
+                        )
+                    except Exception as e:
+                        print(f"[reversal] companion scan failed: {e}", flush=True)
                 alerts.append({
                     "symbol": sym,
                     "name": cfg["name"],
@@ -341,6 +599,15 @@ def check_intraday_reversal() -> List[Dict]:
                     "rebound_pct": round(rebound_pct, 2),
                     "pct_vs_open": round(pct_vs_open, 2),
                     "alerts_today": alerts_today + 1,
+                    # M2 新增豐富欄位
+                    "severity": _classify_severity(drawdown_pct),
+                    "market_state": _classify_market_state_drawdown(pct_vs_open),
+                    "speed": _classify_speed(drawdown_pct, mins_since_high),
+                    "mins_since_extreme": round(mins_since_high, 1) if mins_since_high else None,
+                    "volume_state": _classify_volume(vol_ratio),
+                    "vol_ratio": round(vol_ratio, 2) if vol_ratio else None,
+                    "cross_market": cross_market,
+                    "companion_stocks": companion_stocks,
                 })
                 # Bug #R2 fix: state 存全精度, 顯示才 round, 避免 ratchet 浮點邊界 bug
                 sym_state["last_drawdown_pct"] = drawdown_pct
@@ -389,6 +656,15 @@ def check_intraday_reversal() -> List[Dict]:
                     "rebound_pct": round(rebound_pct, 2),
                     "pct_vs_open": round(pct_vs_open, 2),
                     "alerts_today": alerts_today + 1,
+                    # M2 新增豐富欄位
+                    "severity": _classify_severity(rebound_pct),
+                    "market_state": _classify_market_state_rebound(pct_vs_open),
+                    "speed": _classify_speed(rebound_pct, mins_since_low),
+                    "mins_since_extreme": round(mins_since_low, 1) if mins_since_low else None,
+                    "volume_state": _classify_volume(vol_ratio),
+                    "vol_ratio": round(vol_ratio, 2) if vol_ratio else None,
+                    "cross_market": cross_market,
+                    "companion_stocks": [],  # rebound 暫不掃 (未來可補同向轉強股)
                 })
                 # Bug #R2 fix: state 存全精度
                 sym_state["last_rebound_pct"] = rebound_pct
