@@ -407,6 +407,34 @@ def main() -> int:
             print(f"Gemini reasoning: {len(data['ai_text'])} chars")
         msg = notifier.fmt_tw_close_analysis(data)
 
+        # 盤後籌碼-價量 12 模式分析 — 額外推一封 (極強看好/警示/看壞 標的)
+        try:
+            import chip_price_divergence as _cpd
+            # 從 upside_screener top picks + 用戶 watchlist 一起分析
+            cpd_stocks = []
+            try:
+                import upside_screener as _us
+                up_result = _us.run_upside_screen(market="all", max_stocks=80, use_cache=True)
+                cpd_stocks = [p.get("stock_id") for p in (up_result.get("all") or [])[:20]
+                              if p.get("stock_id")]
+            except Exception as _e:
+                print(f"  cpd: upside_screener fetch failed: {_e}", flush=True)
+            try:
+                import watchlist_store as _ws
+                wl = _ws.load_watchlist() or []
+                cpd_stocks = list(dict.fromkeys(cpd_stocks + wl))
+            except Exception:
+                pass
+            if cpd_stocks:
+                print(f"  Running chip-price divergence on {len(cpd_stocks)} stocks", flush=True)
+                cpd_results = _cpd.analyze_batch(cpd_stocks)
+                cpd_msg = _cpd.fmt_summary_tg(cpd_results, only_strong=True)
+                if cpd_msg and len(cpd_msg) > 80:  # 有實質內容才推
+                    print(f"  Sending chip-price divergence ({len(cpd_msg)} chars)", flush=True)
+                    notifier.send_message(cpd_msg)
+        except Exception as _e:
+            print(f"  chip_price_divergence section failed: {_e}", flush=True)
+
         # 持倉日報 — 額外推一封
         try:
             import holdings_analyzer
@@ -691,6 +719,15 @@ def main() -> int:
         except Exception as _e:
             print(f"[index bucket] check failed (non-fatal): {_e}", flush=True)
 
+        # === 新增: 大盤大漲 → 強勢股推播 (跨 tick 去重, 每天每 trigger 只推一次) ===
+        try:
+            import strong_stock_alert as _ssa
+            ssa_result = _ssa.check_and_push_if_surge()
+            if ssa_result:
+                print(f"[strong stock alert] {ssa_result}", flush=True)
+        except Exception as _e:
+            print(f"[strong stock alert] check failed (non-fatal): {_e}", flush=True)
+
         # === 合併為 1 封 TG (取代之前 3 封獨立推播) ===
         # M2 fix: 包 try/except 避免 formatter / send_message 失敗讓 Phase 2 (watchlist/crypto) 中斷
         try:
@@ -754,11 +791,9 @@ def main() -> int:
                 f"stop_loss={len(sl_breaches)} triggers={len(fired_triggers)}"
             )
             msg = notifier.fmt_monitor_alerts(wl, idx, cry)
-            # 把停損訊息附在 monitor 最前面 (最重要)
             if sl_breaches:
                 sl_msg = notifier.fmt_stop_loss_alerts(sl_breaches)
                 msg = sl_msg + "\n\n" + msg if msg else sl_msg
-            # 把條件觸發訊息也附前面
             if fired_triggers:
                 tr_msg = watchlist_triggers.fmt_trigger_alerts(fired_triggers)
                 msg = tr_msg + "\n\n" + msg if msg else tr_msg
@@ -772,7 +807,6 @@ def main() -> int:
         print(f"Unknown market: {market}", file=sys.stderr)
         return 1
 
-    # 訊息為空 → 不視為錯誤 (例如 monitor 模式無觸發警報已 early return, 但雙重保險)
     if not msg or not str(msg).strip():
         print("⚠️  訊息為空，跳過 Telegram 推播 (return 0)")
         return 0
@@ -784,7 +818,6 @@ def main() -> int:
     if ok:
         print(f"✓ Telegram sent OK ({info})")
         return 0
-    # 失敗 — 同時印 stdout (workflow log 可見) + stderr
     fail_line = f"✗ Telegram failed: {info}"
     print(fail_line)
     print(fail_line, file=sys.stderr)

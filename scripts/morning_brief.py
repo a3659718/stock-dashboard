@@ -250,6 +250,50 @@ def _section_today_focus() -> str:
 
 
 # ---------------------------------------------------------------------------
+# Section 7: 昨日盤後籌碼-價量交叉分析 (12 模式, 只顯示警示 + 看好)
+# ---------------------------------------------------------------------------
+def _section_chip_price_pattern() -> str:
+    """分析 upside_screener top picks 的盤後籌碼 + 價量模式."""
+    try:
+        import upside_screener
+        import chip_price_divergence as cpd
+        result = upside_screener.run_upside_screen(market="all", max_stocks=80, use_cache=True)
+        all_picks = (result.get("all") or [])[:15]  # 取 top 15 分析
+        if not all_picks:
+            return ""
+        sids = [p.get("stock_id") for p in all_picks if p.get("stock_id")]
+        if not sids:
+            return ""
+        patterns = cpd.analyze_batch(sids)
+        # 只顯示「值得注意」的 (極強看好 + 警示 + 看壞)
+        notable = cpd.filter_by_strength(
+            patterns, ["strong_bullish", "bullish", "warning", "bearish"]
+        )
+        if not notable:
+            return ""
+        # 補上股名
+        name_map = {p.get("stock_id"): p.get("name", "") for p in all_picks}
+        lines = ["📊 <b>盤後籌碼-價量 12 模式</b>"]
+        # 依嚴重度排序: warning 與 bearish 先, 再 strong_bullish, bullish
+        order = {"warning": 0, "bearish": 1, "strong_bullish": 2, "bullish": 3}
+        sorted_items = sorted(notable.items(),
+                                key=lambda kv: order.get(kv[1].get("strength"), 9))
+        for sid, r in sorted_items[:6]:  # 最多 6 檔避免訊息過長
+            name = name_map.get(sid, "")
+            emoji = r.get("emoji", "")
+            pat = r.get("pattern", "")
+            tp = r.get("raw", {}).get("today_pct", 0)
+            lines.append(f"  {emoji} <b>{sid}</b> {name} — {pat} ({tp:+.2f}%)")
+            rec = r.get("recommendation", "")
+            if rec:
+                lines.append(f"     💡 {rec[:80]}")
+        return "\n".join(lines)
+    except Exception as e:
+        print(f"[morning_brief] chip_price_pattern failed: {e}", flush=True)
+        return ""
+
+
+# ---------------------------------------------------------------------------
 # 組裝 + 推播
 # ---------------------------------------------------------------------------
 def compose_brief() -> str:
@@ -262,12 +306,12 @@ def compose_brief() -> str:
     sections.append(_safe("ai_news", _section_ai_news))
     sections.append(_safe("macro_news", _section_macro_news))
     sections.append(_safe("tw_picks", _section_tw_picks))
+    sections.append(_safe("chip_price_pattern", _section_chip_price_pattern))
     sections.append(_safe("today_focus", _section_today_focus))
     sections = [s for s in sections if s]
     body = "\n\n".join(sections)
     footer = "\n\n<i>※ 演算法產出, 不構成投資建議</i>"
     full = header + "\n\n" + body + footer
-    # 若超過上限, 截斷 (保留 header + footer)
     if len(full) > MAX_TG_CHARS:
         body_max = MAX_TG_CHARS - len(header) - len(footer) - 50
         full = header + "\n\n" + body[:body_max] + "\n\n…(訊息過長, 已截斷)" + footer

@@ -1,0 +1,283 @@
+"""
+strong_stock_alert.py
+大盤大漲時, 自動掃當下強勢股推 TG.
+
+觸發條件 (任一):
+  - 加權指數 (^TWII) 當日漲幅 >= +1.5%
+  - 加權指數突破今日 + 10 日高點
+  - 費半 (^SOX) 隔夜 >= +2% (亞股開盤前訊號)
+
+觸發後動作:
+  1. 抓 universe (top 100 流動股 + watchlist)
+  2. 算每檔當下強勢分數: 今日漲幅 + 量比 + 對 TWII 相對強度
+  3. 排序取 Top 10 推 TG
+
+只在台股 session 內 (09:00-13:30 台北) 跑.
+給 market_open_alert.py monitor flow 呼叫.
+
+API:
+  - check_market_surge() -> Optional[Dict]  # 觸發條件偵測, 沒觸發回 None
+  - scan_strong_stocks_now(top_n=10) -> List[Dict]  # 掃當下強勢股
+  - fmt_strong_alert_tg(surge_info, picks) -> str  # 格式化 TG 訊息
+"""
+from __future__ import annotations
+
+import datetime as dt
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Dict, List, Optional
+
+import data_sources as ds
+
+
+def check_market_surge() -> Optional[Dict]:
+    """偵測大盤是否大漲. 回傳 surge_info 或 None.
+
+    surge_info = {trigger, twii_pct, sox_overnight_pct, message}
+    """
+    # 必須在台股 session 內 (09:00-13:30 TPE = UTC 01:00-05:30)
+    now_utc = dt.datetime.utcnow()
+    h = now_utc.hour
+    if h < 1 or h > 5:
+        return None
+    # 假日 skip
+    try:
+        import holiday_check
+        if holiday_check.is_market_closed_today("TW"):
+            return None
+    except Exception:
+        pass
+
+    triggers = []
+
+    # 1. TWII 當日漲幅
+    twii_pct = None
+    try:
+        twii = ds.fetch_yf_history("^TWII", period="2d", interval="5m")
+        if twii is not None and not twii.empty:
+            today_bars = twii.tail(50)  # 約近 4 小時的 5m bars
+            if len(today_bars) >= 2:
+                # 找今日 open (第一筆) vs current (最後一筆)
+                date_col = "Datetime" if "Datetime" in twii.columns else twii.columns[0]
+                twii = twii.copy()
+                import pandas as pd
+                twii["_dt"] = pd.to_datetime(twii[date_col])
+                twii["_d"] = twii["_dt"].dt.date
+                today = twii["_d"].max()
+                today_bars = twii[twii["_d"] == today].sort_values("_dt")
+                if not today_bars.empty:
+                    today_open = float(today_bars["Open"].iloc[0])
+                    current = float(today_bars["Close"].iloc[-1])
+                    if today_open > 0:
+                        twii_pct = (current / today_open - 1) * 100
+    except Exception:
+        pass
+
+    if twii_pct is not None and twii_pct >= 1.5:
+        triggers.append(f"加權指數 +{twii_pct:.2f}% (>+1.5%)")
+
+    # 2. 費半隔夜
+    sox_pct = None
+    try:
+        sox = ds.fetch_yf_history("^SOX", period="5d", interval="1d")
+        if sox is not None and not sox.empty and len(sox) >= 2:
+            c = sox["Close"].astype(float)
+            sox_pct = (float(c.iloc[-1]) / float(c.iloc[-2]) - 1) * 100
+            if sox_pct >= 2.0:
+                triggers.append(f"費半隔夜 +{sox_pct:.2f}% (>+2%)")
+    except Exception:
+        pass
+
+    if not triggers:
+        return None
+
+    return {
+        "trigger": " · ".join(triggers),
+        "twii_pct": round(twii_pct, 2) if twii_pct is not None else None,
+        "sox_overnight_pct": round(sox_pct, 2) if sox_pct is not None else None,
+        "fired_at": now_utc.strftime("%Y-%m-%d %H:%M UTC"),
+    }
+
+
+def _stock_strength_metrics(stock_id: str) -> Optional[Dict]:
+    """單檔股票當下強勢度: 今日%, 量比, RS vs TWII."""
+    try:
+        # 用 yfinance 抓即時 5m (台股代號加 .TW 或 .TWO)
+        for suffix in [".TW", ".TWO"]:
+            sym = f"{stock_id}{suffix}"
+            df = ds.fetch_yf_history(sym, period="5d", interval="5m")
+            if df is not None and not df.empty and len(df) >= 5:
+                break
+        else:
+            return None
+        import pandas as pd
+        date_col = "Datetime" if "Datetime" in df.columns else df.columns[0]
+        df = df.copy()
+        df["_dt"] = pd.to_datetime(df[date_col])
+        df["_d"] = df["_dt"].dt.date
+        today = df["_d"].max()
+        today_bars = df[df["_d"] == today].sort_values("_dt")
+        prev_bars = df[df["_d"] < today]
+        if today_bars.empty:
+            return None
+        today_open = float(today_bars["Open"].iloc[0])
+        current = float(today_bars["Close"].iloc[-1])
+        today_vol = float(today_bars["Volume"].sum())
+        # 昨收
+        prev_close = float(prev_bars["Close"].iloc[-1]) if not prev_bars.empty else today_open
+        # 今日漲幅 (對昨收)
+        today_pct = (current / prev_close - 1) * 100 if prev_close > 0 else 0
+        # 量比 (今日累計 / 過去 5 日平均當日量)
+        if not prev_bars.empty:
+            prev_daily = prev_bars.groupby("_d")["Volume"].sum()
+            avg_daily_vol = float(prev_daily.tail(5).mean()) if len(prev_daily) >= 1 else 0
+        else:
+            avg_daily_vol = 0
+        vol_ratio = today_vol / avg_daily_vol if avg_daily_vol > 0 else 0
+        return {
+            "stock_id": stock_id,
+            "current": round(current, 2),
+            "today_pct": round(today_pct, 2),
+            "vol_ratio": round(vol_ratio, 2),
+            "today_vol_M": round(today_vol / 1000000, 1),  # 百萬股
+        }
+    except Exception:
+        return None
+
+
+def scan_strong_stocks_now(top_n: int = 10, max_workers: int = 8) -> List[Dict]:
+    """掃當下強勢股. 從 universe (top 100 流動 + watchlist) 算強勢分數排序."""
+    # 簡化 universe: 用大型權值 + 高 momentum 候選 (40 檔, 控制 yfinance 呼叫量)
+    universe = [
+        # 大型權值
+        "2330", "2317", "2454", "2412", "2308", "2382", "2891", "2882", "2881",
+        # AI / 半導體
+        "3231", "2376", "6669", "3017", "3661", "2379", "3711", "8046",
+        # 重電 / 核電
+        "1513", "1519", "1503", "1504", "1514",
+        # 航運 / 汽車
+        "2603", "2609", "2618", "2207", "1536",
+        # 太空 / 衛星 / 機器人
+        "3491", "6285", "3178", "4585",
+        # ABF 載板
+        "3037",
+        # 其他熱門
+        "8069", "6531", "1216", "2912",
+    ]
+    # 嘗試讀使用者 watchlist 也加入掃描
+    try:
+        import watchlist_store
+        wl = watchlist_store.load_watchlist() or []
+        universe = list(dict.fromkeys(universe + wl))
+    except Exception:
+        pass
+
+    print(f"[strong_stock_alert] 掃描 {len(universe)} 檔...", flush=True)
+    results = []
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        futures = {ex.submit(_stock_strength_metrics, sid): sid for sid in universe}
+        for fut in as_completed(futures):
+            m = fut.result()
+            if m is None:
+                continue
+            # 強勢分數: today_pct × 2 + vol_ratio × 1 (簡單線性)
+            tp = m.get("today_pct", 0)
+            vr = m.get("vol_ratio", 0)
+            # 過濾: 今日跌的不算強勢, 量比太小不算 (避免假訊號)
+            if tp < 1.0 or vr < 0.8:
+                continue
+            score = tp * 2 + vr * 1
+            m["score"] = round(score, 2)
+            results.append(m)
+
+    results.sort(key=lambda x: x["score"], reverse=True)
+    return results[:top_n]
+
+
+def fmt_strong_alert_tg(surge_info: Dict, picks: List[Dict]) -> str:
+    """組 TG 訊息. HTML 格式."""
+    import html as _html
+    def _esc(s):
+        return _html.escape(str(s) if s is not None else "", quote=False)
+
+    lines = [
+        "🚀 <b>大盤大漲警報</b>",
+        f"<i>{_esc(surge_info.get('trigger', ''))}</i>",
+        "",
+    ]
+    if not picks:
+        lines.append("(掃描中無強勢股, 或資料未更新)")
+        return "\n".join(lines)
+    lines.append(f"<b>📊 當下強勢股 Top {len(picks)}</b>")
+    # 嘗試補上股名 (從 data_sources.get_taiwan_stock_info)
+    name_map = {}
+    try:
+        info = ds.get_taiwan_stock_info()
+        if info is not None and not info.empty:
+            name_map = info.set_index("stock_id")["stock_name"].to_dict()
+    except Exception:
+        pass
+    for i, p in enumerate(picks, 1):
+        sid = str(p.get("stock_id", ""))
+        name = _esc(name_map.get(sid, ""))
+        cur = p.get("current", "—")
+        tp = p.get("today_pct", 0)
+        vr = p.get("vol_ratio", 0)
+        score = p.get("score", 0)
+        lines.append(
+            f"{i}. <code>{_esc(sid)}</code> {name} · "
+            f"{cur} <b>+{tp:.2f}%</b> · 量比 {vr:.1f}x · 強度 {score:.0f}"
+        )
+    lines.append("")
+    lines.append("<i>※ 為當下動能掃描, 非中長線推薦. 請自行控管風險.</i>")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# 主入口 (給 monitor cron 呼叫)
+# ---------------------------------------------------------------------------
+def check_and_push_if_surge() -> Optional[Dict]:
+    """完整流程: 偵測 → 掃描 → 推送. 給 market_open_alert.py 直接呼叫.
+
+    回傳 {triggered: bool, n_picks: int, sent: bool} 或 None (未觸發).
+    含跨 tick 去重 (同一天每個 trigger reason 只推一次).
+    """
+    surge = check_market_surge()
+    if not surge:
+        return None
+    # 跨 tick 去重: 一天每個 trigger 只推一次
+    try:
+        import watchlist_store
+        state = watchlist_store.load_monitor_state()
+        ssa = state.setdefault("strong_stock_alert", {})
+        today_str = dt.date.today().strftime("%Y-%m-%d")
+        sent_today = ssa.get(today_str, [])
+        trigger_key = surge.get("trigger", "")
+        if trigger_key in sent_today:
+            return {"triggered": True, "n_picks": 0, "sent": False, "reason": "dup"}
+    except Exception:
+        sent_today = []
+        ssa = {}
+        today_str = dt.date.today().strftime("%Y-%m-%d")
+
+    print(f"[strong_stock_alert] 觸發: {surge['trigger']}", flush=True)
+    picks = scan_strong_stocks_now(top_n=10)
+    print(f"[strong_stock_alert] 找到 {len(picks)} 檔強勢股", flush=True)
+    msg = fmt_strong_alert_tg(surge, picks)
+
+    try:
+        import notifier
+        ok, info = notifier.send_message(msg, disable_preview=True)
+        if ok:
+            sent_today.append(trigger_key)
+            ssa[today_str] = sent_today
+            try:
+                watchlist_store.save_monitor_state(state)
+            except Exception:
+                pass
+            return {"triggered": True, "n_picks": len(picks), "sent": True}
+        else:
+            print(f"[strong_stock_alert] 推送失敗: {info}", flush=True)
+            return {"triggered": True, "n_picks": len(picks), "sent": False}
+    except Exception as e:
+        print(f"[strong_stock_alert] notifier 失敗: {e}", flush=True)
+        return {"triggered": True, "n_picks": len(picks), "sent": False}
