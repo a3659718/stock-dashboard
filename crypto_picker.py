@@ -258,7 +258,7 @@ def _gemini_pick_5(top_candidates: List[Dict], top_n: int = 5,
                 "target": target, "stop_loss": stop, "rr": rr,
                 "win_prob": "50%", "hold_period": "3-7 天",
                 "reason": f"今日 {c['today_pct']:+.1f}%, 7d {c['7d_pct']:+.1f}%, "
-                          f"量比 {c['vol_ratio']:.1f}x, RSI {c['rsi']:.0f}",
+                          f"RSI {c['rsi']:.0f}",
                 "score": c.get("score", 0),
                 "today_pct": c["today_pct"],
                 "7d_pct": c["7d_pct"],

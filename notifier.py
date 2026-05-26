@@ -275,7 +275,7 @@ def fmt_tw_combined(combined_df, latest_date_str: str, market_label: str, max_n:
             sign = "+" if isinstance(v, (int, float)) and v > 0 else ""
             price_part.append(f"{sign}{_fmt_num(v, '%')}")
         if _is_meaningful(row.get("量比")):
-            price_part.append(f"量比{_fmt_num(row.get('量比'), 'x')}")
+            pass  # 量比已移除
         if price_part:
             lines.append(f"   {' · '.join(price_part)}")
 
@@ -377,7 +377,7 @@ def fmt_strong_sectors(sectors_df, leaders_map: dict = None, themes_df=None,
                                 pass
                         if ratio is not None:
                             try:
-                                parts.append(f"量比{float(ratio):.2f}x")
+                                pass  # 量比已移除
                             except Exception:
                                 pass
                         details = " · ".join(parts) if parts else ""
@@ -385,7 +385,7 @@ def fmt_strong_sectors(sectors_df, leaders_map: dict = None, themes_df=None,
                         # 催化劑 (若 DataFrame 有此欄)
                         cat = sr.get("催化劑") if hasattr(sr, "get") else None
                         if cat and str(cat).strip() and str(cat).strip() != "—":
-                            lines.append(f"     催化劑: {_esc(cat)}")
+                            pass  # 催化劑已移除
         lines.append("")
 
     if themes_df is not None and not themes_df.empty:
@@ -424,7 +424,7 @@ def fmt_strong_sectors(sectors_df, leaders_map: dict = None, themes_df=None,
                                 pass
                         if ratio is not None:
                             try:
-                                parts.append(f"量比{float(ratio):.2f}x")
+                                pass  # 量比已移除
                             except Exception:
                                 pass
                         details = " · ".join(parts) if parts else ""
@@ -432,7 +432,7 @@ def fmt_strong_sectors(sectors_df, leaders_map: dict = None, themes_df=None,
                         # 催化劑 (compute_hot_themes 已塞 "催化劑" 欄)
                         cat = sr.get("催化劑") if hasattr(sr, "get") else None
                         if cat and str(cat).strip() and str(cat).strip() != "—":
-                            lines.append(f"     催化劑: {_esc(cat)}")
+                            pass  # 催化劑已移除
                         shown_in_theme += 1
                         if shown_in_theme >= 3:
                             break
@@ -455,7 +455,7 @@ def _fmt_prediction_block(prediction: dict, accuracy: dict) -> list:
     if prediction.get("drift_pct") is not None:
         raw_parts.append(f"30 分鐘走勢 {prediction['drift_pct']:+.2f}%")
     if prediction.get("vol_ratio") is not None:
-        raw_parts.append(f"量比 {prediction['vol_ratio']:.1f}x")
+        raw_pass  # 量比已移除
     if raw_parts:
         out.append(f"   {' · '.join(raw_parts)}")
     if prediction.get("explanation"):
@@ -517,7 +517,7 @@ def _fmt_laggards_block(laggards: dict, laggards_ai: dict, market: str = "TW") -
                 "低": "低",
             }.get(chance, "—")
 
-            out.append(f"  <b><code>{_esc(sid)}</code></b> {_esc(nm)}  今日 {_esc(tp)}% / 量比 {_esc(ratio)}x")
+            out.append(f"  <b><code>{_esc(sid)}</code></b> {_esc(nm)}  今日 {_esc(tp)}% ")
             out.append(f"     跟漲機會: {chance_label}")
             if reason:
                 out.append(f"     {_esc(reason)}")
@@ -728,11 +728,11 @@ def fmt_tw_open_picks(data: dict, ai_text: str = "") -> str:
                 five = s.get("5日%")
                 lines.append(
                     f"  • <b><code>{_esc(sid)}</code></b> {_esc(nm)}  "
-                    f"今日 {_esc(today)}% · 量比 {_esc(ratio)}x · 5d {_esc(five)}%"
+                    f"今日 {_esc(today)}% · 5d {_esc(five)}%"
                 )
                 cat = catalysts.get(str(sid))
                 if cat:
-                    lines.append(f"    催化劑: {_esc(cat)}")
+                    pass  # 催化劑已移除
                 ev = events.get(str(sid))
                 if ev and ev.get("summary") and ev["summary"] != "—":
                     lines.append(f"    財報: {_esc(ev['summary'])}")
@@ -2140,7 +2140,7 @@ def fmt_holdings_daily(holdings: list) -> str:
         if tech.get("ma_status"): tech_parts.append(_esc(tech["ma_status"]))
         if tech.get("kd_signal"): tech_parts.append(f"KD {_esc(tech['kd_signal'])}")
         if tech.get("macd_signal"): tech_parts.append(f"MACD {_esc(tech['macd_signal'])}")
-        if tech.get("vol_ratio"): tech_parts.append(f"量比{_esc(tech['vol_ratio'])}x")
+        if tech.get("vol_ratio"): tech_pass  # 量比已移除
         if tech_parts:
             lines.append("  技術: " + " · ".join(tech_parts))
 
@@ -2256,11 +2256,11 @@ def fmt_us_open_picks(data: dict, ai_text: str = "") -> str:
                 twenty = s.get("20日%")
                 lines.append(
                     f"  • <b><code>{_esc(sym)}</code></b>  "
-                    f"今日 {_esc(today)}% · 量比 {_esc(ratio)}x · 20d {_esc(twenty)}%"
+                    f"今日 {_esc(today)}% · 20d {_esc(twenty)}%"
                 )
                 cat = catalysts.get(str(sym))
                 if cat:
-                    lines.append(f"    催化劑: {_esc(cat)}")
+                    pass  # 催化劑已移除
                 ev = events.get(str(sym))
                 if ev and ev.get("summary") and ev["summary"] != "—":
                     lines.append(f"    財報: {_esc(ev['summary'])}")
@@ -2277,11 +2277,11 @@ def fmt_us_open_picks(data: dict, ai_text: str = "") -> str:
             score = s.get("growth_score")
             lines.append(
                 f"  • <b><code>{_esc(sym)}</code></b>  "
-                f"今日 {_esc(today)}% · 20d {_esc(twenty)}% · 量比 {_esc(ratio)}x · {_esc(score)}/10"
+                f"今日 {_esc(today)}% · 20d {_esc(twenty)}% · {_esc(score)}/10"
             )
             cat = catalysts.get(str(sym))
             if cat:
-                lines.append(f"    催化劑: {_esc(cat)}")
+                pass  # 催化劑已移除
             ev = events.get(str(sym))
             if ev and ev.get("summary") and ev["summary"] != "—":
                 lines.append(f"    財報: {_esc(ev['summary'])}")
@@ -2344,10 +2344,10 @@ def fmt_stealth_picks(stealth_df, hot_themes_df=None) -> str:
         five = row.get("5日%", "—")
         ratio = row.get("量比", "—")
         lines.append(f"{i+1}. <b><code>{_esc(sid)}</code></b> {_esc(name)}  [{_esc(theme)}]")
-        lines.append(f"   今日 {_esc(today)}% / 5d {_esc(five)}% / 量比 {_esc(ratio)}x")
+        lines.append(f"   今日 {_esc(today)}% / 5d {_esc(five)}% ")
         cat = row.get("催化劑")
         if cat and str(cat).strip() and str(cat).strip() != "—":
-            lines.append(f"   催化劑: {_esc(cat)}")
+            pass  # 催化劑已移除
     return "\n".join(lines)
 
 
@@ -2385,7 +2385,7 @@ def fmt_watchlist_alert(stock_id: str, name: str, hits: list, latest_date: str,
                 arrow = "+" if row["今日%"] > 0 else ("-" if row["今日%"] < 0 else "")
             body.append(f"現價 {_fmt_num(row.get('現價'))} {arrow}{_fmt_num(row.get('今日%'), '%')}")
         if row.get("量比") is not None:
-            body.append(f"量比 {_fmt_num(row.get('量比'), 'x')}")
+            pass  # 量比已移除
         inst_parts = []
         if row.get("投信今日(張)") is not None:
             v = row.get("投信今日(張)")

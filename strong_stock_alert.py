@@ -225,7 +225,7 @@ def fmt_strong_alert_tg(surge_info: Dict, picks: List[Dict]) -> str:
         score = p.get("score", 0)
         lines.append(
             f"{i}. <code>{_esc(sid)}</code> {name} · "
-            f"{cur} <b>+{tp:.2f}%</b> · 量比 {vr:.1f}x · 強度 {score:.0f}"
+            f"{cur} <b>+{tp:.2f}%</b> · 強度 {score:.0f}"
         )
     lines.append("")
     lines.append("<i>※ 為當下動能掃描, 非中長線推薦. 請自行控管風險.</i>")
