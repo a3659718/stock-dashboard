@@ -89,7 +89,29 @@ def _truncate_tg_msg(out: str, max_bytes: int = 3900) -> str:
     out_bytes = out.encode("utf-8")
     if len(out_bytes) <= max_bytes:
         return out
-    return out_bytes[:max_bytes].decode("utf-8", errors="ignore") + "\n…(節錄)"
+    truncated = out_bytes[:max_bytes].decode("utf-8", errors="ignore")
+    # MED fix: byte 硬切可能切在 HTML tag 中間 (e.g. "<cod") 或留未閉合 tag,
+    # 導致 Telegram parse_mode=HTML 回 400. 這裡 (1) 砍掉結尾不完整 tag
+    # (2) 補齊未閉合的常見 tag, 避免 parse error (省掉 send_message 純文字 retry).
+    last_lt = truncated.rfind("<")
+    last_gt = truncated.rfind(">")
+    if last_lt > last_gt:  # 最後一個 '<' 之後沒有 '>' → 結尾是半截 tag
+        truncated = truncated[:last_lt]
+    truncated += "\n…(節錄)"
+    return _balance_html_tags(truncated)
+
+
+def _balance_html_tags(s: str) -> str:
+    """補齊未閉合的常見 Telegram HTML tag (b/i/code/pre/u/s).
+    Telegram HTML 模式要求 tag 成對, 截斷後可能少了 </b> 之類 → 補在尾端.
+    """
+    import re as _re
+    for tag in ("b", "i", "code", "pre", "u", "s"):
+        opens = len(_re.findall(rf"<{tag}>", s))
+        closes = len(_re.findall(rf"</{tag}>", s))
+        if opens > closes:
+            s += f"</{tag}>" * (opens - closes)
+    return s
 
 
 def _bot_token() -> str:

@@ -457,13 +457,20 @@ def _scan_companion_weak_stocks_tw(top_n: int = 5, max_workers: int = 8) -> List
 COMPANION_CACHE_TTL_SEC = 600  # 10 分鐘
 
 
-def _scan_companion_weak_stocks_tw_cached(top_n: int = 5) -> List[Dict]:
+def _scan_companion_weak_stocks_tw_cached(top_n: int = 5, state: Optional[Dict] = None) -> List[Dict]:
     """帶 monitor_state cache 的 companion 掃描.
     10 分鐘內重複呼叫直接回快取, 省掉 40+ 檔 yfinance round-trip (~10-15s).
+
+    HIGH fix: 若 caller 傳入 state (e.g. check_intraday_reversal 已 load 的 state),
+    就把 cache 寫進「同一個」state dict, 由 caller 結尾的 save 持久化.
+    否則 (standalone) 自己 load/save. 這樣避免 caller 結尾 save 把 companion
+    cache 覆蓋掉 (caller load 在前, companion 寫在後, caller save 又用舊 snapshot).
     """
     now = dt.datetime.utcnow()
+    own_state = state is None
     try:
-        state = watchlist_store.load_monitor_state()
+        if state is None:
+            state = watchlist_store.load_monitor_state()
         cache = state.get("_companion_cache") or {}
         ts_str = cache.get("ts")
         if ts_str:
@@ -473,15 +480,17 @@ def _scan_companion_weak_stocks_tw_cached(top_n: int = 5) -> List[Dict]:
                 print(f"[companion] cache hit ({len(cached)} 檔)", flush=True)
                 return cached[:top_n]
     except Exception:
-        state = None
+        if state is None:
+            state = {}
 
     # cache miss → 重新掃
     result = _scan_companion_weak_stocks_tw(top_n=top_n)
     try:
-        if state is None:
-            state = watchlist_store.load_monitor_state()
         state["_companion_cache"] = {"ts": now.isoformat(), "data": result}
-        watchlist_store.save_monitor_state(state)
+        # 只有 standalone (沒外層 state) 才自己 save;
+        # 若是 caller 傳入的 state, 由 caller 結尾的 save 一起持久化, 避免被覆蓋.
+        if own_state:
+            watchlist_store.save_monitor_state(state)
     except Exception:
         pass
     return result
@@ -638,7 +647,10 @@ def check_intraday_reversal() -> List[Dict]:
                 companion_stocks: List[Dict] = []
                 if sym == "^TWII":
                     try:
-                        companion_stocks = _scan_companion_weak_stocks_tw_cached(top_n=5)
+                        # 傳入同一個 state, cache 由本函式結尾的 save 持久化
+                        companion_stocks = _scan_companion_weak_stocks_tw_cached(
+                            top_n=5, state=state,
+                        )
                     except Exception as e:
                         print(f"[reversal] companion scan failed: {e}", flush=True)
                 alerts.append({

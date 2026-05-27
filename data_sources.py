@@ -125,6 +125,22 @@ def _load_stock_info_cache() -> pd.DataFrame:
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
+def _get_taiwan_stock_info_cached() -> pd.DataFrame:
+    """內部: 抓 FinMind 台股清單並清洗. 失敗會 raise.
+
+    重點: st.cache_data 預設「不快取拋出例外的呼叫」— 所以 FinMind 402 raise
+    時不會被快取, 下次呼叫會自動重試 (額度恢復後立即生效). 只有成功結果
+    才被快取 1 小時 + 存本地 fallback.
+    """
+    df = _finmind_get("TaiwanStockInfo")  # 失敗 raise → 不被快取
+    if df.empty:
+        return df
+    df = df[df["stock_id"].astype(str).str.fullmatch(r"\d{4}")]
+    df = df.reset_index(drop=True)
+    _save_stock_info_cache(df)  # 存成功結果供日後 fallback
+    return df
+
+
 def get_taiwan_stock_info() -> pd.DataFrame:
     """全台股清單 (twse / tpex)。只做基本清洗 (限 4 碼數字),
     是否排除 ETF/權證/TDR/全額交割等交給 filter_tradeable_stocks 決定,
@@ -133,9 +149,12 @@ def get_taiwan_stock_info() -> pd.DataFrame:
     韌性: FinMind 失敗 (常見 HTTP 402 額度用盡) 時不 raise — 改用本地
     最後一次成功的快取, 找不到才回空 df. 確保單一 API 額度爆掉不會
     讓整個 dashboard 崩潰. caller 普遍已處理 empty df.
+
+    MED fix: 成功路徑走 @cache_data (快取 1hr); 失敗路徑「不」被快取,
+    所以額度恢復後下次呼叫立即重試, 不會卡 1 小時空結果.
     """
     try:
-        df = _finmind_get("TaiwanStockInfo")
+        return _get_taiwan_stock_info_cached()
     except Exception as e:
         print(
             f"[data_sources] get_taiwan_stock_info FinMind 失敗 ({e}), 改用本地快取",
@@ -148,13 +167,6 @@ def get_taiwan_stock_info() -> pd.DataFrame:
             ]
             return fallback.reset_index(drop=True)
         return pd.DataFrame()
-    if df.empty:
-        # 空結果不覆蓋既有快取 (避免把好的清單洗掉), 直接回空
-        return df
-    df = df[df["stock_id"].astype(str).str.fullmatch(r"\d{4}")]
-    df = df.reset_index(drop=True)
-    _save_stock_info_cache(df)  # 存成功結果供日後 fallback
-    return df
 
 
 def list_universe(market: str = "all") -> List[str]:
