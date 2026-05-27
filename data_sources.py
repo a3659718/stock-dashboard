@@ -96,17 +96,65 @@ def _finmind_get(dataset: str, **params) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 # 台股清單
 # ---------------------------------------------------------------------------
+# 本地 fallback 快取: TaiwanStockInfo 幾乎不變 (上市櫃清單),
+# FinMind 402 額度爆掉時用最後一次成功結果, 避免整個 dashboard 崩潰.
+import os as _os
+
+_STOCK_INFO_CACHE_FILE = _os.path.join(
+    _os.path.dirname(_os.path.abspath(__file__)), ".cache", "taiwan_stock_info.csv"
+)
+
+
+def _save_stock_info_cache(df: pd.DataFrame) -> None:
+    """存成功抓到的台股清單供日後 fallback (CSV, 不依賴 pyarrow)."""
+    try:
+        _os.makedirs(_os.path.dirname(_STOCK_INFO_CACHE_FILE), exist_ok=True)
+        df.to_csv(_STOCK_INFO_CACHE_FILE, index=False, encoding="utf-8")
+    except Exception as e:
+        print(f"[data_sources] 存台股清單快取失敗 (non-fatal): {e}", flush=True)
+
+
+def _load_stock_info_cache() -> pd.DataFrame:
+    """讀本地台股清單快取. 沒有就回空 df."""
+    try:
+        if _os.path.exists(_STOCK_INFO_CACHE_FILE):
+            return pd.read_csv(_STOCK_INFO_CACHE_FILE, dtype={"stock_id": str})
+    except Exception as e:
+        print(f"[data_sources] 讀台股清單快取失敗 (non-fatal): {e}", flush=True)
+    return pd.DataFrame()
+
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_taiwan_stock_info() -> pd.DataFrame:
     """全台股清單 (twse / tpex)。只做基本清洗 (限 4 碼數字),
     是否排除 ETF/權證/TDR/全額交割等交給 filter_tradeable_stocks 決定,
     不在這裡寫死, 避免 caller 想保留 ETF 時被靜默過濾.
+
+    韌性: FinMind 失敗 (常見 HTTP 402 額度用盡) 時不 raise — 改用本地
+    最後一次成功的快取, 找不到才回空 df. 確保單一 API 額度爆掉不會
+    讓整個 dashboard 崩潰. caller 普遍已處理 empty df.
     """
-    df = _finmind_get("TaiwanStockInfo")
+    try:
+        df = _finmind_get("TaiwanStockInfo")
+    except Exception as e:
+        print(
+            f"[data_sources] get_taiwan_stock_info FinMind 失敗 ({e}), 改用本地快取",
+            flush=True,
+        )
+        fallback = _load_stock_info_cache()
+        if not fallback.empty:
+            fallback = fallback[
+                fallback["stock_id"].astype(str).str.fullmatch(r"\d{4}")
+            ]
+            return fallback.reset_index(drop=True)
+        return pd.DataFrame()
     if df.empty:
+        # 空結果不覆蓋既有快取 (避免把好的清單洗掉), 直接回空
         return df
     df = df[df["stock_id"].astype(str).str.fullmatch(r"\d{4}")]
-    return df.reset_index(drop=True)
+    df = df.reset_index(drop=True)
+    _save_stock_info_cache(df)  # 存成功結果供日後 fallback
+    return df
 
 
 def list_universe(market: str = "all") -> List[str]:
