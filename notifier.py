@@ -1749,23 +1749,69 @@ def _rev_volume_desc(vstate: str, vr) -> str:
 
 
 def _rev_action_drawdown(severity: str, market_state: str) -> str:
+    # L2 fix: severity × market_state 完整矩陣 (含 mild 也依盤勢區分)
     if severity == "severe":
-        return "💡 建議: 持股減碼 1/3, 留意停損點"
+        if market_state == "accelerating_down":
+            return "💡 建議: 加速殺低, 持股減碼 1/3 並設停損"
+        return "💡 建議: 跌幅已大, 持股減碼 1/3, 留意停損點"
     if severity == "medium":
         if market_state == "accelerating_down":
             return "💡 建議: 減碼 20%, 觀察是否止穩"
         if market_state == "turned_black":
             return "💡 建議: 暫不加碼, 留意支撐"
-        return "💡 建議: 觀察是否續弱, 暫不動作"
+        return "💡 建議: 高檔回吐, 觀察是否續弱, 暫不動作"
+    # mild
+    if market_state == "accelerating_down":
+        return "💡 建議: 雖幅度小但已翻黑加速, 留意是否擴大"
+    if market_state == "turned_black":
+        return "💡 建議: 小幅翻黑, 觀察支撐能否守住"
     return "💡 建議: 短線雜訊, 觀察為主"
 
 
 def _rev_action_rebound(severity: str, market_state: str) -> str:
-    if severity == "severe" and market_state == "recovered":
-        return "💡 建議: 短線止跌反彈確立, 可分批布局強勢股"
-    if severity == "medium" and market_state in ("recovered", "near_recover"):
-        return "💡 建議: 初步止穩, 觀察續攻力道再決定"
-    return "💡 建議: 短線反彈, 還沒翻紅前不追"
+    # L2 fix: 補齊 severity × market_state 組合, 避免 mild+recovered 矛盾
+    if severity == "severe":
+        if market_state == "recovered":
+            return "💡 建議: 強勁反彈且已收復, 可分批布局強勢股"
+        if market_state == "near_recover":
+            return "💡 建議: 反彈強勁接近收復, 留意能否翻紅"
+        return "💡 建議: 低檔強彈但仍黑, 先觀察止跌確認"
+    if severity == "medium":
+        if market_state in ("recovered", "near_recover"):
+            return "💡 建議: 初步止穩, 觀察續攻力道再決定"
+        return "💡 建議: 反彈中但未收復, 不宜追高"
+    # mild
+    if market_state == "recovered":
+        return "💡 建議: 小幅反彈已翻紅, 觀察延續性"
+    return "💡 建議: 短線小反彈, 還沒翻紅前不追"
+
+
+# M4: 指數 symbol → 短縮寫 (跨市場對照用, 避免多個 US 顯示成 "US / US" 搞混)
+_INDEX_SHORT = {
+    "^TWII": "台股",
+    "^N225": "日經",
+    "^KS11": "韓股",
+    "^SOX": "費半",
+    "^IXIC": "那指",
+}
+
+
+def _index_short(sym: str, country: str = "") -> str:
+    """回傳指數縮寫. 找不到就 fallback country code 或 symbol 去掉 ^."""
+    if sym in _INDEX_SHORT:
+        return _INDEX_SHORT[sym]
+    if country:
+        return country
+    return sym.lstrip("^")
+
+
+def _fmt_cross_market_short(cross_market: list) -> str:
+    """M4: 跨市場對照行 — 用指數縮寫而非 country code."""
+    return " / ".join(
+        f"{_index_short(c.get('symbol', ''), c.get('country', ''))} "
+        f"{c.get('pct_vs_open', 0):+.2f}%"
+        for c in cross_market
+    )
 
 
 def _rev_cross_market_ctx(self_pct: float, cross_market: list) -> str:
@@ -1865,10 +1911,7 @@ def fmt_intraday_reversal_alerts(alerts: list) -> str:
             cm = a.get("cross_market") or []
             if cm:
                 ctx = _rev_cross_market_ctx(vs_open, cm)
-                cm_short = " / ".join(
-                    f"{_esc(c.get('country', ''))} {c.get('pct_vs_open', 0):+.2f}%"
-                    for c in cm
-                )
+                cm_short = _fmt_cross_market_short(cm)
                 ctx_part = f"  {ctx}" if ctx else ""
                 lines.append(f"  📊 對照: {cm_short}{ctx_part}")
             advice = _rev_action_drawdown(sev, mstate)
@@ -1940,15 +1983,121 @@ def fmt_intraday_reversal_alerts(alerts: list) -> str:
             cm = a.get("cross_market") or []
             if cm:
                 ctx = _rev_cross_market_ctx(vs_open, cm)
-                cm_short = " / ".join(
-                    f"{_esc(c.get('country', ''))} {c.get('pct_vs_open', 0):+.2f}%"
-                    for c in cm
-                )
+                cm_short = _fmt_cross_market_short(cm)
                 ctx_part = f"  {ctx}" if ctx else ""
                 lines.append(f"  📊 對照: {cm_short}{ctx_part}")
             advice = _rev_action_rebound(sev, mstate)
             if advice:
                 lines.append(f"  {advice}")
+            lines.append("")
+
+    lines.append("<i>※ 警報為動能訊號, 非進出建議. 請自行控管風險.</i>")
+    return _truncate_tg_msg("\n".join(lines).rstrip())
+
+
+def fmt_weak_open_alerts(alerts: list) -> str:
+    """開盤即弱 / 開盤即強警報訊息 (M3 新).
+
+    alerts: index_alerts.check_weak_open_alerts() 回傳.
+    每個 dict 含 symbol, name, country, type ("weak_open"/"strong_open"),
+              current, today_open, today_high, today_low, pct_vs_open,
+              high_from_open_pct, low_from_open_pct, severity, vol_ratio,
+              volume_state, cross_market.
+    """
+    if not alerts:
+        return ""
+
+    weak = [a for a in alerts if a.get("type") == "weak_open"]
+    strong = [a for a in alerts if a.get("type") == "strong_open"]
+
+    all_sev = [a.get("severity", "mild") for a in alerts]
+    order = {"severe": 3, "medium": 2, "mild": 1}
+    top_sev = max(all_sev, key=lambda s: order.get(s, 0)) if all_sev else "mild"
+    title_badge = _rev_severity_badge(top_sev)
+    title_suffix = f" — {title_badge}" if title_badge else ""
+    lines = [f"<b>⚡ 開盤型態警報{title_suffix}</b>", ""]
+
+    if weak:
+        lines.append("<b>📉 開盤即弱 (沒給過反彈機會)</b>")
+        for a in weak:
+            country = _esc(a.get("country", ""))
+            name = _esc(a.get("name", ""))
+            sym = _esc(a.get("symbol", ""))
+            try:
+                cur = float(a.get("current", 0) or 0)
+                op = float(a.get("today_open", 0) or 0)
+                vs_open = float(a.get("pct_vs_open", 0) or 0)
+                hi_from_op = float(a.get("high_from_open_pct", 0) or 0)
+            except (TypeError, ValueError):
+                cur = op = vs_open = hi_from_op = 0.0
+            sev = a.get("severity", "mild")
+            badge = _rev_severity_badge(sev)
+            badge_part = f"  {badge}" if badge else ""
+            lines.append(f"[{country}] {name} <code>{sym}</code> {cur:,.2f}{badge_part}")
+            lines.append(
+                f"  開盤 {op:,.2f} → 現價 <b>{vs_open:+.2f}%</b> "
+                f"(盤中最高僅 +{hi_from_op:.2f}%)"
+            )
+            vol_desc = _rev_volume_desc(a.get("volume_state", "unknown"), a.get("vol_ratio"))
+            if vol_desc:
+                lines.append(f"  量能: {vol_desc}")
+            # 跨市場
+            cm = a.get("cross_market") or []
+            if cm:
+                ctx = _rev_cross_market_ctx(vs_open, cm)
+                cm_short = _fmt_cross_market_short(cm)
+                ctx_part = f"  {ctx}" if ctx else ""
+                lines.append(f"  📊 對照: {cm_short}{ctx_part}")
+            # 操作建議
+            if sev == "severe":
+                lines.append("  💡 建議: 弱開且未反彈, 持股減碼觀望")
+            elif sev == "medium":
+                lines.append("  💡 建議: 短線轉弱訊號, 暫不加碼")
+            else:
+                lines.append("  💡 建議: 開盤偏弱, 觀察是否止穩")
+            # SOX/IXIC 特別提醒對台股影響
+            if sym in ("^SOX", "^IXIC"):
+                lines.append("  ⚠️ 此為台股 leading indicator, 留意明日台股開盤")
+            lines.append("")
+
+    if strong:
+        lines.append("<b>📈 開盤即強 (沒給過回測機會)</b>")
+        for a in strong:
+            country = _esc(a.get("country", ""))
+            name = _esc(a.get("name", ""))
+            sym = _esc(a.get("symbol", ""))
+            try:
+                cur = float(a.get("current", 0) or 0)
+                op = float(a.get("today_open", 0) or 0)
+                vs_open = float(a.get("pct_vs_open", 0) or 0)
+                lo_from_op = float(a.get("low_from_open_pct", 0) or 0)
+            except (TypeError, ValueError):
+                cur = op = vs_open = lo_from_op = 0.0
+            sev = a.get("severity", "mild")
+            badge = _rev_severity_badge(sev)
+            badge_part = f"  {badge}" if badge else ""
+            lines.append(f"[{country}] {name} <code>{sym}</code> {cur:,.2f}{badge_part}")
+            lines.append(
+                f"  開盤 {op:,.2f} → 現價 <b>+{vs_open:.2f}%</b> "
+                f"(盤中最低僅 {lo_from_op:.2f}%)"
+            )
+            vol_desc = _rev_volume_desc(a.get("volume_state", "unknown"), a.get("vol_ratio"))
+            if vol_desc:
+                lines.append(f"  量能: {vol_desc}")
+            cm = a.get("cross_market") or []
+            if cm:
+                ctx = _rev_cross_market_ctx(vs_open, cm)
+                cm_short = _fmt_cross_market_short(cm)
+                ctx_part = f"  {ctx}" if ctx else ""
+                lines.append(f"  📊 對照: {cm_short}{ctx_part}")
+            if sev == "severe":
+                lines.append("  💡 建議: 強勢開盤未回測, 可順勢留意強勢族群")
+            elif sev == "medium":
+                lines.append("  💡 建議: 多頭續攻訊號, 留意拉回是否買點")
+            else:
+                lines.append("  💡 建議: 開盤偏強, 觀察延續性")
+            if sym in ("^SOX", "^IXIC"):
+                lines.append("  ✨ 此為台股 leading indicator, 明日台股可期")
             lines.append("")
 
     lines.append("<i>※ 警報為動能訊號, 非進出建議. 請自行控管風險.</i>")

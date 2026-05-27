@@ -707,6 +707,38 @@ def main() -> int:
             print(f"[intraday reversal] check failed (non-fatal): {_e}", flush=True)
             traceback.print_exc()
 
+        # M3: 開盤即弱/即強警報 (跟 reversal 互補, 抓開盤後沒給機會的場景)
+        weak_open_alerts = []
+        try:
+            import index_alerts as _ia_wo
+            weak_open_alerts = _ia_wo.check_weak_open_alerts() or []
+            # M1 fix: 同 sym 同 tick reversal 已推 → suppress weak_open, 避免重複 2 封
+            #         (reversal 訊息語境更完整, 含 severity/速度/同向股)
+            if weak_open_alerts and reversal_alerts:
+                rev_syms = {a.get("symbol") for a in reversal_alerts}
+                before = len(weak_open_alerts)
+                weak_open_alerts = [
+                    a for a in weak_open_alerts if a.get("symbol") not in rev_syms
+                ]
+                if before != len(weak_open_alerts):
+                    print(
+                        f"[weak/strong open] suppressed {before - len(weak_open_alerts)} "
+                        f"(同 sym reversal 已推)",
+                        flush=True,
+                    )
+            if weak_open_alerts:
+                print(
+                    f"[weak/strong open] triggered {len(weak_open_alerts)}: "
+                    + ", ".join(
+                        f"{a.get('symbol')}({a.get('type')})" for a in weak_open_alerts
+                    ),
+                    flush=True,
+                )
+        except Exception as _e:
+            import traceback
+            print(f"[weak/strong open] check failed (non-fatal): {_e}", flush=True)
+            traceback.print_exc()
+
         try:
             import index_alerts as _ia_idx
             bucket_alerts = _ia_idx.check_index_alerts() or []
@@ -746,6 +778,19 @@ def main() -> int:
         except Exception as _ce:
             import traceback
             print(f"[combined intraday] formatter/send 失敗 (non-fatal, Phase 2 仍會跑): {_ce}", flush=True)
+            traceback.print_exc()
+
+        # M3: 開盤即弱/強警報 — 獨立 1 封 TG (跟 reversal 不同情境, 每日 cap 1/方向/sym)
+        try:
+            if weak_open_alerts:
+                weak_msg = notifier.fmt_weak_open_alerts(weak_open_alerts)
+                if weak_msg:
+                    print(f"[weak/strong open] sending TG ({len(weak_msg)} chars)", flush=True)
+                    ok_w, info_w = notifier.send_message(weak_msg)
+                    print(f"[weak/strong open] TG result: ok={ok_w} info={info_w}", flush=True)
+        except Exception as _we:
+            import traceback
+            print(f"[weak/strong open] formatter/send 失敗 (non-fatal): {_we}", flush=True)
             traceback.print_exc()
 
         try:

@@ -47,13 +47,18 @@ import watchlist_store
 #                                          200-400 點波動全被吞掉; 改固定 200 + 反轉 0.5%
 INDEX_CONFIG = {
     # 亞股
-    "^N225":  {"name": "日經 225",   "threshold": 150.0, "country": "JP"},
-    "^KS11":  {"name": "韓國 KOSPI", "threshold": 50.0,  "country": "KR"},
+    # M3 fix: 把各指數 reversal_pct 都顯式設定, 避免 default 1.0% 漏掉「漲幅萎縮」
+    "^N225":  {"name": "日經 225",   "threshold": 150.0, "country": "JP",
+               "reversal_pct": 0.8},  # 純參考, 較寬
+    "^KS11":  {"name": "韓國 KOSPI", "threshold": 50.0,  "country": "KR",
+               "reversal_pct": 0.5},  # 跟台股強連動, 最敏感
     "^TWII":  {"name": "台灣加權",   "threshold": 200.0, "country": "TW",
                "disable_atr_boost": True, "reversal_pct": 0.5},
     # 美股 (台股 leading indicator)
-    "^SOX":   {"name": "費城半導體", "threshold": 100.0, "country": "US"},
-    "^IXIC":  {"name": "那斯達克",   "threshold": 200.0, "country": "US"},
+    "^SOX":   {"name": "費城半導體", "threshold": 100.0, "country": "US",
+               "reversal_pct": 0.6},  # 對台股傳導性強, 略寬於 TWII
+    "^IXIC":  {"name": "那斯達克",   "threshold": 200.0, "country": "US",
+               "reversal_pct": 0.8},
 }
 
 
@@ -172,7 +177,8 @@ def _fetch_intraday_anchor_data(symbol: str) -> Optional[Dict]:
     try:
         df = df.copy()
         date_col = "Datetime" if "Datetime" in df.columns else df.columns[0]
-        df["_dt"] = pd.to_datetime(df[date_col])
+        # M2 fix: 統一 utc=True 避免 tz-aware/naive 混用 → 後面 datetime 減法不會 raise
+        df["_dt"] = pd.to_datetime(df[date_col], utc=True)
         df["_d"] = df["_dt"].dt.date
         today = df["_d"].max()
         sys_today = dt.date.today()
@@ -182,6 +188,7 @@ def _fetch_intraday_anchor_data(symbol: str) -> Optional[Dict]:
         today_bars = df[df["_d"] == today].sort_values("_dt")
         if today_bars.empty:
             return None
+        bar_count = len(today_bars)  # H1: 給 weak_open 判斷「資料是否已分化」
         today_open = float(today_bars.iloc[0]["Open"])
         current = float(today_bars.iloc[-1]["Close"])
         # 用全部今日 bar 算 high/low (而非只用 state 累積 — yfinance 已給完整 5m bars)
@@ -190,6 +197,7 @@ def _fetch_intraday_anchor_data(symbol: str) -> Optional[Dict]:
 
         # M2: 抓 today_high / today_low 發生的時間 (用於急殺 vs 緩跌判斷)
         # 取「最後一次」出現 (高低點重覆時, 近期的更貼近現實)
+        # M2 fix: _dt 已統一 utc=True, 減法不再 raise; 若仍失敗印 log 而非靜默
         mins_since_high = None
         mins_since_low = None
         try:
@@ -198,28 +206,41 @@ def _fetch_intraday_anchor_data(symbol: str) -> Optional[Dict]:
             tb["_low_f"] = tb["Low"].astype(float)
             high_rows = tb[tb["_high_f"] >= today_high - 1e-9]
             low_rows = tb[tb["_low_f"] <= today_low + 1e-9]
-            last_dt = pd.to_datetime(tb["_dt"].iloc[-1])
+            last_dt = pd.to_datetime(tb["_dt"].iloc[-1], utc=True)
             if not high_rows.empty:
-                high_dt = pd.to_datetime(high_rows["_dt"].iloc[-1])
+                high_dt = pd.to_datetime(high_rows["_dt"].iloc[-1], utc=True)
                 mins_since_high = max(0.0, (last_dt - high_dt).total_seconds() / 60.0)
             if not low_rows.empty:
-                low_dt = pd.to_datetime(low_rows["_dt"].iloc[-1])
+                low_dt = pd.to_datetime(low_rows["_dt"].iloc[-1], utc=True)
                 mins_since_low = max(0.0, (last_dt - low_dt).total_seconds() / 60.0)
+        except Exception as _e:
+            print(f"[reversal] {symbol} mins_since calc failed: {_e}", flush=True)
+
+        # 距開盤分鐘數 (L1: 給 vol_ratio 防呆用)
+        mins_since_open = None
+        try:
+            open_dt = pd.to_datetime(today_bars["_dt"].iloc[0], utc=True)
+            last_dt2 = pd.to_datetime(today_bars["_dt"].iloc[-1], utc=True)
+            mins_since_open = max(0.0, (last_dt2 - open_dt).total_seconds() / 60.0)
         except Exception:
             pass
 
         # M2: 量比 (今日累計 / 過去 5 日同期累計平均) — 判斷量增殺出 vs 量縮回吐
+        # L1 fix: 開盤頭 30min 分母 (過去同期累計) 太小, vol_ratio 易爆極端值 → 留 None
         vol_ratio = None
         try:
-            today_vol_cum = float(today_bars["Volume"].astype(float).sum())
-            prev = df[df["_d"] < today].copy()
-            if not prev.empty:
-                last_hm = pd.to_datetime(today_bars["_dt"].iloc[-1]).strftime("%H:%M")
-                prev["_hm"] = prev["_dt"].dt.strftime("%H:%M")
-                cum = prev[prev["_hm"] <= last_hm].groupby("_d")["Volume"].sum().tail(5)
-                avg_prev_cum = float(cum.mean()) if not cum.empty else 0.0
-                if avg_prev_cum > 0:
-                    vol_ratio = today_vol_cum / avg_prev_cum
+            if mins_since_open is None or mins_since_open >= 30:
+                today_vol_cum = float(today_bars["Volume"].astype(float).sum())
+                prev = df[df["_d"] < today].copy()
+                if not prev.empty:
+                    last_hm = pd.to_datetime(
+                        today_bars["_dt"].iloc[-1], utc=True
+                    ).strftime("%H:%M")
+                    prev["_hm"] = prev["_dt"].dt.strftime("%H:%M")
+                    cum = prev[prev["_hm"] <= last_hm].groupby("_d")["Volume"].sum().tail(5)
+                    avg_prev_cum = float(cum.mean()) if not cum.empty else 0.0
+                    if avg_prev_cum > 0:
+                        vol_ratio = today_vol_cum / avg_prev_cum
         except Exception:
             pass
 
@@ -241,6 +262,8 @@ def _fetch_intraday_anchor_data(symbol: str) -> Optional[Dict]:
             "today_low": today_low,
             "mins_since_high": mins_since_high,
             "mins_since_low": mins_since_low,
+            "mins_since_open": mins_since_open,
+            "bar_count": bar_count,
             "vol_ratio": vol_ratio,
         }
     except Exception:
@@ -430,6 +453,40 @@ def _scan_companion_weak_stocks_tw(top_n: int = 5, max_workers: int = 8) -> List
     return results[:top_n]
 
 
+# M3: companion scan 結果 cache (避免同 tick / 短時間多次 drawdown 重複掃 40+ 檔)
+COMPANION_CACHE_TTL_SEC = 600  # 10 分鐘
+
+
+def _scan_companion_weak_stocks_tw_cached(top_n: int = 5) -> List[Dict]:
+    """帶 monitor_state cache 的 companion 掃描.
+    10 分鐘內重複呼叫直接回快取, 省掉 40+ 檔 yfinance round-trip (~10-15s).
+    """
+    now = dt.datetime.utcnow()
+    try:
+        state = watchlist_store.load_monitor_state()
+        cache = state.get("_companion_cache") or {}
+        ts_str = cache.get("ts")
+        if ts_str:
+            ts = dt.datetime.fromisoformat(ts_str)
+            if (now - ts).total_seconds() < COMPANION_CACHE_TTL_SEC:
+                cached = cache.get("data") or []
+                print(f"[companion] cache hit ({len(cached)} 檔)", flush=True)
+                return cached[:top_n]
+    except Exception:
+        state = None
+
+    # cache miss → 重新掃
+    result = _scan_companion_weak_stocks_tw(top_n=top_n)
+    try:
+        if state is None:
+            state = watchlist_store.load_monitor_state()
+        state["_companion_cache"] = {"ts": now.isoformat(), "data": result}
+        watchlist_store.save_monitor_state(state)
+    except Exception:
+        pass
+    return result
+
+
 def check_intraday_reversal() -> List[Dict]:
     """檢測「從高點回吐」「從低點反彈」並回傳 alert list.
 
@@ -581,9 +638,7 @@ def check_intraday_reversal() -> List[Dict]:
                 companion_stocks: List[Dict] = []
                 if sym == "^TWII":
                     try:
-                        companion_stocks = _scan_companion_weak_stocks_tw(
-                            top_n=5, max_workers=8,
-                        )
+                        companion_stocks = _scan_companion_weak_stocks_tw_cached(top_n=5)
                     except Exception as e:
                         print(f"[reversal] companion scan failed: {e}", flush=True)
                 alerts.append({
@@ -672,6 +727,178 @@ def check_intraday_reversal() -> List[Dict]:
                 sym_state["rebound_alerts_today"] = alerts_today + 1
 
     state["intraday_reversal"] = rev_state
+    watchlist_store.save_monitor_state(state)
+    return alerts
+
+
+# ---------------------------------------------------------------------------
+# 開盤即弱 / 開盤即強警報 (M3)
+# ---------------------------------------------------------------------------
+# 為什麼: reversal 邏輯是「從高/低點回吐」, 對「開盤就跌, 一路弱」這種沒給過機會的
+#        場景沒辦法觸發 (today_high == today_open, drawdown_pct ≈ 0).
+#        新警報專抓「開盤直接跌/直接漲」, 對 SOX/IXIC (台股 leading indicator) 特別重要.
+# 觸發條件 (任一指數開盤後判斷):
+#   弱開: pct_vs_open ≤ -WEAK_OPEN_PCT(sym) AND today_high 距 today_open < 0.3% (沒反彈過)
+#   強開: pct_vs_open ≥ +WEAK_OPEN_PCT(sym) AND today_low  距 today_open > -0.3% (沒回測過)
+# Throttle: 每 sym 每方向每日最多 1 則 (型態警報, 不需 ratchet)
+# State: monitor_state["weak_open"][sym] = {date, weak_alerted, strong_alerted}
+WEAK_OPEN_DEFAULT_PCT = 1.0   # 預設閾值
+WEAK_OPEN_NO_REBOUND_PCT = 0.3  # 高/低點離開盤 < 0.3% = 沒回頭機會
+# Per-symbol 客製 (波動較大的指數用較高 threshold, 避免雜訊)
+WEAK_OPEN_PCT_OVERRIDE = {
+    "^SOX": 1.5,    # 費半波動大, 1.5% 才算明顯弱開
+    "^IXIC": 1.2,
+    "^N225": 1.0,
+    "^KS11": 1.0,
+    "^TWII": 1.0,
+}
+
+
+def check_weak_open_alerts() -> List[Dict]:
+    """偵測「開盤即弱」/「開盤即強」場景.
+
+    每 sym 每方向每日最多推 1 則 (型態確認, 不會反覆推).
+    回傳的 alert dict 結構:
+      symbol, name, country, type ("weak_open"/"strong_open"),
+      current, today_open, today_high, today_low,
+      pct_vs_open, high_from_open_pct, low_from_open_pct,
+      severity, vol_ratio, cross_market.
+    """
+    state = watchlist_store.load_monitor_state()
+    wo_state = state.setdefault("weak_open", {})
+    today_str = dt.date.today().strftime("%Y-%m-%d")
+
+    closed_markets: set = set()
+    try:
+        import holiday_check
+        for mk in ["TW", "JP", "KR", "US"]:
+            if holiday_check.is_market_closed_today(mk):
+                closed_markets.add(mk)
+    except Exception:
+        pass
+
+    # 預抓所有 snap (給 cross_market 用)
+    all_snaps: Dict[str, Dict] = {}
+    for sym, cfg in INDEX_CONFIG.items():
+        country = cfg.get("country")
+        if country in closed_markets:
+            continue
+        if not _is_market_in_session(country):
+            continue
+        snap = _fetch_intraday_anchor_data(sym)
+        if not snap:
+            continue
+        try:
+            pct_vs_open_ = (snap["current"] / snap["today_open"] - 1) * 100 \
+                           if snap["today_open"] > 0 else 0.0
+        except Exception:
+            pct_vs_open_ = 0.0
+        snap["_pct_vs_open"] = pct_vs_open_
+        snap["_country"] = country
+        snap["_name"] = cfg.get("name", sym)
+        all_snaps[sym] = snap
+
+    alerts: List[Dict] = []
+
+    for sym, cfg in INDEX_CONFIG.items():
+        if sym not in all_snaps:
+            continue
+        country = cfg.get("country")
+        snap = all_snaps[sym]
+        today_open = snap["today_open"]
+        today_high = snap["today_high"]
+        today_low = snap["today_low"]
+        current = snap["current"]
+        pct_vs_open = snap["_pct_vs_open"]
+        vol_ratio = snap.get("vol_ratio")
+        bar_count = snap.get("bar_count", 0)
+        mins_since_open = snap.get("mins_since_open")
+
+        if today_open <= 0:
+            continue
+
+        # H1/H3 fix: 開盤頭 15min 資料還沒分化 (today_high ≈ today_open 是正常未分化結果,
+        #            而非「沒給過反彈機會」). 要求至少 4 根 5m bar (≥20min) 或開盤 ≥20min
+        #            才允許 weak/strong_open 觸發, 避免開盤即弱誤判.
+        enough_data = bar_count >= 4 or (mins_since_open is not None and mins_since_open >= 20)
+        if not enough_data:
+            continue
+
+        # 高/低點距開盤的幅度 (high_from_open 一定 ≥ 0, low_from_open 一定 ≤ 0)
+        high_from_open = (today_high / today_open - 1) * 100
+        low_from_open = (today_low / today_open - 1) * 100
+
+        # 跨日 reset
+        sym_state = wo_state.setdefault(sym, {})
+        if sym_state.get("date") != today_str:
+            sym_state.clear()
+            sym_state.update({
+                "date": today_str,
+                "weak_alerted": False,
+                "strong_alerted": False,
+            })
+
+        # 跨市場對照 snapshot (排除自己)
+        cross_market = []
+        for other_sym, other_snap in all_snaps.items():
+            if other_sym == sym:
+                continue
+            cross_market.append({
+                "symbol": other_sym,
+                "name": other_snap["_name"],
+                "country": other_snap["_country"],
+                "pct_vs_open": round(other_snap["_pct_vs_open"], 2),
+            })
+
+        sym_threshold = WEAK_OPEN_PCT_OVERRIDE.get(sym, WEAK_OPEN_DEFAULT_PCT)
+
+        # === 弱開判斷 ===
+        # pct_vs_open ≤ -threshold AND 高點離開盤很近 (沒反彈過)
+        if pct_vs_open <= -sym_threshold and high_from_open < WEAK_OPEN_NO_REBOUND_PCT:
+            if not sym_state.get("weak_alerted"):
+                alerts.append({
+                    "symbol": sym,
+                    "name": cfg["name"],
+                    "country": country,
+                    "type": "weak_open",
+                    "current": round(current, 2),
+                    "today_open": round(today_open, 2),
+                    "today_high": round(today_high, 2),
+                    "today_low": round(today_low, 2),
+                    "pct_vs_open": round(pct_vs_open, 2),
+                    "high_from_open_pct": round(high_from_open, 2),
+                    "low_from_open_pct": round(low_from_open, 2),
+                    "severity": _classify_severity(pct_vs_open),
+                    "vol_ratio": round(vol_ratio, 2) if vol_ratio else None,
+                    "volume_state": _classify_volume(vol_ratio),
+                    "cross_market": cross_market,
+                })
+                sym_state["weak_alerted"] = True
+
+        # === 強開判斷 ===
+        # pct_vs_open ≥ +threshold AND 低點離開盤很近 (沒回測過)
+        if pct_vs_open >= sym_threshold and low_from_open > -WEAK_OPEN_NO_REBOUND_PCT:
+            if not sym_state.get("strong_alerted"):
+                alerts.append({
+                    "symbol": sym,
+                    "name": cfg["name"],
+                    "country": country,
+                    "type": "strong_open",
+                    "current": round(current, 2),
+                    "today_open": round(today_open, 2),
+                    "today_high": round(today_high, 2),
+                    "today_low": round(today_low, 2),
+                    "pct_vs_open": round(pct_vs_open, 2),
+                    "high_from_open_pct": round(high_from_open, 2),
+                    "low_from_open_pct": round(low_from_open, 2),
+                    "severity": _classify_severity(pct_vs_open),
+                    "vol_ratio": round(vol_ratio, 2) if vol_ratio else None,
+                    "volume_state": _classify_volume(vol_ratio),
+                    "cross_market": cross_market,
+                })
+                sym_state["strong_alerted"] = True
+
+    state["weak_open"] = wo_state
     watchlist_store.save_monitor_state(state)
     return alerts
 
@@ -926,13 +1153,12 @@ def check_systemic_crash() -> Optional[Dict]:
                 **snap_full,
                 "trigger_type": trigger_type,
                 "trigger_value": round(trigger_value, 2),
-                "threshold_used": sym_intraday_threshold,  # SOX fix: 顯示用了哪個門檻
+                "threshold_used": sym_intraday_threshold,
             })
             sym_state["last_alert_at"] = now_utc.isoformat()
             sym_state["alerts_today"] = sym_state.get("alerts_today", 0) + 1
 
     if not triggers:
-        # 沒觸發 — 仍存回 state (跨日 reset 已套用)
         state["systemic_crash_alerts"] = crash_state
         watchlist_store.save_monitor_state(state)
         return None
@@ -953,7 +1179,6 @@ def check_systemic_crash() -> Optional[Dict]:
     except Exception:
         macro_news = None
 
-    # 算今天第幾次 (給文案用)
     new_total = sum(s.get("alerts_today", 0) for s in crash_state.values())
 
     state["systemic_crash_alerts"] = crash_state
@@ -1002,7 +1227,6 @@ def _fetch_index_today_open_and_current(symbol: str) -> Optional[Dict]:
     """抓今天開盤價跟即時價 (用 5m 線推今日開盤)."""
     df = ds.fetch_yf_history(symbol, period="2d", interval="5m")
     if df.empty:
-        # fallback to daily — 也要做 freshness check
         df_d = ds.fetch_yf_history(symbol, period="2d", interval="1d")
         if df_d.empty or len(df_d) < 1:
             return None
@@ -1013,7 +1237,7 @@ def _fetch_index_today_open_and_current(symbol: str) -> Optional[Dict]:
             latest_d = pd.to_datetime(df_d[date_col_d].iloc[-1]).date()
             sys_today = dt.date.today()
             if (sys_today - latest_d).days >= 1:
-                return None  # daily 也是 stale, 跳過
+                return None
             today_open = float(df_d["Open"].iloc[-1])
             today_close = float(df_d["Close"].iloc[-1])
             return {"open": today_open, "current": today_close}
@@ -1027,8 +1251,6 @@ def _fetch_index_today_open_and_current(symbol: str) -> Optional[Dict]:
     df["_d"] = df["_dt"].dt.date
     today = df["_d"].max()
 
-    # 防線: 抓到的最新日期跟系統 UTC 今日差超過 1 天 → 視為 stale data, 不處理
-    # (例: 韓國 5/1 休市但假日清單沒列, yfinance 返回 4/30 的 bars)
     sys_today = dt.date.today()
     if (sys_today - today).days >= 1:
         return None
@@ -1049,7 +1271,6 @@ def check_index_alerts() -> List[Dict]:
     state = watchlist_store.load_monitor_state()
     idx_state = state.setdefault("index_alerts", {})
 
-    # 假日檢查 (避免抓到前日 stale data 觸發假警報)
     closed_markets: set = set()
     try:
         import holiday_check
@@ -1064,11 +1285,8 @@ def check_index_alerts() -> List[Dict]:
 
     for sym, cfg in INDEX_CONFIG.items():
         country = cfg.get("country")
-        # 1) 該市場假日休市 → 跳過 (避免抓 stale data)
         if country in closed_markets:
             continue
-        # 2) 該市場非交易時段 → 跳過 (per-market 判斷)
-        #    TW/JP/KR 只在亞股交易時段監控, US 只在美股交易時段監控
         if not _is_market_in_session(country):
             continue
         info = _fetch_index_today_open_and_current(sym)
@@ -1076,35 +1294,25 @@ def check_index_alerts() -> List[Dict]:
             continue
         today_open = info["open"]
         current = info["current"]
-        diff = current - today_open  # 點數變化
+        diff = current - today_open
 
-        # 3 層 throttle 降低警報頻率:
-        # (1) ATR 動態門檻 — 高波動期自動拉高 (費半 ^SOX ATR 約 80-150 點, ×0.8 = 64-120 接近其靜態 100)
-        # (2) 時間 throttle — 兩次警報間至少 30 分鐘 (避免 5 分鐘內連環推)
-        # (3) 每日上限 — 每 index 一天最多 4 次警報 (避免一整天一直跳)
         threshold = cfg["threshold"]
-        # per-symbol fix: TWII 因高 ATR boost 把門檻拉到 240-300, 200-400 點波動全過濾掉
-        #                 → disable_atr_boost=True 改用固定門檻
         if not cfg.get("disable_atr_boost", False):
             try:
                 atr14 = _compute_atr(sym, period_days="2mo", n=14)
                 if atr14 is not None:
-                    # 原 0.3 太敏感 (TWII ATR 300×0.3=90 vs static 100), 改 0.8
-                    # 80% 標準差 = 一天典型大波段, 合理
                     dyn = atr14 * 0.8
-                    upper_cap = threshold * 3  # 門檻最多 3 倍 (極高波動期才會 hit)
+                    upper_cap = threshold * 3
                     if dyn > threshold:
                         threshold = round(min(dyn, upper_cap), 1)
             except Exception:
                 pass
 
-        # 取 bucket: -300, -150, 0, 150, 300, ...
         if diff >= 0:
             bucket = int(diff // threshold) * threshold
         else:
             bucket = -(int(-diff // threshold) * threshold)
 
-        # 跨日重置
         sym_state = idx_state.setdefault(sym, {})
         if sym_state.get("date") != today_str:
             sym_state.clear()
@@ -1114,38 +1322,32 @@ def check_index_alerts() -> List[Dict]:
             sym_state["last_alert_price"] = round(today_open, 2)
             sym_state["consecutive_count"] = 0
             sym_state["last_direction"] = "none"
-            sym_state["last_alert_at"] = None       # 新增: 上次警報時間
-            sym_state["alerts_today_count"] = 0     # 新增: 今日已警報次數
+            sym_state["last_alert_at"] = None
+            sym_state["alerts_today_count"] = 0
 
         last_bucket = sym_state.get("last_bucket", 0)
         if bucket != last_bucket and abs(bucket) >= threshold:
-            # 在 throttle 之前先算 direction (throttle skip 也要更新, 避免 stale 方向標籤)
             direction = "漲" if diff > 0 else "跌"
             last_direction = sym_state.get("last_direction", "none")
-            # 方向變了 → 不管有沒有 throttle, consecutive 都歸 1
             if direction != last_direction:
-                sym_state["consecutive_count"] = 0  # 暫存歸零, 下面 +1
+                sym_state["consecutive_count"] = 0
                 sym_state["last_direction"] = direction
 
-            # === Throttle layer 2: 時間間隔檢查 (兩次警報間至少 30 分鐘) ===
-            # 重要: skip 時不更新 last_bucket, 留給下個 tick 重評
             last_at = sym_state.get("last_alert_at")
             if last_at:
                 try:
                     last_dt = dt.datetime.fromisoformat(last_at)
                     elapsed = (dt.datetime.utcnow() - last_dt).total_seconds()
-                    if elapsed < 30 * 60:  # 30 分鐘
+                    if elapsed < 30 * 60:
                         continue
                 except Exception:
                     pass
 
-            # === Throttle layer 3: 每日上限 ===
             alerts_count = sym_state.get("alerts_today_count", 0)
             MAX_ALERTS_PER_DAY = 4
             if alerts_count >= MAX_ALERTS_PER_DAY:
                 continue
 
-            # 通過所有 throttle → 觸發警報, 累計 consecutive
             sym_state["consecutive_count"] = sym_state.get("consecutive_count", 0) + 1
             consecutive = sym_state["consecutive_count"]
 
@@ -1165,10 +1367,10 @@ def check_index_alerts() -> List[Dict]:
                 "leg_pts": leg_pts,
                 "direction": direction,
                 "threshold_bucket": bucket,
-                "threshold_used": threshold,  # 新增: 顯示實際用的 (ATR 動態)
+                "threshold_used": threshold,
                 "consecutive": consecutive,
                 "warning": consecutive >= 2,
-                "alerts_today": alerts_count + 1,  # 今日第 N 次
+                "alerts_today": alerts_count + 1,
             })
             sym_state["last_bucket"] = bucket
             sym_state["last_alert_diff"] = round(diff, 2)
@@ -1182,42 +1384,23 @@ def check_index_alerts() -> List[Dict]:
 
 
 # ---------------------------------------------------------------------------
-# 加密貨幣警報 (排程制 — 一天頂多 1 次)
+# 加密貨幣警報 (排程制)
 # ---------------------------------------------------------------------------
-# 排程時段 (UTC hour). 用 monitor cron (15) 在每 hour 的 minute 15 觸發.
-#   15:00 UTC = 23:00 台北 (晚上, BTC/ETH 簡短價變動提醒)
-#
-# 註: 原本 04:00 (noon) 已移除, 因為 04:00 UTC 已被 crypto_picks cron 用於推 5 檔 Top picks.
-#     兩個重疊會在 15 分鐘內推兩封訊息 (5 檔 picks + BTC/ETH 簡短價變動), 多餘.
 CRYPTO_SCHEDULE_UTC_HOURS = {
     15: "night",  # 台北 23:00
 }
 
 
 def check_crypto_alerts() -> List[Dict]:
-    """加密貨幣排程警報.
-
-    每 slot (台北 12:00 / 23:00) 最多 2 次:
-    - First push (minute 15): 固定發, 比對「上一個 slot 的最後一次推播」
-    - Second push (minute 45): 只在跟 first push 相比漲跌絕對值 >= threshold (2.5%)
-                                才發, 訊息標記為「盤中變動」
-
-    State 結構 (crypto_alerts[symbol]):
-      last_slot              — dedup key, 例 "2026-05-02_night"
-      first_alert_price      — 該 slot 第一次推播的價, 用來算 second push 是否觸發
-      first_alert_time       — 該 slot 第一次推播的時間
-      prev_alert_price       — 最近一次推播的價 (跨 slot, 給下個 slot 比對用)
-      prev_alert_time        — 最近一次推播的時間
-    """
+    """加密貨幣排程警報. 每 slot 最多 2 次 (first push 固定發, second push 變動 >= 2.5% 才發)."""
     now_utc = dt.datetime.utcnow()
     cur_hour = now_utc.hour
     cur_minute = now_utc.minute
 
-    # 不在排定 hour → 直接 return
     if cur_hour not in CRYPTO_SCHEDULE_UTC_HOURS:
         return []
 
-    is_first_tick = cur_minute < 30  # cron 15,45 → 第一個 tick 在前半小時
+    is_first_tick = cur_minute < 30
 
     slot_label = CRYPTO_SCHEDULE_UTC_HOURS[cur_hour]
     today_str = now_utc.strftime("%Y-%m-%d")
@@ -1236,7 +1419,6 @@ def check_crypto_alerts() -> List[Dict]:
     now_str = now_utc.strftime("%Y-%m-%d %H:%M UTC")
 
     for sym, cfg in CRYPTO_CONFIG.items():
-        # 抓即時價
         df = ds.fetch_yf_history(sym, period="2d", interval="1h")
         if df.empty:
             print(f"[crypto] {sym} no data, skip", flush=True)
@@ -1250,9 +1432,7 @@ def check_crypto_alerts() -> List[Dict]:
         already_first = (sid_state.get("last_slot") == slot_key)
         threshold = float(cfg.get("threshold_pct", 2.5))
 
-        # ===== Case A: 該 slot 還沒發過 first push =====
         if not already_first:
-            # 必發 — 比對上一個 slot 的 prev_alert_price (cross-slot)
             prev_price = sid_state.get("prev_alert_price")
             prev_time = sid_state.get("prev_alert_time", "")
             try:
@@ -1281,24 +1461,20 @@ def check_crypto_alerts() -> List[Dict]:
                 "change_abs": round(change_abs, 2),
                 "direction": direction,
                 "slot": slot_label,
-                "slot_label_zh": "晚上 23:00",  # 04:00 noon 已被 crypto_picks 取代, 只剩 night slot
+                "slot_label_zh": "晚上 23:00",
                 "is_first": is_first_global,
-                "alert_type": "scheduled",  # 固定排程推播
+                "alert_type": "scheduled",
             })
 
-            # 更新 state — 紀錄 first push 資訊 + cross-slot prev
             sid_state["last_slot"] = slot_key
             sid_state["first_alert_price"] = current
             sid_state["first_alert_time"] = now_str
             sid_state["prev_alert_price"] = current
             sid_state["prev_alert_time"] = now_str
-            print(f"[crypto] {sym} FIRST push: {prev_price} → {current} ({change_pct:+.2f}%)", flush=True)
+            print(f"[crypto] {sym} FIRST push: {prev_price} -> {current} ({change_pct:+.2f}%)", flush=True)
 
-        # ===== Case B: 該 slot 已發過 first push, 檢查是否要發 second =====
         else:
-            # second push 只在第二個 tick (minute >= 30) 評估
             if is_first_tick:
-                # 同 slot 同 tick 已發過 → skip
                 print(f"[crypto] {sym} already alerted for {slot_key} (first tick), skip", flush=True)
                 continue
 
