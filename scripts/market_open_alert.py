@@ -760,6 +760,25 @@ def main() -> int:
         except Exception as _e:
             print(f"[strong stock alert] check failed (non-fatal): {_e}", flush=True)
 
+        # === Q2: 盤中強勢族群推播 (per-day cap 1, 全域 60min cooldown) ===
+        strong_sector_alerts = []
+        try:
+            import strong_sector_alert as _ssec
+            strong_sector_alerts = _ssec.check_strong_sectors_intraday() or []
+            if strong_sector_alerts:
+                print(
+                    f"[strong sector] triggered {len(strong_sector_alerts)}: "
+                    + ", ".join(
+                        f"{a.get('sector_name')}({a.get('sector_type')})"
+                        for a in strong_sector_alerts
+                    ),
+                    flush=True,
+                )
+        except Exception as _e:
+            import traceback
+            print(f"[strong sector] check failed (non-fatal): {_e}", flush=True)
+            traceback.print_exc()
+
         # === 合併為 1 封 TG (取代之前 3 封獨立推播) ===
         # M2 fix: 包 try/except 避免 formatter / send_message 失敗讓 Phase 2 (watchlist/crypto) 中斷
         try:
@@ -791,6 +810,31 @@ def main() -> int:
         except Exception as _we:
             import traceback
             print(f"[weak/strong open] formatter/send 失敗 (non-fatal): {_we}", flush=True)
+            traceback.print_exc()
+
+        # Q2: 強勢族群 — 獨立 1 封 TG (per-day cap 1/族群, 全域 60min cooldown)
+        # HIGH fix: 只有 send 成功才 mark_sectors_sent (state 寫入), 失敗下次重試
+        try:
+            if strong_sector_alerts:
+                sector_msg = notifier.fmt_strong_sector_alerts(strong_sector_alerts)
+                if sector_msg:
+                    print(f"[strong sector] sending TG ({len(sector_msg)} chars)", flush=True)
+                    ok_s, info_s = notifier.send_message(sector_msg)
+                    print(f"[strong sector] TG result: ok={ok_s} info={info_s}", flush=True)
+                    if ok_s:
+                        try:
+                            import strong_sector_alert as _ssec_mark
+                            _ssec_mark.mark_sectors_sent(strong_sector_alerts)
+                            print(
+                                f"[strong sector] state updated: "
+                                f"{len(strong_sector_alerts)} 族群 marked sent",
+                                flush=True,
+                            )
+                        except Exception as _me:
+                            print(f"[strong sector] mark_sectors_sent failed: {_me}", flush=True)
+        except Exception as _se:
+            import traceback
+            print(f"[strong sector] formatter/send 失敗 (non-fatal): {_se}", flush=True)
             traceback.print_exc()
 
         try:

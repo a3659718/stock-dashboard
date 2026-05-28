@@ -2126,6 +2126,84 @@ def fmt_weak_open_alerts(alerts: list) -> str:
     return _truncate_tg_msg("\n".join(lines).rstrip())
 
 
+def fmt_strong_sector_alerts(alerts: list) -> str:
+    """盤中強勢族群推播 (strong_sector_alert.check_strong_sectors_intraday 用).
+
+    alerts: list of {sector_type, sector_name, avg_pct, up_ratio, n_stocks, leaders, severity}
+    """
+    if not alerts:
+        return ""
+
+    # 整體 severity 取最強
+    top_sev = "medium"
+    if any(a.get("severity") == "strong" for a in alerts):
+        top_sev = "strong"
+    badge = "🔴 強勢" if top_sev == "strong" else "🟠 中度"
+
+    lines = [f"<b>🚀 盤中強勢族群 — {badge}</b>", ""]
+
+    # 分組顯示: 證交所產業 / 熱門題材
+    by_type = {"industry": [], "theme": []}
+    for a in alerts:
+        by_type.setdefault(a.get("sector_type", "industry"), []).append(a)
+
+    section_titles = {
+        "industry": "📊 證交所產業 (資金流入)",
+        "theme": "🔥 熱門題材 (動能領先)",
+    }
+
+    for sec_type, title in section_titles.items():
+        items = by_type.get(sec_type) or []
+        if not items:
+            continue
+        lines.append(f"<b>{title}</b>")
+        for a in items:
+            name = _esc(a.get("sector_name", ""))
+            try:
+                avg = float(a.get("avg_pct", 0) or 0)
+                up_ratio = float(a.get("up_ratio", 0) or 0)
+                n = int(a.get("n_stocks", 0) or 0)
+            except (TypeError, ValueError):
+                avg = up_ratio = 0.0
+                n = 0
+            # MED fix: up_ratio 預期 0-1 scale. 若 caller 誤傳 0-100, 自動 normalize.
+            if up_ratio > 1.0:
+                up_ratio = up_ratio / 100.0
+            sev_badge = "🔴" if a.get("severity") == "strong" else "🟠"
+            # 主行
+            lines.append(
+                f"{sev_badge} <b>{name}</b>  "
+                f"均漲 <b>+{avg:.2f}%</b>  "
+                f"上漲 {up_ratio * 100:.0f}% ({int(up_ratio * n)}/{n})"
+            )
+            # 龍頭 3 檔
+            leaders = a.get("leaders") or []
+            if leaders:
+                parts = []
+                for ld in leaders[:3]:
+                    sid = _esc(ld.get("stock_id", ""))
+                    lname = _esc(ld.get("name", ""))
+                    try:
+                        tp = float(ld.get("today_pct", 0) or 0)
+                        vr = float(ld.get("vol_ratio", 0) or 0)
+                    except (TypeError, ValueError):
+                        tp = vr = 0.0
+                    vol_tag = " 量增" if vr >= 1.3 else ""
+                    parts.append(
+                        f"<code>{sid}</code> {lname} <b>{tp:+.2f}%</b>{vol_tag}"
+                    )
+                lines.append("  龍頭: " + " / ".join(parts))
+            # 操作建議
+            if a.get("severity") == "strong":
+                lines.append("  💡 建議: 多檔齊漲且量增, 留意龍頭股拉回買點")
+            else:
+                lines.append("  💡 建議: 族群轉強, 觀察龍頭續攻力道")
+        lines.append("")
+
+    lines.append("<i>※ 資金流向動態訊號, 非進出建議. 請自行控管風險.</i>")
+    return _truncate_tg_msg("\n".join(lines).rstrip())
+
+
 def fmt_active_etf_change(diff: dict) -> str:
     """主動式 ETF 持股變動推播 (供 active_etf_monitor 使用).
 
@@ -2785,7 +2863,6 @@ def fmt_fear_greed_alert(fg: dict, threshold_low: int = 25, threshold_high: int 
                 f"CNN F&amp;G Index: <b>{s:.0f}</b> ({rating})\n"
                 "歷史經驗為短期回檔風險偏高訊號，建議分批減碼或停利。")
     return None
-
 
 
 def fmt_tw_pulse_alert(pulse: dict, threshold_low: int = 25, threshold_high: int = 75) -> Optional[str]:
