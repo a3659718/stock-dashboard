@@ -173,6 +173,21 @@ def compute_strong_sectors(top_n: int = 200) -> dict:
             leaders["催化劑"] = leaders["stock_id"].astype(str).map(cat_map).fillna("")
         except Exception as _e:
             print(f"[sector_pulse] strong_sectors annotate catalyst failed: {_e}", flush=True)
+        # C: 對 leaders 批次跑 quick entry 評估, 加 入場標籤 + 入場分數
+        try:
+            import entry_label_helper as _el
+            sym_list = leaders["stock_id"].astype(str).tolist()
+            pairs = [(s, "TW") for s in sym_list]
+            eval_map = _el.batch_evaluate(pairs, max_workers=8)
+            leaders["入場標籤"] = leaders["stock_id"].astype(str).map(
+                lambda s: ((eval_map.get(s) or {}).get("entry_emoji", "") + " " +
+                           (eval_map.get(s) or {}).get("entry_label", "—")).strip()
+            )
+            leaders["入場分數"] = leaders["stock_id"].astype(str).map(
+                lambda s: (eval_map.get(s) or {}).get("entry_score")
+            )
+        except Exception as _e:
+            print(f"[sector_pulse] strong_sectors entry_label failed: {_e}", flush=True)
 
     return {"sectors": sect, "stocks": merged, "leaders": leaders}
 
@@ -257,6 +272,30 @@ def compute_hot_themes() -> dict:
     except Exception:
         pass
 
+    # C: 對 themes leaders 加 入場標籤
+    try:
+        import entry_label_helper as _el
+        all_syms = set()
+        for theme, df in leaders.items():
+            if df is not None and not df.empty:
+                all_syms.update(df["stock_id"].astype(str).tolist())
+        if all_syms:
+            pairs = [(s, "TW") for s in all_syms]
+            eval_map = _el.batch_evaluate(pairs, max_workers=8)
+            for theme, df in leaders.items():
+                if df is None or df.empty:
+                    continue
+                df["入場標籤"] = df["stock_id"].astype(str).map(
+                    lambda s: ((eval_map.get(s) or {}).get("entry_emoji", "") + " " +
+                               (eval_map.get(s) or {}).get("entry_label", "—")).strip()
+                )
+                df["入場分數"] = df["stock_id"].astype(str).map(
+                    lambda s: (eval_map.get(s) or {}).get("entry_score")
+                )
+                leaders[theme] = df
+    except Exception as _e:
+        print(f"[sector_pulse] hot_themes entry_label failed: {_e}", flush=True)
+
     return {"themes": themes, "leaders": leaders}
 
 
@@ -286,52 +325,37 @@ def find_stealth_followers(top_themes: int = 5) -> dict:
     for theme in top_theme_names:
         df = leaders_map.get(theme)
         if df is None or df.empty:
-            # leaders 只有前 5 名；用全題材池抓
             stock_ids = TW_THEMES.get(theme, [])
-            info = ds.get_taiwan_stock_info()
+            if not stock_ids:
+                continue
+            try:
+                info = ds.get_taiwan_stock_info()
+            except Exception:
+                info = None
+            if info is None or info.empty:
+                continue
             market_map = info.set_index("stock_id")["type"].to_dict()
-            full = fetch_intraday_metrics(stock_ids, market_map)
-            full["題材"] = theme
-            pool.append(full)
-        else:
-            x = df.copy()
-            x["題材"] = theme
-            pool.append(x)
+            name_map = info.set_index("stock_id")["stock_name"].to_dict() \
+                if "stock_name" in info.columns else {}
+            quotes = fetch_intraday_metrics(stock_ids, market_map)
+            if quotes.empty:
+                continue
+            quotes["stock_name"] = quotes["stock_id"].map(name_map).fillna("")
+            quotes["題材"] = theme
+            df = quotes
+        df = df.copy()
+        df["題材"] = theme
+        pool.append(df)
+
     if not pool:
-        return {"hot_themes": themes_df.head(top_themes), "stealth": pd.DataFrame()}
+        return {"stealth": pd.DataFrame(), "hot_themes": themes_df.head(top_themes)}
 
     all_df = pd.concat(pool, ignore_index=True)
-    if all_df.empty or "今日%" not in all_df.columns:
-        return {"hot_themes": themes_df.head(top_themes), "stealth": pd.DataFrame()}
-
+    # 條件: 今日 ≤ +2% + 量比 ≥ 1.5 + 5 日 ≤ +5% (潛伏: 量先動、股還沒動)
     cond = (
-        (all_df["5日%"].fillna(99) < 8)
-        & (all_df["今日%"].fillna(-99) > 0)
-        & (all_df["量比"].fillna(0) >= 1.3)
+        (all_df["今日%"].fillna(0) <= 2)
+        & (all_df["量比"].fillna(0) >= 1.5)
+        & (all_df["5日%"].fillna(0) <= 5)
     )
-    stealth = all_df[cond].copy()
-    if stealth.empty:
-        return {"hot_themes": themes_df.head(top_themes), "stealth": pd.DataFrame()}
-
-    # 排序：量比優先，再看當天漲幅
-    stealth = stealth.sort_values(["量比", "今日%"], ascending=False).reset_index(drop=True)
-    if "stock_name" not in stealth.columns:
-        info = ds.get_taiwan_stock_info()
-        nm = info.set_index("stock_id")["stock_name"].to_dict() if "stock_name" in info.columns else {}
-        stealth["stock_name"] = stealth["stock_id"].map(nm).fillna("")
-
-    cols = ["stock_id", "stock_name", "題材", "現價", "今日%", "5日%", "量比", "振幅%"]
-    cols = [c for c in cols if c in stealth.columns]
-    stealth_top = stealth[cols].head(20).copy()
-
-    # 補催化劑
-    try:
-        import stock_catalyst
-        cat_map = stock_catalyst.annotate_picks_with_catalysts(
-            stealth_top.to_dict("records"), market="TW",
-        )
-        stealth_top["催化劑"] = stealth_top["stock_id"].astype(str).map(cat_map).fillna("")
-    except Exception:
-        pass
-
-    return {"hot_themes": themes_df.head(top_themes), "stealth": stealth_top}
+    stealth = all_df[cond].sort_values("量比", ascending=False).head(15).reset_index(drop=True)
+    return {"stealth": stealth, "hot_themes": themes_df.head(top_themes)}

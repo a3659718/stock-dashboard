@@ -221,9 +221,30 @@ def check_strong_sectors_intraday() -> List[Dict]:
         else:
             c["severity"] = "medium"
 
+    # === 5.5) 給 leaders 加 entry_label (推播裡顯示「該檔現在能不能進」) ===
+    try:
+        import entry_label_helper as _el
+        all_leader_syms = []
+        for c in selected:
+            for ld in c.get("leaders") or []:
+                sid = str(ld.get("stock_id", ""))
+                if sid:
+                    all_leader_syms.append(sid)
+        if all_leader_syms:
+            pairs = [(s, "TW") for s in set(all_leader_syms)]
+            eval_map = _el.batch_evaluate(pairs, max_workers=8)
+            for c in selected:
+                for ld in c.get("leaders") or []:
+                    sid = str(ld.get("stock_id", ""))
+                    ev = eval_map.get(sid) or {}
+                    ld["entry_label"] = ev.get("entry_label", "—")
+                    ld["entry_emoji"] = ev.get("entry_emoji", "")
+                    ld["entry_score"] = ev.get("entry_score")
+    except Exception as _e:
+        print(f"[strong_sector] entry_label 計算失敗 (non-fatal): {_e}", flush=True)
+
     # HIGH fix: 不在這裡寫 state. 由 caller (market_open_alert) 在 send_message
-    # 成功後呼叫 mark_sectors_sent() 才寫. 對齊 strong_stock_alert pattern,
-    # 避免 send 失敗時整天靜默 (sectors_alerted 已標記但訊息其實沒送出).
+    # 成功後呼叫 mark_sectors_sent() 才寫.
     return selected
 
 
@@ -243,14 +264,9 @@ def mark_sectors_sent(alerts: List[Dict]) -> None:
         state = watchlist_store.load_monitor_state()
         ssa_state = state.setdefault("strong_sector_alert", {})
         today_str = dt.date.today().strftime("%Y-%m-%d")
-        # 跨日防呆 (極端 case: detection 跟 mark_sent 跨午夜)
         if ssa_state.get("date") != today_str:
             ssa_state.clear()
-            ssa_state.update({
-                "date": today_str,
-                "sectors_alerted": [],
-                "last_batch_at": None,
-            })
+            ssa_state.update({"date": today_str, "sectors_alerted": [], "last_batch_at": None})
         sectors_alerted = set(ssa_state.get("sectors_alerted") or [])
         for a in alerts:
             sectors_alerted.add(_dedup_key(a))

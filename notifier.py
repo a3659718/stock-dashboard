@@ -2015,9 +2015,12 @@ def fmt_intraday_reversal_alerts(alerts: list) -> str:
                     except (TypeError, ValueError):
                         cp = cdd = cvr = 0.0
                     vol_tag = " 量增" if cvr >= 1.3 else ""
+                    el_emoji = c.get("entry_emoji", "")
+                    el_label = c.get("entry_label", "")
+                    el_tag = f" {el_emoji}{_esc(el_label)}" if el_label and el_label != "—" else ""
                     lines.append(
                         f"    <code>{cid}</code> {cname} "
-                        f"<b>{cp:+.2f}%</b> (高點回吐 {cdd:.2f}%){vol_tag}"
+                        f"<b>{cp:+.2f}%</b> (高點回吐 {cdd:.2f}%){vol_tag}{el_tag}"
                     )
             lines.append("")
 
@@ -2216,15 +2219,25 @@ def fmt_holdings_intraday_alerts(alerts: list) -> str:
         except (TypeError, ValueError):
             cur = tp = dd = 0.0
         sev_emoji = "🔴" if a.get("severity") == "severe" else "🟠"
+        # 入場標籤一起顯示
+        el_emoji = a.get("entry_emoji", "")
+        el_label = a.get("entry_label", "")
+        el_tag = f"  {el_emoji} {_esc(el_label)}" if el_label and el_label != "—" else ""
         lines.append(
             f"{sev_emoji} [{market}] <code>{sid}</code> {name} {cur:,.2f}  "
-            f"<b>{tp:+.2f}%</b>"
+            f"<b>{tp:+.2f}%</b>{el_tag}"
         )
         # 觸發理由 (來自 check 模組)
         for t in (a.get("triggers") or [])[:3]:
             lines.append(f"  • {_esc(t)}")
-        # 操作建議
-        if a.get("severity") == "severe":
+        # 操作建議 (優先用 entry_action, fallback 用 severity 預設)
+        entry_action = a.get("entry_action")
+        if entry_action and entry_action not in ("—", "持平觀望"):
+            lines.append(
+                f"  💡 持倉建議: {_esc(entry_action)} "
+                f"(系統評分 {a.get('entry_score', '—')}/100)"
+            )
+        elif a.get("severity") == "severe":
             lines.append("  💡 持倉建議: 嚴重訊號, 建議立即減碼 1/2 或設緊停損")
         else:
             lines.append("  💡 持倉建議: 留意是否止穩, 考慮減碼 1/3")
@@ -2297,8 +2310,12 @@ def fmt_strong_sector_alerts(alerts: list) -> str:
                     except (TypeError, ValueError):
                         tp = vr = 0.0
                     vol_tag = " 量增" if vr >= 1.3 else ""
+                    # 入場標籤 (該檔當下能不能進)
+                    el_emoji = ld.get("entry_emoji", "")
+                    el_label = ld.get("entry_label", "")
+                    el_tag = f" {el_emoji}{_esc(el_label)}" if el_label and el_label != "—" else ""
                     parts.append(
-                        f"<code>{sid}</code> {lname} <b>{tp:+.2f}%</b>{vol_tag}"
+                        f"<code>{sid}</code> {lname} <b>{tp:+.2f}%</b>{vol_tag}{el_tag}"
                     )
                 lines.append("  龍頭: " + " / ".join(parts))
             # 操作建議

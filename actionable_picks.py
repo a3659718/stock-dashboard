@@ -325,6 +325,24 @@ def compute_actionable_picks(top_n: int = 5, market: str = "TW",
     # attach regime 給第一筆 (caller render banner 用)
     if result and regime:
         result[0]["_regime"] = regime
+
+    # 對 result 加 entry_label (對應 US Top 10 / 強勢族群 leaders 同樣標籤)
+    try:
+        import entry_label_helper as _el
+        syms = [str(p.get("stock_id", "")) for p in result if p.get("stock_id")]
+        pairs = [(s, "TW") for s in syms]
+        if pairs:
+            eval_map = _el.batch_evaluate(pairs, max_workers=8)
+            for p in result:
+                sid = str(p.get("stock_id", ""))
+                ev = eval_map.get(sid) or {}
+                p["entry_label"] = ev.get("entry_label", "—")
+                p["entry_emoji"] = ev.get("entry_emoji", "")
+                p["entry_score"] = ev.get("entry_score")
+                p["entry_action"] = ev.get("entry_action", "—")
+    except Exception as _e:
+        print(f"[actionable] entry_label 計算失敗 (non-fatal): {_e}", flush=True)
+
     return result
 
 
@@ -626,22 +644,16 @@ def fmt_actionable_picks_tg(picks: List[Dict]) -> str:
         eh = p.get("entry_high")
         if cur is not None and el and eh:
             lines.append(f"   現價 {_esc(cur)} · 進場 {_esc(el)}~{_esc(eh)}")
-        if p.get("target") and p.get("stop"):
-            lines.append(f"   目標 {_esc(p['target'])} · 停損 {_esc(p['stop'])}")
-        for r in p.get("reasons", [])[:3]:
-            lines.append(f"   ✓ {_esc(r)}")
-        for w in p.get("warnings", [])[:2]:
-            lines.append(f"   ⚠ {_esc(w)}")
-        pos = p.get("position") or {}
-        if pos and pos.get("shares", 0) > 0:
-            try:
-                import position_sizer
-                advice = position_sizer.fmt_position_advice(pos, market="TW")
-                if advice:
-                    if pos.get("regime_adjusted"):
-                        advice += " (regime 已自動降部位)"
-                    lines.append(f"   💰 {_esc(advice)}")
-            except Exception:
-                pass
-        lines.append("")
-    return "\n".join(lines).rstrip()
+        if p.get("target"):
+            lines.append(f"   目標 {_esc(p['target'])} · 停損 {_esc(p.get('stop','—'))}")
+        if p.get("win_prob"):
+            lines.append(f"   勝率 {_esc(p['win_prob'])} · 持有 {_esc(p.get('hold_period','—'))}")
+        if p.get("entry_label"):
+            lines.append(f"   {p.get('entry_emoji','')} 入場標籤: {p.get('entry_label')} (分數 {p.get('entry_score','—')})")
+        reasons = p.get("reasons") or []
+        for r in reasons[:3]:
+            lines.append(f"   • {_esc(r)}")
+        warnings = p.get("warnings") or []
+        for w in warnings[:2]:
+            lines.append(f"   ⚠️ {_esc(w)}")
+    return "\n".join(lines)

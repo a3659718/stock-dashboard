@@ -276,6 +276,22 @@ def run_us_recommendation(top_n: int = 5, dedup_correlated: bool = True) -> dict
     except Exception:
         pass
 
+    # C: 對 top_picks 加 quick entry 評估 (入場標籤)
+    try:
+        import entry_label_helper as _el
+        syms = top_df["symbol"].astype(str).tolist()
+        pairs = [(s, "US") for s in syms]
+        eval_map = _el.batch_evaluate(pairs, max_workers=8)
+        top_df["入場標籤"] = top_df["symbol"].astype(str).map(
+            lambda s: ((eval_map.get(s) or {}).get("entry_emoji", "") + " " +
+                       (eval_map.get(s) or {}).get("entry_label", "—")).strip()
+        )
+        top_df["入場分數"] = top_df["symbol"].astype(str).map(
+            lambda s: (eval_map.get(s) or {}).get("entry_score")
+        )
+    except Exception as _e:
+        print(f"[us_screener] entry_label 計算失敗 (non-fatal): {_e}", flush=True)
+
     return {
         "top_picks": top_df,
         "all_scored": df_all,

@@ -212,6 +212,21 @@ def check_holdings_intraday_risk() -> List[Dict]:
     stocks_alerted = set(hi_state.get("stocks_alerted") or [])
     fresh = [a for a in alerts if a["stock_id"] not in stocks_alerted]
 
+    # 給每檔 alert 加 entry_label (推播裡顯示「該檔現在減碼/出場/加碼」)
+    if fresh:
+        try:
+            import entry_label_helper as _el
+            pairs = [(a["stock_id"], a.get("market", "TW")) for a in fresh]
+            eval_map = _el.batch_evaluate(pairs, max_workers=8)
+            for a in fresh:
+                ev = eval_map.get(a["stock_id"]) or {}
+                a["entry_label"] = ev.get("entry_label", "—")
+                a["entry_emoji"] = ev.get("entry_emoji", "")
+                a["entry_score"] = ev.get("entry_score")
+                a["entry_action"] = ev.get("entry_action", "—")
+        except Exception as _e:
+            print(f"[holdings_intraday] entry_label 失敗 (non-fatal): {_e}", flush=True)
+
     return fresh
 
 

@@ -450,7 +450,23 @@ def _scan_companion_weak_stocks_tw(top_n: int = 5, max_workers: int = 8) -> List
                 r["name"] = name_map.get(str(r.get("stock_id", "")), "")
     except Exception:
         pass
-    return results[:top_n]
+    top_results = results[:top_n]
+    # 給 top results 加 entry_label (推播裡顯示「哪檔該減碼/出場」)
+    try:
+        import entry_label_helper as _el
+        pairs = [(str(r.get("stock_id", "")), "TW") for r in top_results
+                 if r.get("stock_id")]
+        if pairs:
+            eval_map = _el.batch_evaluate(pairs, max_workers=8)
+            for r in top_results:
+                sid = str(r.get("stock_id", ""))
+                ev = eval_map.get(sid) or {}
+                r["entry_label"] = ev.get("entry_label", "—")
+                r["entry_emoji"] = ev.get("entry_emoji", "")
+                r["entry_score"] = ev.get("entry_score")
+    except Exception as _e:
+        print(f"[companion] entry_label 失敗 (non-fatal): {_e}", flush=True)
+    return top_results
 
 
 # M3: companion scan 結果 cache (避免同 tick / 短時間多次 drawdown 重複掃 40+ 檔)

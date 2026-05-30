@@ -423,7 +423,8 @@ def _cached_us_upside_screen(universe_tuple: tuple, max_workers: int,
 def run_us_upside_screen(top_n_per_category: int = 5,
                           universe: Optional[List[str]] = None,
                           max_workers: int = 5, use_cache: bool = True,
-                          with_themes: bool = True) -> Dict:
+                          with_themes: bool = True,
+                          with_entry_label: bool = True) -> Dict:
     syms = universe if universe else DEFAULT_US_UNIVERSE
     syms = list(dict.fromkeys(syms))
     if use_cache:
@@ -432,6 +433,30 @@ def run_us_upside_screen(top_n_per_category: int = 5,
         full = _run_impl(syms, max_workers, with_themes=with_themes)
     for k in ("breakout", "acceleration", "squeeze_setup", "revival_setup", "narrative_leader"):
         full[k] = full.get(k, [])[:top_n_per_category]
+
+    # B: 對所有 picks 批次跑 quick entry 評估, 加 entry_label/emoji/score/action
+    if with_entry_label:
+        try:
+            import entry_label_helper as _el
+            all_syms = set()
+            for k in ("breakout", "acceleration", "squeeze_setup", "revival_setup", "narrative_leader"):
+                for p in full.get(k, []):
+                    s = p.get("symbol")
+                    if s:
+                        all_syms.add(s)
+            if all_syms:
+                pairs = [(s, "US") for s in all_syms]
+                eval_map = _el.batch_evaluate(pairs, max_workers=max_workers)
+                for k in ("breakout", "acceleration", "squeeze_setup", "revival_setup", "narrative_leader"):
+                    for p in full.get(k, []):
+                        s = p.get("symbol")
+                        ev = eval_map.get(s) or {}
+                        p["entry_label"] = ev.get("entry_label", "—")
+                        p["entry_emoji"] = ev.get("entry_emoji", "")
+                        p["entry_score"] = ev.get("entry_score")
+                        p["entry_action"] = ev.get("entry_action", "—")
+        except Exception as _e:
+            print(f"[us_upside] entry_label 計算失敗 (non-fatal): {_e}", flush=True)
     return full
 
 
@@ -571,19 +596,9 @@ def fmt_summary_md(result: Dict, per_category: int = 5) -> str:
             continue
         for i, p in enumerate(picks, 1):
             lv = p.get("levels") or {}
-            lines.append("\n**" + str(i) + ". " + p["symbol"] + "** · 分數 " + str(p["score"]) + " · 空間 ~" + str(p["upside_pct"]) + "%")
-            lines.append("- 現價 $" + str(p["current"]) + " · 進 $" + str(lv.get("entry_low")) + "~$" + str(lv.get("entry_high")) + " · 短線目標 $" + str(lv.get("target")) + " · 停損 $" + str(lv.get("stop")))
-            if lv.get("target_fib_162") or lv.get("target_measured_move"):
-                mid_parts = []
-                if lv.get("target_fib_162"): mid_parts.append("Fib1.6 $" + str(lv["target_fib_162"]))
-                if lv.get("target_fib_262"): mid_parts.append("Fib2.6 $" + str(lv["target_fib_262"]))
-                if lv.get("target_measured_move"): mid_parts.append("MM $" + str(lv["target_measured_move"]))
-                lines.append("- 中線目標: " + " · ".join(mid_parts))
-            if lv.get("target_fundamental_3m"):
-                lines.append("- 長線 (Gemini): 3m $" + str(lv["target_fundamental_3m"]) + " · 6m $" + str(lv.get("target_fundamental_6m", 0)) + " · 信心 " + str(lv.get("fundamental_confidence", 0)))
-            for r in p.get("reasons", [])[:4]:
-                lines.append("  - ✓ " + r)
-            for w in p.get("warnings", [])[:2]:
-                lines.append("  - ⚠ " + w)
-    lines.append("\n_※ 本清單為演算法產出, 不構成投資建議_")
+            lines.append("\n**" + str(i) + ". " + p["symbol"] + "** · 分數 " + str(p.get("score", "—")))
+            lines.append("- 現價: " + str(p.get("price", "—")))
+            if lv:
+                lines.append("- 目標: " + str(lv))
+        lines.append("")
     return "\n".join(lines)

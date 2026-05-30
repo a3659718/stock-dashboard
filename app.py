@@ -628,12 +628,18 @@ with tab_actionable:
                 with st.container(border=True):
                     cH1, cH2 = st.columns([3, 1])
                     with cH1:
+                        # 加入場標籤 emoji 一起顯示
+                        entry_emoji = p.get("entry_emoji", "")
+                        entry_label = p.get("entry_label", "")
+                        label_str = f" · {entry_emoji} {entry_label}" if entry_label and entry_label != "—" else ""
                         st.markdown(
                             f"### {i}. `{p.get('stock_id')}` {p.get('name', '')} "
-                            f"{score_color}"
+                            f"{score_color}{label_str}"
                         )
                         if p.get("theme"):
                             st.caption(f"族群: {p.get('theme')} · R:R {rr} {rr_emoji} · 綜合分數 {score}")
+                        if p.get("entry_score") is not None:
+                            st.caption(f"入場評分 {p['entry_score']}/100 → {p.get('entry_action', '—')}")
                     with cH2:
                         if p.get("current") is not None:
                             st.metric("現價", f"{p['current']}")
