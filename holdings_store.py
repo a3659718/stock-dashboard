@@ -43,6 +43,11 @@ def _normalize(d: Dict) -> Dict:
         "shares": d.get("shares"),
         "note": str(d.get("note", "")).strip(),
         "added_date": str(d.get("added_date", "")).strip(),
+        # HIGH-C1 fix: 保留 market + stop_price 給 holdings_intraday_alert 用
+        # market: 沒設則用 stock_id 自動判 (4-5 碼數字 → TW, 否則 US)
+        "market": (str(d.get("market", "")).strip().upper() or
+                   ("TW" if str(d.get("stock_id", "")).strip().isdigit() else "US")),
+        "stop_price": d.get("stop_price"),
     }
     try:
         out["entry_price"] = float(out["entry_price"]) if out["entry_price"] not in (None, "", 0, 0.0) else None
@@ -52,6 +57,10 @@ def _normalize(d: Dict) -> Dict:
         out["shares"] = int(out["shares"]) if out["shares"] not in (None, "", 0, 0.0) else None
     except Exception:
         out["shares"] = None
+    try:
+        out["stop_price"] = float(out["stop_price"]) if out["stop_price"] not in (None, "", 0, 0.0) else None
+    except Exception:
+        out["stop_price"] = None
     return out
 
 
@@ -121,20 +130,20 @@ def add_holding(stock_id: str, name: str = "", entry_price: Optional[float] = No
     if not found:
         if len(items) >= MAX_HOLDINGS:
             return False
-        items.append({
+        new = {
             "stock_id": sid,
             "name": name,
             "entry_price": entry_price,
             "shares": shares,
             "note": note,
-            "added_date": dt.date.today().strftime("%Y-%m-%d"),
-        })
+            "added_date": dt.date.today().isoformat(),
+        }
+        items.append(new)
     return save_holdings(items)
 
 
 def remove_holding(stock_id: str) -> bool:
-    items = load_holdings()
     sid = str(stock_id).strip().upper()
-    items = [i for i in items if str(i.get("stock_id", "")).upper() != sid]
-    save_holdings(items)
-    return True
+    items = load_holdings()
+    items = [x for x in items if x.get("stock_id") != sid]
+    return save_holdings(items)

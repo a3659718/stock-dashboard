@@ -513,12 +513,25 @@ watchlist = parse_watchlist(watchlist_raw)
 # ---------------------------------------------------------------------------
 # Tabs
 # ---------------------------------------------------------------------------
-(tab_wl, tab_actionable, tab_hold, tab_tw, tab_pulse, tab_growth, tab_stock,
- tab_us, tab_crypto, tab_mood, tab_bt, tab_track) = st.tabs(
+# 外層 10 個 tab (個股+入場合一個 outer, 回測+追蹤合一個 outer)
+(tab_wl, tab_actionable, tab_hold, tab_tw, tab_pulse, tab_growth,
+ _tab_stock_outer, tab_us, tab_mood, _tab_bt_outer) = st.tabs(
     ["📋 自選股", "🎯 今日可行動", "💼 持倉分析", "🇹🇼 台股篩選", "🚀 強勢族群",
-     "🌱 成長動能", "🔍 個股分析", "🇺🇸 美股 Top 10", "🪙 加密貨幣", "🧭 市場情緒",
-     "📊 回測勝率", "📈 推薦追蹤"]
+     "🌱 成長動能", "🔍 個股 (分析+入場)", "🇺🇸 美股 Top 10", "🧭 市場情緒",
+     "📊 策略驗證 (回測+追蹤)"]
 )
+
+# Sub-tabs: 個股 outer 內含 2 個 (入場評估 / 深度分析)
+with _tab_stock_outer:
+    _inner_s = st.tabs(["⚡ 入場評估 (快, 30s)", "📊 深度分析 (Gemini 完整, 10-20s)"])
+    tab_entry = _inner_s[0]
+    tab_stock = _inner_s[1]
+
+# Sub-tabs: 策略驗證 outer 內含 2 個 (回測 / 追蹤)
+with _tab_bt_outer:
+    _inner_b = st.tabs(["📈 回測勝率", "📋 推薦追蹤"])
+    tab_bt = _inner_b[0]
+    tab_track = _inner_b[1]
 
 
 # =============================================================================
@@ -1285,7 +1298,8 @@ with tab_tw:
                 pass
             if dt.date.today().weekday() >= 5:
                 _is_tw_closed = True
-            if not _is_tw_closed:
+            # 用戶選關: F&G + 台股情緒極值警報 TG 推播 (dashboard 仍會顯示)
+            if False and not _is_tw_closed:
                 alert = notifier.fmt_tw_pulse_alert(tw_pulse)
                 if alert:
                     today_key = dt.date.today().isoformat()
@@ -2561,31 +2575,19 @@ with tab_mood:
         else:
             st.info("尚未取得 CNN 資料")
 
-    # 美股 F&G 異常觸發 (每天最多一次，跨 session 共享)
+    # 美股 F&G 異常觸發 — 用戶選關 TG 推播 (dashboard 仍會顯示 st.warning)
     if fg and fg.get("score") is not None:
         alert_msg = notifier.fmt_fear_greed_alert(fg)
         if alert_msg:
             st.warning(alert_msg, icon="⚠️")
-            if auto_send_on_alert and notifier.is_configured():
-                today_key = dt.date.today().isoformat()
-                s_us = float(fg["score"])
-                direction = "low" if s_us <= 25 else "high"
-                dedup_key = f"us_fg_{today_key}_{direction}"
-                if _should_send_once(dedup_key):
-                    notifier.send_message(alert_msg)
+            # TG 推播已關閉 (用戶選: 心理指標, 組訊息量低)
 
-    # 台股 F&G 異常觸發 (跟美股對稱: 自動推播 + 跨日去重)
+    # 台股 F&G 異常 — 用戶選關 TG 推播 (dashboard 仍會顯示 st.warning)
     if tw_pulse and tw_pulse.get("score") is not None:
         tw_alert = notifier.fmt_tw_pulse_alert(tw_pulse)
         if tw_alert:
             st.warning(tw_alert, icon="⚠️")
-            if auto_send_on_alert and notifier.is_configured():
-                today_key = dt.date.today().isoformat()
-                s_tw = float(tw_pulse["score"])
-                direction = "low" if s_tw <= 25 else "high"
-                dedup_key = f"tw_pulse_{today_key}_{direction}"
-                if _should_send_once(dedup_key):
-                    notifier.send_message(tw_alert)
+            # TG 推播已關閉 (用戶選: 心理指標, 組訊息量低)
 
     if sectors_us is not None and not sectors_us.empty:
         st.markdown("#### S&P SPDR 板塊輪動 (5 日 %)")
@@ -2812,3 +2814,150 @@ with tab_track:
                             st.metric("追蹤檔數", f"{len(valid)}")
         except Exception as e:
             st.error(f"追蹤計算失敗: {type(e).__name__}: {e}")
+
+
+# =============================================================================
+# Tab — 入場評估 (C: 新)
+# =============================================================================
+with tab_entry:
+    st.subheader("🎯 個股入場評估")
+    st.caption(
+        "輸入股票代號 (台股 4 碼 / 美股 ticker), 系統評估當下個股強度、同族群表現、"
+        "相對大盤、PE/EPS, 給出 BUY/WAIT/AVOID 結論. 適合判斷「現在能不能進場」."
+    )
+
+    cE1, cE2, cE3 = st.columns([2, 1, 1])
+    with cE1:
+        entry_input = st.text_input(
+            "股票代號 (例: 2330 / NVDA / RKLB)",
+            value="",
+            key="entry_input",
+            placeholder="輸入後按下方分析按鈕",
+        )
+    with cE2:
+        market_choice = st.selectbox(
+            "市場", ["auto", "TW", "US"], index=0, key="entry_market",
+            help="auto 會自動判斷 (4 碼數字=TW, 字母=US)",
+        )
+    with cE3:
+        entry_run = st.button("🔍 分析", use_container_width=True,
+                                key="entry_run", type="primary")
+
+    if entry_run and entry_input.strip():
+        try:
+            import entry_evaluator as ee
+            with st.spinner(f"分析 {entry_input.strip()} 中…約 10-20 秒"):
+                result = ee.evaluate_entry(entry_input.strip(), market=market_choice)
+            st.session_state["entry_result"] = result
+        except Exception as e:
+            st.error(f"分析失敗: {type(e).__name__}: {e}")
+
+    result = st.session_state.get("entry_result")
+    if result:
+        if result.get("error"):
+            st.error(result["error"])
+        else:
+            snap = result.get("snap", {})
+            peers = result.get("peers", {})
+            rs = result.get("rs_vs_market")
+            fund = result.get("fundamentals", {})
+            verdict = result.get("verdict", {})
+
+            # === 結論卡片 ===
+            v_emoji = verdict.get("verdict_emoji", "")
+            v_text = verdict.get("verdict", "?")
+            v_score = verdict.get("score", 0)
+            st.markdown(f"### {v_emoji} 結論: **{v_text}** (評分 {v_score}/100)")
+            # 新增: 持倉決策 (加碼 / 減碼 / 出場 ...)
+            pa = verdict.get("position_action")
+            if pa:
+                pa_e = verdict.get("position_emoji", "")
+                pa_d = verdict.get("position_detail", "")
+                st.markdown(f"### {pa_e} 持倉建議: **{pa}**")
+                st.caption(pa_d)
+            for r in verdict.get("reasons", []):
+                st.markdown(f"- {r}")
+
+            st.divider()
+
+            # === 個股現況 (H3 fix: None 值用 helper 防呆, 不能直接 f-string 格式化) ===
+            def _sf(v, fmt="+.2f", suffix="%"):
+                """safe-format: None → '—'."""
+                if v is None:
+                    return "—"
+                try:
+                    return format(float(v), fmt) + suffix
+                except (TypeError, ValueError):
+                    return "—"
+
+            st.markdown("#### 📊 個股現況")
+            cS1, cS2, cS3, cS4 = st.columns(4)
+            cS1.metric("現價", snap.get("current") if snap.get("current") is not None else "—",
+                        _sf(snap.get("today_pct")))
+            cS2.metric("量比", snap.get("vol_ratio") if snap.get("vol_ratio") is not None else "—")
+            cS3.metric("RSI(14)", snap.get("rsi14") if snap.get("rsi14") is not None else "—")
+            cS4.metric("趨勢", snap.get("trend") or "—")
+            cT1, cT2, cT3 = st.columns(3)
+            cT1.metric("距 MA20", _sf(snap.get("ma20_dist_pct")))
+            cT2.metric("距 52w 高", _sf(snap.get("from_52w_high_pct")))
+            cT3.metric("距 52w 低", _sf(snap.get("from_52w_low_pct")))
+
+            # === 同族群 ===
+            st.markdown(f"#### 🚀 同族群表現 ({peers.get('sector') or '—'})")
+            if peers.get("sector_avg_pct") is not None:
+                cP1, cP2 = st.columns(2)
+                cP1.metric("族群均漲", f"{peers['sector_avg_pct']:+.2f}%")
+                if peers.get("up_ratio") is not None:
+                    cP2.metric("上漲家數比", f"{peers['up_ratio'] * 100:.0f}%")
+            peer_list = peers.get("peers") or []
+            if peer_list:
+                import pandas as pd
+                peer_df = pd.DataFrame(peer_list)
+                st.dataframe(peer_df, use_container_width=True, hide_index=True)
+            else:
+                st.caption("(沒有抓到同族群股, 可能族群偏小)")
+
+            # === 相對大盤 RS (H2 fix: 改為差分 pp, 不是比值) ===
+            if rs is not None:
+                if rs >= 1.5:
+                    rs_emoji = "✅ 強跑贏"
+                elif rs >= 0.3:
+                    rs_emoji = "➕ 跑贏"
+                elif rs >= -0.3:
+                    rs_emoji = "➡️ 同步"
+                elif rs >= -1.5:
+                    rs_emoji = "➖ 跑輸"
+                else:
+                    rs_emoji = "❌ 大幅跑輸"
+                st.markdown(f"#### 🌐 相對大盤 RS = **{rs:+.2f}pp**  {rs_emoji}")
+
+            # === 基本面 ===
+            st.markdown("#### 💰 基本面")
+            cF1, cF2, cF3 = st.columns(3)
+            cF1.metric("PE", fund.get("pe_label") or "—")
+            if fund.get("forward_pe"):
+                cF2.metric("Forward PE", f"{fund['forward_pe']:.1f}")
+            if fund.get("peg"):
+                cF3.metric("PEG", f"{fund['peg']:.2f}")
+            cG1, cG2 = st.columns(2)
+            if fund.get("eps") is not None:
+                cG1.metric("EPS", fund["eps"])
+            if fund.get("eps_yoy_pct") is not None:
+                cG2.metric("EPS YoY", f"{fund['eps_yoy_pct']:+.1f}%")
+            if fund.get("revenue_yoy_pct") is not None:
+                st.caption(f"營收 YoY: {fund['revenue_yoy_pct']:+.1f}%")
+            if fund.get("earnings_date"):
+                st.caption(f"📅 下次財報: **{fund['earnings_date']}** (留意進入沉默期 / 行情消化)")
+            if fund.get("marketcap") and fund["marketcap"] != "—":
+                st.caption(f"市值: {fund['marketcap']}")
+            if fund.get("industry"):
+                st.caption(f"產業: {fund['industry']}")
+
+            # === Gemini AI 結論 ===
+            ai_summary = result.get("ai_summary")
+            if ai_summary:
+                st.divider()
+                st.markdown("#### 🤖 Gemini 結論")
+                st.info(ai_summary)
+
+    st.caption("⚠️ 評估僅供參考, 不構成投資建議. 請自行做研究與風控.")

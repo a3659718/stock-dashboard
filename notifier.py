@@ -1774,38 +1774,38 @@ def _rev_action_drawdown(severity: str, market_state: str) -> str:
     # L2 fix: severity × market_state 完整矩陣 (含 mild 也依盤勢區分)
     if severity == "severe":
         if market_state == "accelerating_down":
-            return "💡 建議: 加速殺低, 持股減碼 1/3 並設停損"
-        return "💡 建議: 跌幅已大, 持股減碼 1/3, 留意停損點"
+            return "💡 持倉建議: 加速殺低, 持股減碼 1/3 並設停損"
+        return "💡 持倉建議: 跌幅已大, 持股減碼 1/3, 留意停損點"
     if severity == "medium":
         if market_state == "accelerating_down":
-            return "💡 建議: 減碼 20%, 觀察是否止穩"
+            return "💡 持倉建議: 減碼 20%, 觀察是否止穩"
         if market_state == "turned_black":
-            return "💡 建議: 暫不加碼, 留意支撐"
-        return "💡 建議: 高檔回吐, 觀察是否續弱, 暫不動作"
+            return "💡 持倉建議: 暫不加碼, 留意支撐"
+        return "💡 持倉建議: 高檔回吐, 觀察是否續弱, 暫不動作"
     # mild
     if market_state == "accelerating_down":
-        return "💡 建議: 雖幅度小但已翻黑加速, 留意是否擴大"
+        return "💡 持倉建議: 雖幅度小但已翻黑加速, 留意是否擴大"
     if market_state == "turned_black":
-        return "💡 建議: 小幅翻黑, 觀察支撐能否守住"
-    return "💡 建議: 短線雜訊, 觀察為主"
+        return "💡 持倉建議: 小幅翻黑, 觀察支撐能否守住"
+    return "💡 持倉建議: 短線雜訊, 觀察為主"
 
 
 def _rev_action_rebound(severity: str, market_state: str) -> str:
     # L2 fix: 補齊 severity × market_state 組合, 避免 mild+recovered 矛盾
     if severity == "severe":
         if market_state == "recovered":
-            return "💡 建議: 強勁反彈且已收復, 可分批布局強勢股"
+            return "💡 持倉建議: 強勁反彈且已收復, 可分批布局強勢股"
         if market_state == "near_recover":
-            return "💡 建議: 反彈強勁接近收復, 留意能否翻紅"
-        return "💡 建議: 低檔強彈但仍黑, 先觀察止跌確認"
+            return "💡 持倉建議: 反彈強勁接近收復, 留意能否翻紅"
+        return "💡 持倉建議: 低檔強彈但仍黑, 先觀察止跌確認"
     if severity == "medium":
         if market_state in ("recovered", "near_recover"):
-            return "💡 建議: 初步止穩, 觀察續攻力道再決定"
-        return "💡 建議: 反彈中但未收復, 不宜追高"
+            return "💡 持倉建議: 初步止穩, 觀察續攻力道再決定"
+        return "💡 持倉建議: 反彈中但未收復, 不宜追高"
     # mild
     if market_state == "recovered":
-        return "💡 建議: 小幅反彈已翻紅, 觀察延續性"
-    return "💡 建議: 短線小反彈, 還沒翻紅前不追"
+        return "💡 持倉建議: 小幅反彈已翻紅, 觀察延續性"
+    return "💡 持倉建議: 短線小反彈, 還沒翻紅前不追"
 
 
 # M4: 指數 symbol → 短縮寫 (跨市場對照用, 避免多個 US 顯示成 "US / US" 搞混)
@@ -1863,6 +1863,69 @@ def _rev_cross_market_ctx(self_pct: float, cross_market: list) -> str:
     return ""
 
 
+def fmt_combined_intraday_super(
+    crash_data=None,
+    reversal_alerts=None,
+    bucket_alerts=None,
+    weak_open_alerts=None,
+    strong_sector_alerts=None,
+    holdings_intraday_alerts=None,
+    crash_ai_text: str = "",
+) -> list:
+    """合 monitor 推播 — 反轉 / 開盤即弱 / 強勢族群 / 持倉風險 / 大跌 / bucket.
+
+    H1 fix: 改回傳 list[str], 每元素是 1 封 TG. caller 用迴圈 send.
+    這樣即使各段加總超 TG 4096 byte 上限, 也不會 silent 砍掉後面段.
+    一般情況 (4 段共 < 3900 byte) 合 1 封; 超量自動拆多封 (各段獨立).
+    """
+    parts = []
+    try:
+        m1 = fmt_combined_intraday_alerts(
+            crash_data=crash_data,
+            reversal_alerts=reversal_alerts or [],
+            bucket_alerts=bucket_alerts or [],
+            crash_ai_text=crash_ai_text,
+        )
+        if m1:
+            parts.append(m1)
+    except Exception as _e:
+        print(f"[combined super] crash/reversal/bucket 段失敗: {_e}", flush=True)
+
+    try:
+        m2 = fmt_weak_open_alerts(weak_open_alerts or [])
+        if m2:
+            parts.append(m2)
+    except Exception as _e:
+        print(f"[combined super] weak_open 段失敗: {_e}", flush=True)
+
+    try:
+        m3 = fmt_strong_sector_alerts(strong_sector_alerts or [])
+        if m3:
+            parts.append(m3)
+    except Exception as _e:
+        print(f"[combined super] strong_sector 段失敗: {_e}", flush=True)
+
+    # 4 (MED-D1): 持倉 intraday 風險也合進來
+    try:
+        m4 = fmt_holdings_intraday_alerts(holdings_intraday_alerts or [])
+        if m4:
+            parts.append(m4)
+    except Exception as _e:
+        print(f"[combined super] holdings_intraday 段失敗: {_e}", flush=True)
+
+    if not parts:
+        return []
+
+    # 嘗試合 1 封 (用分隔線). 若合起來超 TG 上限就拆多封, 避免後面段被截斷.
+    sep = "\n\n━━━━━━━━━━━━━━━━━\n\n"
+    full = sep.join(parts)
+    if len(full.encode("utf-8")) <= 3900:
+        return [full]
+    # 超量 → 拆多封 (各段獨立, 不損失內容)
+    print(f"[combined super] 合計 {len(full.encode('utf-8'))} bytes 超量, 改拆 {len(parts)} 封", flush=True)
+    return parts
+
+
 def fmt_intraday_reversal_alerts(alerts: list) -> str:
     """盤中反轉警報訊息 — 從高點回吐 / 從低點反彈 (M2 加強版).
 
@@ -1915,14 +1978,14 @@ def fmt_intraday_reversal_alerts(alerts: list) -> str:
                 f"(vs 開盤 {sign_o}{vs_open:.2f}%)"
             )
             st_desc = _rev_drawdown_state_desc(mstate)
-            if st_desc:
-                lines.append(f"  狀態: {st_desc}")
+            # 狀態行已隱藏 (用戶選 簡化推播)
+            _ = st_desc
             sp_desc = _rev_speed_desc(speed, mins)
-            if sp_desc:
-                lines.append(f"  速度: {sp_desc}")
+            # 速度行已隱藏 (用戶選 簡化推播)
+            _ = sp_desc
             vol_desc = _rev_volume_desc(vstate, vr)
-            if vol_desc:
-                lines.append(f"  量能: {vol_desc}")
+            # 量能行已隱藏 (用戶選 簡化推播)
+            _ = vol_desc
             alerts_today = a.get("alerts_today") or 0
             if alerts_today == 1:
                 lines.append("  首次反轉訊號")
@@ -1987,14 +2050,14 @@ def fmt_intraday_reversal_alerts(alerts: list) -> str:
                 f"(vs 開盤 {sign_o}{vs_open:.2f}%)"
             )
             st_desc = _rev_rebound_state_desc(mstate)
-            if st_desc:
-                lines.append(f"  狀態: {st_desc}")
+            # 狀態行已隱藏 (用戶選 簡化推播)
+            _ = st_desc
             sp_desc = _rev_speed_desc(speed, mins)
-            if sp_desc:
-                lines.append(f"  速度: {sp_desc}")
+            # 速度行已隱藏 (用戶選 簡化推播)
+            _ = sp_desc
             vol_desc = _rev_volume_desc(vstate, vr)
-            if vol_desc:
-                lines.append(f"  量能: {vol_desc}")
+            # 量能行已隱藏 (用戶選 簡化推播)
+            _ = vol_desc
             alerts_today = a.get("alerts_today") or 0
             if alerts_today == 1:
                 lines.append("  首次反彈訊號")
@@ -2061,8 +2124,8 @@ def fmt_weak_open_alerts(alerts: list) -> str:
                 f"(盤中最高僅 +{hi_from_op:.2f}%)"
             )
             vol_desc = _rev_volume_desc(a.get("volume_state", "unknown"), a.get("vol_ratio"))
-            if vol_desc:
-                lines.append(f"  量能: {vol_desc}")
+            # 量能行已隱藏 (用戶選 簡化推播)
+            _ = vol_desc
             # 跨市場
             cm = a.get("cross_market") or []
             if cm:
@@ -2072,11 +2135,11 @@ def fmt_weak_open_alerts(alerts: list) -> str:
                 lines.append(f"  📊 對照: {cm_short}{ctx_part}")
             # 操作建議
             if sev == "severe":
-                lines.append("  💡 建議: 弱開且未反彈, 持股減碼觀望")
+                lines.append("  💡 持倉建議: 弱開且未反彈, 持股減碼觀望")
             elif sev == "medium":
-                lines.append("  💡 建議: 短線轉弱訊號, 暫不加碼")
+                lines.append("  💡 持倉建議: 短線轉弱訊號, 暫不加碼")
             else:
-                lines.append("  💡 建議: 開盤偏弱, 觀察是否止穩")
+                lines.append("  💡 持倉建議: 開盤偏弱, 觀察是否止穩")
             # SOX/IXIC 特別提醒對台股影響
             if sym in ("^SOX", "^IXIC"):
                 lines.append("  ⚠️ 此為台股 leading indicator, 留意明日台股開盤")
@@ -2104,8 +2167,8 @@ def fmt_weak_open_alerts(alerts: list) -> str:
                 f"(盤中最低僅 {lo_from_op:.2f}%)"
             )
             vol_desc = _rev_volume_desc(a.get("volume_state", "unknown"), a.get("vol_ratio"))
-            if vol_desc:
-                lines.append(f"  量能: {vol_desc}")
+            # 量能行已隱藏 (用戶選 簡化推播)
+            _ = vol_desc
             cm = a.get("cross_market") or []
             if cm:
                 ctx = _rev_cross_market_ctx(vs_open, cm)
@@ -2113,16 +2176,61 @@ def fmt_weak_open_alerts(alerts: list) -> str:
                 ctx_part = f"  {ctx}" if ctx else ""
                 lines.append(f"  📊 對照: {cm_short}{ctx_part}")
             if sev == "severe":
-                lines.append("  💡 建議: 強勢開盤未回測, 可順勢留意強勢族群")
+                lines.append("  💡 持倉建議: 強勢開盤未回測, 可順勢留意強勢族群")
             elif sev == "medium":
-                lines.append("  💡 建議: 多頭續攻訊號, 留意拉回是否買點")
+                lines.append("  💡 持倉建議: 多頭續攻訊號, 留意拉回是否買點")
             else:
-                lines.append("  💡 建議: 開盤偏強, 觀察延續性")
+                lines.append("  💡 持倉建議: 開盤偏強, 觀察延續性")
             if sym in ("^SOX", "^IXIC"):
                 lines.append("  ✨ 此為台股 leading indicator, 明日台股可期")
             lines.append("")
 
     lines.append("<i>※ 警報為動能訊號, 非進出建議. 請自行控管風險.</i>")
+    return _truncate_tg_msg("\n".join(lines).rstrip())
+
+
+def fmt_holdings_intraday_alerts(alerts: list) -> str:
+    """持倉 intraday 風險警報訊息 (4 新).
+
+    alerts: holdings_intraday_alert.check_holdings_intraday_risk() 回傳.
+    每個 dict 含: stock_id, name, market, current, today_pct, today_high,
+                  drawdown_from_high_pct, stop_price, triggers, severity.
+    """
+    if not alerts:
+        return ""
+    # 整體 severity 取最強
+    top_sev = "medium"
+    if any(a.get("severity") == "severe" for a in alerts):
+        top_sev = "severe"
+    badge = "🔴 嚴重" if top_sev == "severe" else "🟠 中度"
+
+    lines = [f"<b>⚠️ 持倉 intraday 風險警報 — {badge}</b>", ""]
+    for a in alerts:
+        sid = _esc(a.get("stock_id", ""))
+        name = _esc(a.get("name", ""))
+        market = _esc(a.get("market", ""))
+        try:
+            cur = float(a.get("current", 0) or 0)
+            tp = float(a.get("today_pct", 0) or 0)
+            dd = float(a.get("drawdown_from_high_pct", 0) or 0)
+        except (TypeError, ValueError):
+            cur = tp = dd = 0.0
+        sev_emoji = "🔴" if a.get("severity") == "severe" else "🟠"
+        lines.append(
+            f"{sev_emoji} [{market}] <code>{sid}</code> {name} {cur:,.2f}  "
+            f"<b>{tp:+.2f}%</b>"
+        )
+        # 觸發理由 (來自 check 模組)
+        for t in (a.get("triggers") or [])[:3]:
+            lines.append(f"  • {_esc(t)}")
+        # 操作建議
+        if a.get("severity") == "severe":
+            lines.append("  💡 持倉建議: 嚴重訊號, 建議立即減碼 1/2 或設緊停損")
+        else:
+            lines.append("  💡 持倉建議: 留意是否止穩, 考慮減碼 1/3")
+        lines.append("")
+
+    lines.append("<i>※ 持倉警報, 請依個人風控規劃調整部位.</i>")
     return _truncate_tg_msg("\n".join(lines).rstrip())
 
 
@@ -2195,9 +2303,9 @@ def fmt_strong_sector_alerts(alerts: list) -> str:
                 lines.append("  龍頭: " + " / ".join(parts))
             # 操作建議
             if a.get("severity") == "strong":
-                lines.append("  💡 建議: 多檔齊漲且量增, 留意龍頭股拉回買點")
+                lines.append("  💡 持倉建議: 多檔齊漲且量增, 留意龍頭股拉回買點")
             else:
-                lines.append("  💡 建議: 族群轉強, 觀察龍頭續攻力道")
+                lines.append("  💡 持倉建議: 族群轉強, 觀察龍頭續攻力道")
         lines.append("")
 
     lines.append("<i>※ 資金流向動態訊號, 非進出建議. 請自行控管風險.</i>")

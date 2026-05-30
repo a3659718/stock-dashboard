@@ -348,6 +348,48 @@ def main() -> int:
         except Exception as e:
             print(f"停損檢查失敗 (non-fatal): {e}", flush=True)
 
+        # 3 條件性: TW mid (11:00) 只在「相對昨收有明顯變化」才推, 避免每天固定發 1 封
+        # MED-B2 fix: 改用「今日 vs 昨收 |pct| ≥ 0.5%」(門檻較寬), 比較直觀
+        # HIGH-B1 fix: 任何錯誤 → silent skip 不推, 避免推「沒變化通知」誤導
+        if market == "tw_mid":
+            should_skip_tw_mid = False
+            try:
+                import data_sources as _ds
+                # 抓今日 + 昨日 5m, 用收盤算 vs 昨收
+                twii = _ds.fetch_yf_history("^TWII", period="2d", interval="5m")
+                if twii is None or twii.empty:
+                    print("[tw_mid] 無 TWII 數據, skip 不推", flush=True)
+                    return 0
+                import pandas as _pd
+                date_col = "Datetime" if "Datetime" in twii.columns else twii.columns[0]
+                twii = twii.copy()
+                twii["_dt"] = _pd.to_datetime(twii[date_col], utc=True)
+                twii["_d"] = twii["_dt"].dt.date
+                today = twii["_d"].max()
+                today_bars = twii[twii["_d"] == today].sort_values("_dt")
+                prev_bars = twii[twii["_d"] < today].sort_values("_dt")
+                if len(today_bars) < 3 or prev_bars.empty:
+                    print("[tw_mid] today bars < 3 或無昨日 — skip 不推", flush=True)
+                    return 0
+                cur_p = float(today_bars["Close"].iloc[-1])
+                prev_close = float(prev_bars["Close"].iloc[-1])
+                if prev_close <= 0:
+                    print("[tw_mid] prev_close 無效, skip", flush=True)
+                    return 0
+                pct_vs_prev = (cur_p / prev_close - 1) * 100
+                if abs(pct_vs_prev) < 0.5:
+                    print(
+                        f"[tw_mid] TWII vs 昨收 {pct_vs_prev:+.2f}% (< ±0.5%), "
+                        f"無明顯變化, 跳過推播",
+                        flush=True,
+                    )
+                    return 0
+                print(f"[tw_mid] TWII vs 昨收 {pct_vs_prev:+.2f}% (≥ ±0.5%), 推播", flush=True)
+            except Exception as _e:
+                # HIGH-B1 fix: 失敗時保守 skip, 不再 fallback 推
+                print(f"[tw_mid] 變化檢測 raise {_e} — 保守 skip 不推", flush=True)
+                return 0
+
         try:
             data = market_open_picks.get_tw_open_picks()
         except Exception as e:
@@ -580,7 +622,10 @@ def main() -> int:
         print(f"Got {len(data.get('news', []))} news items")
         msg = notifier.fmt_holiday_news(data)
     elif market == "crypto_picks":
-        # 每天中午 12:00 台北 (04:00 UTC) 推 5 個適合進場的加密貨幣
+        # B: 用戶關閉加密貨幣推播 — 早期 return, 即使有 manual dispatch 也不推
+        print("[B] crypto_picks 已用戶關閉, 跳過")
+        return 0
+        # 下面是舊邏輯, 保留供日後參考 (unreachable)
         print("Running crypto picks (daily noon)...")
         try:
             import crypto_picker
@@ -739,17 +784,9 @@ def main() -> int:
             print(f"[weak/strong open] check failed (non-fatal): {_e}", flush=True)
             traceback.print_exc()
 
-        try:
-            import index_alerts as _ia_idx
-            bucket_alerts = _ia_idx.check_index_alerts() or []
-            if bucket_alerts:
-                print(
-                    f"[index bucket] triggered {len(bucket_alerts)}: "
-                    + ", ".join(a.get("symbol", "") for a in bucket_alerts),
-                    flush=True,
-                )
-        except Exception as _e:
-            print(f"[index bucket] check failed (non-fatal): {_e}", flush=True)
+        # E: 砍 bucket index alerts — 用戶選關 (反轉+系統性+開盤即弱已 cover)
+        # 不再呼叫 check_index_alerts(), 省每次 monitor tick 5 個指數的 yfinance fetch
+        bucket_alerts = []
 
         # === 新增: 大盤大漲 → 強勢股推播 (跨 tick 去重, 每天每 trigger 只推一次) ===
         try:
@@ -759,6 +796,22 @@ def main() -> int:
                 print(f"[strong stock alert] {ssa_result}", flush=True)
         except Exception as _e:
             print(f"[strong stock alert] check failed (non-fatal): {_e}", flush=True)
+
+        # === 4: 持倉 intraday 風險警報 (今日 ≤ -3% / 從早高回吐 ≥ 5% / 跌破停損) ===
+        holdings_intraday_alerts = []
+        try:
+            import holdings_intraday_alert as _hi
+            holdings_intraday_alerts = _hi.check_holdings_intraday_risk() or []
+            if holdings_intraday_alerts:
+                print(
+                    f"[holdings intraday] triggered {len(holdings_intraday_alerts)}: "
+                    + ", ".join(a.get("stock_id", "") for a in holdings_intraday_alerts),
+                    flush=True,
+                )
+        except Exception as _e:
+            import traceback
+            print(f"[holdings intraday] check failed (non-fatal): {_e}", flush=True)
+            traceback.print_exc()
 
         # === Q2: 盤中強勢族群推播 (per-day cap 1, 全域 60min cooldown) ===
         strong_sector_alerts = []
@@ -779,49 +832,33 @@ def main() -> int:
             print(f"[strong sector] check failed (non-fatal): {_e}", flush=True)
             traceback.print_exc()
 
-        # === 合併為 1 封 TG (取代之前 3 封獨立推播) ===
-        # M2 fix: 包 try/except 避免 formatter / send_message 失敗讓 Phase 2 (watchlist/crypto) 中斷
+        # === A fix: 合 monitor 推播 (反轉+開盤即弱+強勢族群+大跌+bucket) ===
+        # H1: fmt_combined_intraday_super 回 list[str], 一般合 1 封;
+        # 三段太長時自動拆多封, 避免 byte 截斷 silent 砍掉後面段.
         try:
-            combined_msg = notifier.fmt_combined_intraday_alerts(
+            super_msgs = notifier.fmt_combined_intraday_super(
                 crash_data=crash_data,
                 reversal_alerts=reversal_alerts,
                 bucket_alerts=bucket_alerts,
+                weak_open_alerts=weak_open_alerts,
+                strong_sector_alerts=strong_sector_alerts,
+                holdings_intraday_alerts=holdings_intraday_alerts,
                 crash_ai_text=crash_ai_text,
             )
-            if combined_msg:
-                print(f"[combined intraday] sending merged TG ({len(combined_msg)} chars)", flush=True)
-                ok_c, info_c = notifier.send_message(combined_msg)
-                print(f"[combined intraday] TG result: ok={ok_c} info={info_c}", flush=True)
-            else:
-                print("[combined intraday] 無 index-class 警報觸發", flush=True)
-        except Exception as _ce:
-            import traceback
-            print(f"[combined intraday] formatter/send 失敗 (non-fatal, Phase 2 仍會跑): {_ce}", flush=True)
-            traceback.print_exc()
-
-        # M3: 開盤即弱/強警報 — 獨立 1 封 TG (跟 reversal 不同情境, 每日 cap 1/方向/sym)
-        try:
-            if weak_open_alerts:
-                weak_msg = notifier.fmt_weak_open_alerts(weak_open_alerts)
-                if weak_msg:
-                    print(f"[weak/strong open] sending TG ({len(weak_msg)} chars)", flush=True)
-                    ok_w, info_w = notifier.send_message(weak_msg)
-                    print(f"[weak/strong open] TG result: ok={ok_w} info={info_w}", flush=True)
-        except Exception as _we:
-            import traceback
-            print(f"[weak/strong open] formatter/send 失敗 (non-fatal): {_we}", flush=True)
-            traceback.print_exc()
-
-        # Q2: 強勢族群 — 獨立 1 封 TG (per-day cap 1/族群, 全域 60min cooldown)
-        # HIGH fix: 只有 send 成功才 mark_sectors_sent (state 寫入), 失敗下次重試
-        try:
-            if strong_sector_alerts:
-                sector_msg = notifier.fmt_strong_sector_alerts(strong_sector_alerts)
-                if sector_msg:
-                    print(f"[strong sector] sending TG ({len(sector_msg)} chars)", flush=True)
-                    ok_s, info_s = notifier.send_message(sector_msg)
-                    print(f"[strong sector] TG result: ok={ok_s} info={info_s}", flush=True)
-                    if ok_s:
+            if super_msgs:
+                all_ok = True
+                for i, msg in enumerate(super_msgs, 1):
+                    print(
+                        f"[super combined] sending {i}/{len(super_msgs)} ({len(msg)} chars)",
+                        flush=True,
+                    )
+                    ok_c, info_c = notifier.send_message(msg)
+                    print(f"[super combined] TG #{i} result: ok={ok_c} info={info_c}", flush=True)
+                    if not ok_c:
+                        all_ok = False
+                # 只有「全部 send 成功」才 mark state (HIGH 防 silent fail)
+                if all_ok:
+                    if strong_sector_alerts:
                         try:
                             import strong_sector_alert as _ssec_mark
                             _ssec_mark.mark_sectors_sent(strong_sector_alerts)
@@ -832,10 +869,25 @@ def main() -> int:
                             )
                         except Exception as _me:
                             print(f"[strong sector] mark_sectors_sent failed: {_me}", flush=True)
-        except Exception as _se:
+                    if holdings_intraday_alerts:
+                        try:
+                            import holdings_intraday_alert as _hi_mark
+                            _hi_mark.mark_alerts_sent(holdings_intraday_alerts)
+                            print(
+                                f"[holdings intraday] state updated: "
+                                f"{len(holdings_intraday_alerts)} stocks marked sent",
+                                flush=True,
+                            )
+                        except Exception as _me:
+                            print(f"[holdings intraday] mark_alerts_sent failed: {_me}", flush=True)
+            else:
+                print("[super combined] 無警報觸發", flush=True)
+        except Exception as _ce:
             import traceback
-            print(f"[strong sector] formatter/send 失敗 (non-fatal): {_se}", flush=True)
+            print(f"[super combined] formatter/send 失敗 (non-fatal, Phase 2 仍會跑): {_ce}", flush=True)
             traceback.print_exc()
+
+        # 4 (MED-D1): 持倉 intraday 已合進 super_combined, 不再獨立 send
 
         try:
             import watchlist_alerts
@@ -860,8 +912,8 @@ def main() -> int:
             # 重要: idx 已在 Phase 1 由 combined_msg 處理過, 這邊不再呼叫
             #       避免重複 fetch + state thrash (cache 內也已有結果, 但保險不重複呼叫)
             idx = []  # 已被 combined_msg 涵蓋
-            cry = index_alerts.check_crypto_alerts()
-            # 持倉停損 (盤中即時)
+            cry = []  # B: 用戶關閉 crypto 推播
+            # 持倉停損
             try:
                 import holdings_tracker
                 sl_breaches = holdings_tracker.check_stop_loss_breaches()
