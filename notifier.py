@@ -166,8 +166,20 @@ def build_stock_action_keyboard(stock_id: str, market: str = "TW") -> dict:
     }
 
 
+def _record_push_safe(text: str, ok: bool, info: str) -> None:
+    """安全記錄推播 (system_health), 任何例外都吞掉 — 不能影響 send_message 主流程."""
+    try:
+        import system_health
+        # 從第一行抓 type (剝 emoji / 取前 50 字)
+        ptype = (text or "").split("\n", 1)[0][:50] if text else "?"
+        system_health.record_push(ptype, ok, error_msg=None if ok else info[:200])
+    except Exception:
+        pass
+
+
 def send_message(text: str, disable_preview: bool = True,
-                  reply_markup: Optional[dict] = None) -> tuple[bool, str]:
+                  reply_markup: Optional[dict] = None,
+                  disable_notification: bool = False) -> tuple[bool, str]:
     """直接呼叫 Bot API。回傳 (成功, 訊息).
 
     強化點:
@@ -176,7 +188,18 @@ def send_message(text: str, disable_preview: bool = True,
       3. 失敗時把更多診斷資訊 (chat_id 長度、message 前 80 字) 包進 info
       4. reply_markup: optional inline keyboard (來自 build_stock_action_keyboard)
       5. 對 None / 空 text early return, 避免 text[:80] 在診斷字串炸 TypeError
+      6. 自動寫入 system_health.push_history (供 admin dashboard 顯示)
+      7. disable_notification=True → silent push (不響鈴, 用於普通新聞分流)
     """
+    ok, info = _send_message_inner(text, disable_preview, reply_markup, disable_notification)
+    _record_push_safe(text, ok, info)
+    return ok, info
+
+
+def _send_message_inner(text: str, disable_preview: bool = True,
+                          reply_markup: Optional[dict] = None,
+                          disable_notification: bool = False) -> tuple[bool, str]:
+    """實際送出 — 拆出避免 record_push hook 影響原邏輯."""
     import json as _json
     # 防 None / 空文 — 不能 raise, 要 graceful 回傳
     if text is None or not str(text).strip():
@@ -196,6 +219,7 @@ def send_message(text: str, disable_preview: bool = True,
         "text": text,
         "parse_mode": "HTML",
         "disable_web_page_preview": disable_preview,
+        "disable_notification": bool(disable_notification),
     }
     if reply_markup:
         payload["reply_markup"] = _json.dumps(reply_markup)
@@ -2192,38 +2216,78 @@ def fmt_weak_open_alerts(alerts: list) -> str:
     return _truncate_tg_msg("\n".join(lines).rstrip())
 
 
-def fmt_news_event_alerts(alerts: list) -> str:
+def fmt_news_event_alerts(alerts: list, impact_analysis: str = "") -> str:
     """事件型新聞推播 (news_event_alert.check_news_events 用).
 
-    alerts: list of {symbol, market, tag, title, link, publisher, keywords_hit}
+    alerts: list of {symbol, market, tag, title, link, publisher, keywords_hit, urgency}
+    impact_analysis: 可選, news_impact_analyzer.analyze_news_impact() 回傳的 HTML 區塊
+                     (對 HIGH urgency 事件的 Gemini 分析). 直接接在事件列表後.
     """
     if not alerts:
         return ""
-    lines = [f"<b>📰 重大新聞事件 ({len(alerts)} 則)</b>", ""]
+    # 按 urgency 拆 3 組 (HIGH 急報 / MED 注意 / LOW 普通)
+    high_alerts = [a for a in alerts if a.get("urgency") == "HIGH"]
+    med_alerts  = [a for a in alerts if a.get("urgency") == "MED"]
+    low_alerts  = [a for a in alerts if a.get("urgency") not in ("HIGH", "MED")]
+
+    # 訊息 header 依最高 urgency 決定
+    if high_alerts:
+        header = f"🚨🚨 <b>急報 — {len(alerts)} 則重大事件</b>"
+    elif med_alerts:
+        header = f"⚠️ <b>注意 — {len(alerts)} 則新聞事件</b>"
+    else:
+        header = f"📰 <b>新聞事件 ({len(alerts)} 則)</b>"
+
+    lines = [header, ""]
     tag_emoji = {"hold": "💼", "watch": "👀", "main": "📌"}
     tag_text = {"hold": "持倉", "watch": "觀察", "main": "主流"}
-    for a in alerts:
-        sym = _esc(a.get("symbol", ""))
-        market = _esc(a.get("market", ""))
-        tag = a.get("tag", "main")
-        t_emoji = tag_emoji.get(tag, "📌")
-        t_text = tag_text.get(tag, "")
-        title = _esc(a.get("title", ""))
-        link = a.get("link", "") or ""
-        publisher = _esc(a.get("publisher", ""))
-        hits = a.get("keywords_hit") or []
-        hits_str = ", ".join(_esc(k) for k in hits[:5])
-        lines.append(
-            f"{t_emoji} [{market}] <code>{sym}</code>  <i>{t_text}</i>  "
-            f"關鍵字: <b>{hits_str}</b>"
-        )
-        if link:
-            lines.append(f'  <a href="{link}">{title}</a>')
-        else:
-            lines.append(f"  {title}")
-        if publisher:
-            lines.append(f"  <i>來源: {publisher}</i>")
-        lines.append("")
+    source_label = {
+        "8-K": "⚡SEC 8-K", "8-K/A": "⚡SEC 8-K/A",
+        "10-Q": "📊SEC 10-Q", "10-K": "📚SEC 10-K", "S-1": "🆕SEC S-1",
+        "PR": "📢公司公告", "TW_NEWS": "🇹🇼重大訊息", "YAHOO": "📰Yahoo",
+    }
+
+    # 按 urgency 區塊輸出 (急報/注意/普通)
+    section_alerts = [
+        ("🚨 急報 (建議立即處理)", high_alerts),
+        ("⚠️ 注意 (近期重要)", med_alerts),
+        ("📰 一般新聞", low_alerts),
+    ]
+    for sect_title, sect_list in section_alerts:
+        if not sect_list:
+            continue
+        lines.append(f"━━━━━━━ {sect_title} ━━━━━━━")
+        for a in sect_list:
+            sym = _esc(a.get("symbol", ""))
+            market = _esc(a.get("market", ""))
+            tag = a.get("tag", "main")
+            t_emoji = tag_emoji.get(tag, "📌")
+            t_text = tag_text.get(tag, "")
+            src = a.get("source_type", "YAHOO")
+            src_text = source_label.get(src, src)
+            title = _esc(a.get("title", ""))
+            link = a.get("link", "") or ""
+            publisher = _esc(a.get("publisher", ""))
+            hits = a.get("keywords_hit") or []
+            # 8K-AUTO 不顯示為「關鍵字」, 顯示為「自動觸發」
+            if hits == ["8K-AUTO"]:
+                hits_display = "<b>SEC 重大事件自動推</b>"
+            else:
+                hits_display = "關鍵字: <b>" + ", ".join(_esc(k) for k in hits[:5]) + "</b>"
+            lines.append(
+                f"{t_emoji} [{market}] <code>{sym}</code>  <i>{t_text}</i>  "
+                f"<i>{src_text}</i>  {hits_display}"
+            )
+            if link:
+                lines.append(f'  <a href="{link}">{title}</a>')
+            else:
+                lines.append(f"  {title}")
+            if publisher:
+                lines.append(f"  <i>來源: {publisher}</i>")
+            lines.append("")
+    # 接 Gemini 影響分析 (若有)
+    if impact_analysis:
+        lines.append(impact_analysis)
     lines.append("<i>※ 新聞驅動訊號, 仍須自行確認消息真偽與後續發展.</i>")
     return _truncate_tg_msg("\n".join(lines).rstrip())
 
@@ -3027,21 +3091,20 @@ def fmt_fear_greed_alert(fg: dict, threshold_low: int = 25, threshold_high: int 
 
 
 def fmt_tw_pulse_alert(pulse: dict, threshold_low: int = 25, threshold_high: int = 75) -> Optional[str]:
-    """台股市場情緒指數極值警報. 中性區間回 None."""
+    """台股市場情緒指數極值警報 (中性區間回 None)."""
     if not pulse or pulse.get("score") is None:
         return None
-    s = pulse["score"]
-    raw = pulse.get("raw") or {}
-    twii = _esc(raw.get("TWII"))
-    pct5 = _esc(raw.get("5日%"))
-    ma60 = _esc(raw.get("距 MA60 %"))
-    rating = _esc(pulse.get("rating_zh"))
+    try:
+        s = float(pulse["score"])
+    except (TypeError, ValueError):
+        return None
+    rating = _esc(pulse.get("rating", ""))
     if s <= threshold_low:
-        return (f"⚠️ <b>台股市場極度恐慌</b>\n台股情緒指數: {_esc(s)} ({rating})\n"
-                f"加權: {twii} · 5日 {pct5}% · 距 MA60 {ma60}%\n"
-                "歷史經驗為逢低布局訊號，仍須個股控管風險。")
+        return (f"⚠️ <b>台股市場極度恐慌</b>\n"
+                f"TW Pulse: <b>{s:.0f}</b> ({rating})\n"
+                "歷史經驗為逢低分批布局訊號，仍須個股控管風險。")
     if s >= threshold_high:
-        return (f"⚠️ <b>台股市場極度貪婪</b>\n台股情緒指數: {_esc(s)} ({rating})\n"
-                f"加權: {twii} · 5日 {pct5}% · 距 MA60 {ma60}%\n"
+        return (f"⚠️ <b>台股市場極度貪婪</b>\n"
+                f"TW Pulse: <b>{s:.0f}</b> ({rating})\n"
                 "歷史經驗為短期回檔風險偏高訊號，建議分批減碼或停利。")
     return None

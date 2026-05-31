@@ -69,6 +69,44 @@ KEYWORDS_ZH = [
 NEWS_COOLDOWN_MIN = 30
 NEWS_MAX_PER_BATCH = 5  # 一次推播最多 N 則新聞 (避免暴量)
 
+
+# === Urgency 分級 (HIGH=急報響鈴 / MED=注意響鈴 / LOW=靜音批次) ===
+URGENCY_HIGH_KEYWORDS = {
+    "fda", "approval", "buyback", "share repurchase", "acquisition", "merger",
+    "spin-off", "spinoff", "ceo fired", "ceo resigns", "ceo steps down",
+    "lawsuit", "scandal", "settled",
+    "併購", "收購", "合併", "庫藏股", "FDA", "通過", "核准",
+    "辭職", "解任", "違規", "罰款", "暴漲", "暴跌",
+}
+URGENCY_MED_KEYWORDS = {
+    "upgrade", "downgrade", "price target", "earnings beat", "beats estimates",
+    "misses estimates", "guidance raised", "guidance lowered", "guidance cut",
+    "trump", "musk", "biden",
+    "上調", "下調", "調升", "調降", "財報優於", "不如預期", "利多", "利空",
+    "川普", "馬斯克",
+}
+
+
+def classify_urgency(alert: Dict) -> str:
+    """根據 source_type + keywords 算 urgency level: HIGH / MED / LOW."""
+    src = (alert.get("source_type") or "").upper()
+    # SEC 8-K / 重大訊息 = 最高權威, 直接 HIGH
+    if src in {"8-K", "8-K/A", "TW_NEWS"}:
+        return "HIGH"
+    if src == "S-1":
+        return "MED"  # IPO 注意但非急報
+    # 用關鍵字判斷
+    title_lower = (alert.get("title") or "").lower()
+    hits_lower = [str(k).lower() for k in (alert.get("keywords_hit") or [])]
+    all_text = title_lower + " " + " ".join(hits_lower)
+    for kw in URGENCY_HIGH_KEYWORDS:
+        if kw.lower() in all_text:
+            return "HIGH"
+    for kw in URGENCY_MED_KEYWORDS:
+        if kw.lower() in all_text:
+            return "MED"
+    return "LOW"
+
 # 主流 universe (給沒設 watchlist/holdings 的用戶當預設掃描範圍)
 DEFAULT_US_UNIVERSE_NEWS = [
     "NVDA", "AAPL", "MSFT", "GOOGL", "AMZN", "META", "TSLA",
@@ -82,12 +120,17 @@ DEFAULT_TW_UNIVERSE_NEWS = [
 
 
 def _is_tw_or_us_session() -> bool:
-    """台股或美股 session 內才掃, 假日跟非市場時段不掃."""
-    now_utc = dt.datetime.utcnow()
+    """是否該掃新聞.
+    平日: 台股或美股 session 內才掃 (省 API call).
+    週末: 全天放行 (新聞/8-K filings 24x7 都會發, 持倉用戶想立即知道).
+    """
+    # Py 3.12+: utcnow() deprecated, 用 datetime.now(timezone.utc)
+    now_utc = dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)
+    # 週末: 全天掃 (重大新聞/併購公告/CEO 變動常週末發)
     if now_utc.weekday() >= 5:
-        return False
+        return True
     cur = now_utc.hour + now_utc.minute / 60.0
-    # TW: 01:00-05:30 UTC, US: 13:30-21:00 UTC (含 DST 邊界)
+    # 平日 TW: 01:00-05:30 UTC, US: 13:30-21:00 UTC (含 DST 邊界)
     return (1.0 <= cur < 5.5) or (13.0 <= cur < 21.5)
 
 
@@ -157,17 +200,51 @@ def _gather_universe() -> List[Dict]:
 
 
 def _scan_news_for_symbol(item: Dict, alerted_hashes: Set[str]) -> List[Dict]:
-    """單檔抓 Yahoo News, 過濾關鍵字, 回觸發的 alert list.
+    """單檔抓多來源新聞 (Yahoo + Finnhub 8-K/PR + TW 重大訊息), 過濾關鍵字, 回觸發 alert list.
     跳過已 alerted_hashes 內的 (避免反覆推同新聞).
+
+    來源優先順序:
+      1. Finnhub 8-K (美股, SEC 直發, 最早) — 命中自動加 [8K] tag
+      2. Finnhub PR (美股, 公司主動發布)
+      3. FinMind 台股重大訊息 (台股)
+      4. Yahoo News (.TW / .TWO fallback) — 最慢但覆蓋率高
     """
     sym = item["symbol"]
     market = item["market"]
     tag = item["tag"]
-    # 台股需加 .TW 後綴給 yfinance
-    yf_sym = f"{sym}.TW" if market == "TW" else sym
     out = []
     try:
-        news = ds.fetch_yahoo_news(yf_sym, max_n=6) or []
+        # === 1. 多來源彙整 ===
+        news = []
+        try:
+            import event_sources as es
+            if market == "US":
+                # 8-K 命中 = 即推 (不管關鍵字; 8-K 本身就是重大事件)
+                eight_k = es.fetch_finnhub_8k(sym, days_back=2) or []
+                for k in eight_k:
+                    k["_force_alert"] = True  # 8-K 強制觸發, 不需關鍵字命中
+                    news.append(k)
+                # Press releases
+                pr = es.fetch_us_press_releases(sym, days_back=2) or []
+                news.extend(pr)
+            elif market == "TW":
+                tw_major = es.fetch_tw_major_announcements(stock_id=sym, days_back=2) or []
+                news.extend(tw_major)
+        except Exception as _e:
+            print(f"[news_event] {sym} 抓 8K/PR/TW 重大訊息失敗 (fallback Yahoo): {_e}", flush=True)
+
+        # === 2. Yahoo News fallback (覆蓋率高) ===
+        if market == "TW":
+            yh = ds.fetch_yahoo_news(f"{sym}.TW", max_n=6) or []
+            if not yh:
+                yh = ds.fetch_yahoo_news(f"{sym}.TWO", max_n=6) or []
+        else:
+            yh = ds.fetch_yahoo_news(sym, max_n=6) or []
+        # 標記 Yahoo source
+        for y in yh:
+            if isinstance(y, dict):
+                y.setdefault("type", "YAHOO")
+        news.extend(yh)
         for n in news:
             if not isinstance(n, dict):
                 continue
@@ -175,8 +252,9 @@ def _scan_news_for_symbol(item: Dict, alerted_hashes: Set[str]) -> List[Dict]:
             link = n.get("link", "") or ""
             if not title:
                 continue
-            # 命中關鍵字?
-            hits = _match_keywords(title)
+            # 8-K 強制觸發, 不需關鍵字命中 (本身已是重大事件)
+            force = bool(n.get("_force_alert"))
+            hits = _match_keywords(title) if not force else ["8K-AUTO"]
             if not hits:
                 continue
             # 去重
@@ -185,16 +263,19 @@ def _scan_news_for_symbol(item: Dict, alerted_hashes: Set[str]) -> List[Dict]:
             if dedup_key in alerted_hashes:
                 continue
             alerted_hashes.add(dedup_key)
-            out.append({
+            alert_d = {
                 "symbol": sym,
                 "market": market,
                 "tag": tag,         # watch / hold / main
                 "title": title,
                 "link": link,
                 "publisher": n.get("publisher", ""),
+                "source_type": n.get("type", "YAHOO"),  # 8-K / PR / TW_NEWS / YAHOO
                 "keywords_hit": hits[:5],
                 "h_hash": h_hash,
-            })
+            }
+            alert_d["urgency"] = classify_urgency(alert_d)
+            out.append(alert_d)
     except Exception as e:
         print(f"[news_event] {sym} 掃新聞失敗: {e}", flush=True)
     return out
@@ -211,7 +292,7 @@ def check_news_events() -> List[Dict]:
     state = watchlist_store.load_monitor_state()
     ne_state = state.setdefault("news_event_alert", {})
     today_str = dt.date.today().strftime("%Y-%m-%d")
-    now_utc = dt.datetime.utcnow()
+    now_utc = dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)
 
     # 跨日 reset
     if ne_state.get("date") != today_str:
@@ -236,8 +317,7 @@ def check_news_events() -> List[Dict]:
 
     # 並行掃 (Yahoo News 每檔 ~1-2s, 30 檔 ~5s with 8 workers)
     from concurrent.futures import ThreadPoolExecutor, as_completed
-    all_alerts: List[Dict] = []
-    with ThreadPoolExecutor(max_workers=4) as ex:
+    with ThreadPoolExecutor(max_workers=2) as ex:  # 每檔掃 4 來源, workers=2 避免 Yahoo 429
         futs = {ex.submit(_scan_news_for_symbol, it, alerted_hashes): it
                 for it in universe}
         for fut in as_completed(futs):
@@ -251,9 +331,13 @@ def check_news_events() -> List[Dict]:
     if not all_alerts:
         return []
 
-    # 排序: hold > watch > main (用戶相關優先)
+    # 排序: HIGH > MED > LOW; 同 urgency 內 hold > watch > main
+    urgency_order = {"HIGH": 0, "MED": 1, "LOW": 2}
     tag_priority = {"hold": 0, "watch": 1, "main": 2}
-    all_alerts.sort(key=lambda x: tag_priority.get(x.get("tag", "main"), 9))
+    all_alerts.sort(key=lambda x: (
+        urgency_order.get(x.get("urgency", "LOW"), 9),
+        tag_priority.get(x.get("tag", "main"), 9),
+    ))
 
     return all_alerts[:NEWS_MAX_PER_BATCH]
 
@@ -273,7 +357,7 @@ def mark_alerts_sent(alerts: List[Dict]) -> None:
         for a in alerts:
             alerted.add(f"{a.get('symbol', '')}:{a.get('h_hash', '')}")
         ne_state["alerted"] = sorted(alerted)
-        ne_state["last_batch_at"] = dt.datetime.utcnow().isoformat()
+        ne_state["last_batch_at"] = dt.datetime.now(dt.timezone.utc).replace(tzinfo=None).isoformat()
         state["news_event_alert"] = ne_state
         watchlist_store.save_monitor_state(state)
     except Exception as e:

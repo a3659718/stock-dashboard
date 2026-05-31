@@ -78,9 +78,67 @@ st.markdown(
           color: #1f6feb !important;
       }
 
+      /* === Mobile UI 優化 (max-width: 640px) === */
       @media (max-width: 640px) {
-        .block-container { padding-left: 0.6rem; padding-right: 0.6rem; }
-        .stTabs [data-baseweb="tab"] { padding: 8px 10px; font-size: 12px; }
+        .block-container {
+            padding-left: 0.5rem; padding-right: 0.5rem;
+            padding-top: 0.5rem;
+        }
+        /* Tab 列 — 改更小的字 + 緊湊 padding */
+        .stTabs [data-baseweb="tab"] {
+            padding: 6px 8px;
+            font-size: 11px;
+            margin-bottom: 3px;
+        }
+        /* Metric 卡 — 縮 padding 跟字 */
+        .stMetric { padding: 4px 6px; }
+        .stMetric label { font-size: 11px !important; }
+        .stMetric div[data-testid="stMetricValue"] {
+            font-size: 18px !important;
+        }
+        /* Button — 變大方便手指點 */
+        .stButton button {
+            min-height: 44px;
+            font-size: 14px !important;
+            padding: 0.5rem 0.8rem !important;
+        }
+        /* Subheader / Heading — 縮一級 */
+        h1 { font-size: 1.4rem !important; }
+        h2, .stSubheader { font-size: 1.15rem !important; }
+        h3 { font-size: 1.0rem !important; }
+        /* Dataframe — 強制水平 scroll, 不要硬擠 */
+        .stDataFrame {
+            overflow-x: auto;
+            font-size: 12px;
+        }
+        /* Markdown 文字小一點 */
+        .stMarkdown, .stCaption { font-size: 13px; }
+        /* 移除某些不必要的 margin 省空間 */
+        .stColumn { padding: 0 4px !important; }
+        /* Expander 縮 padding */
+        .streamlit-expanderHeader { padding: 8px 12px !important; font-size: 14px; }
+        /* Input/Select — 大方便點 */
+        .stTextInput input, .stSelectbox div[data-baseweb="select"] {
+            min-height: 40px;
+            font-size: 14px;
+        }
+        /* Checkbox 標籤縮字 */
+        .stCheckbox label { font-size: 12px !important; }
+        /* date-banner 縮 */
+        .date-banner { font-size: 12px; padding: 6px 10px; }
+        .date-banner b { font-size: 13px; }
+      }
+      /* 更小螢幕 — 手機直式 (max-width: 480px) */
+      @media (max-width: 480px) {
+        /* Tab 強制 1 列 scroll, 不換行 */
+        .stTabs [data-baseweb="tab-list"] {
+            flex-wrap: nowrap !important;
+            overflow-x: auto !important;
+        }
+        .stTabs [data-baseweb="tab"] {
+            font-size: 10px;
+            padding: 5px 6px;
+        }
       }
 
       /* 日期 banner */
@@ -513,12 +571,12 @@ watchlist = parse_watchlist(watchlist_raw)
 # ---------------------------------------------------------------------------
 # Tabs
 # ---------------------------------------------------------------------------
-# 外層 10 個 tab (個股+入場合一個 outer, 回測+追蹤合一個 outer)
+# 外層 11 個 tab (個股+入場合一個 outer, 回測+追蹤合一個 outer, 新增系統健康)
 (tab_wl, tab_actionable, tab_hold, tab_tw, tab_pulse, tab_growth,
- _tab_stock_outer, tab_us, tab_mood, _tab_bt_outer) = st.tabs(
+ _tab_stock_outer, tab_us, tab_mood, _tab_bt_outer, tab_health) = st.tabs(
     ["📋 自選股", "🎯 今日可行動", "💼 持倉分析", "🇹🇼 台股篩選", "🚀 強勢族群",
      "🌱 成長動能", "🔍 個股 (分析+入場)", "🇺🇸 美股 Top 10", "🧭 市場情緒",
-     "📊 策略驗證 (回測+追蹤)"]
+     "📊 策略驗證 (回測+追蹤)", "🩺 系統健康"]
 )
 
 # Sub-tabs: 個股 outer 內含 2 個 (入場評估 / 深度分析)
@@ -560,6 +618,13 @@ with tab_actionable:
              "勾起來則只顯示主流板塊的 picks (科技/半導體/AI/能源/重電/儲能等), "
              "適合你只想做這幾個板塊的時候."
     )
+    ai_ensemble = st.checkbox(
+        "🤖 啟用 AI ensemble (Gemini 信心加權)",
+        value=False,
+        key="actionable_ai_ensemble",
+        help="勾起來會多燒 1 次 Gemini quota (+10-15s), 對 top 10 用 AI 評信心 0-1, "
+             "ensemble 公式: final = orig × (0.6 + 0.4 × ai_conf). AI 最多 ±20% 重排."
+    )
     with cA3:
         # 顯示上次抓的時間 (從 cache timestamp)
         last_ts = st.session_state.get("actionable_picks_ts")
@@ -571,9 +636,17 @@ with tab_actionable:
         with st.spinner("整合所有訊號中… (這需要呼叫 Gemini + yfinance, 30-60 秒)"):
             try:
                 import actionable_picks as _ap
-                st.session_state["actionable_picks_cache"] = _ap.compute_actionable_picks(
+                _picks = _ap.compute_actionable_picks(
                     top_n=10, mainstream_only=mainstream_only,
                 )
+                # AI ensemble (可選)
+                if ai_ensemble and _picks:
+                    try:
+                        import ai_confidence_scorer as _acs
+                        _picks = _acs.rescore_with_ai(_picks, market="TW")
+                    except Exception as _ae:
+                        st.warning(f"⚠️ AI ensemble 失敗 (用原始排序): {_ae}")
+                st.session_state["actionable_picks_cache"] = _picks
                 st.session_state["actionable_picks_ts"] = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
             except Exception as e:
                 st.error(f"整合失敗: {type(e).__name__}: {e}")
@@ -2024,38 +2097,94 @@ with tab_stock:
             help="4 位數字 = 台股；含字母 = 美股 (用 yfinance)",
         )
     with cS2:
-        analyze_btn = st.button("🔍 分析", use_container_width=True, type="primary")
+        include_ai = st.checkbox(
+            "☑ 含 AI 觀點",
+            value=ai_analyzer.gemini_available(),
+            disabled=not ai_analyzer.gemini_available(),
+            help=("需先在 secrets 設 GEMINI_API_KEY 並重啟"
+                  if not ai_analyzer.gemini_available() else
+                  "勾起來會多燒 1 次 Gemini quota, 跑時間 +5-15s"),
+            key="stock_include_ai",
+        )
     with cS3:
-        ai_btn = st.button("🤖 AI 深度", use_container_width=True,
-                           disabled=not ai_analyzer.gemini_available(),
-                           help=("需先在 secrets 設 GEMINI_API_KEY 並重啟"
-                                 if not ai_analyzer.gemini_available() else
-                                 "依基本面/技術面/籌碼面/新聞綜合分析"))
+        analyze_btn = st.button("🚀 完整分析", use_container_width=True, type="primary",
+                                  help="一鍵跑技術 + 籌碼 + 深度(PE/月營收/籌碼變化) + (可選)AI")
+    # 方案 A: 不再用獨立 AI 按鈕, 改 checkbox include_ai
+    ai_btn = False
 
-    # 收到任何按鈕都要執行 (analyze 或 ai)，但 ai 需要先有 analyze 的資料
-    do_fetch = (analyze_btn or ai_btn) and sid_input.strip()
-    if do_fetch:
+    # 一鍵全跑 — 4 步驟用 st.status 顯示進度
+    if analyze_btn and sid_input.strip():
         sid = sid_input.strip()
         try:
-            with st.spinner(f"抓取 {sid} 完整資料中…"):
+            with st.status(f"完整分析 {sid} 中...", expanded=True) as status:
+                # 步驟 1/4: 抓技術 + 籌碼
+                st.write("📊 步驟 1/4: 抓技術指標 + 籌碼資料...")
                 full = stock_analyzer.fetch_stock_full(sid)
-            if full["daily"].empty:
-                st.error(f"找不到 {sid} 的日線資料 (代號可能錯誤或為下市股)。")
-                full = None
-            else:
-                ind = stock_analyzer.compute_indicators(full["daily"])
-                hits = stock_analyzer.evaluate_conditions(sid, full, tw_params)
-                score, reasons = stock_analyzer.overall_score(hits)
-                # 暫存以便 AI 使用
-                st.session_state["last_stock"] = {
-                    "sid": sid, "full": full, "ind": ind, "hits": hits, "score": score, "reasons": reasons
-                }
+                if full["daily"].empty:
+                    st.error(f"❌ 找不到 {sid} 的日線資料 (代號可能錯誤或下市股)")
+                    status.update(label="❌ 分析失敗", state="error")
+                    # 清空上次結果, 避免顯示 stale 分析
+                    st.session_state.pop("last_stock", None)
+                    st.session_state.pop("last_ai", None)
+                else:
+                    ind = stock_analyzer.compute_indicators(full["daily"])
+                    hits = stock_analyzer.evaluate_conditions(sid, full, tw_params)
+                    score, reasons = stock_analyzer.overall_score(hits)
+                    st.session_state["last_stock"] = {
+                        "sid": sid, "full": full, "ind": ind,
+                        "hits": hits, "score": score, "reasons": reasons,
+                    }
+                    st.write(f"✅ 技術評分: {score}/10 (命中 {len(reasons)} 條件)")
+
+                    # 步驟 2/4: 深度分析
+                    st.write("🔬 步驟 2/4: 跑深度分析 (PE 同業比 / 月營收 / K 形態 / 法說)...")
+                    try:
+                        import stock_deep_analyzer
+                        deep = stock_deep_analyzer.get_deep_analysis(
+                            sid, market="US" if full.get("is_us") else "TW",
+                        )
+                        st.session_state[f"deep_{sid}"] = deep
+                        st.write("✅ 深度資料抓完")
+                    except Exception as _de:
+                        st.warning(f"⚠️ 深度分析失敗 (跳過): {type(_de).__name__}: {_de}")
+                        st.session_state[f"deep_{sid}"] = None
+
+                    # 步驟 3/4: AI (可選)
+                    if include_ai and ai_analyzer.gemini_available():
+                        st.write("🤖 步驟 3/4: 跑 Gemini AI 觀點...")
+                        try:
+                            deep_data = st.session_state.get(f"deep_{sid}")
+                            ok, ai_text = ai_analyzer.analyze(
+                                stock_meta={
+                                    "stock_id": full["stock_id"],
+                                    "name": full["name"],
+                                    "industry": full["industry"],
+                                    "market": full["market"],
+                                },
+                                daily=full["daily"], ind=ind,
+                                inst=full["inst"], margin=full["margin"],
+                                hits=hits, score=score,
+                                deep_analysis=deep_data,
+                            )
+                            if ok:
+                                st.session_state["last_ai"] = {"sid": sid, "text": ai_text}
+                                st.write("✅ AI 分析完成")
+                            else:
+                                st.warning(f"⚠️ AI 失敗: {ai_text}")
+                        except Exception as _ae:
+                            st.warning(f"⚠️ AI 失敗 (跳過): {type(_ae).__name__}: {_ae}")
+                    else:
+                        st.write("⏭️ 步驟 3/4: 跳過 AI (未勾選或無 GEMINI key)")
+
+                    # 步驟 4/4
+                    st.write("📋 步驟 4/4: 渲染結果...")
+                    status.update(label=f"✅ {sid} 完整分析完成", state="complete", expanded=False)
         except Exception as e:
-            st.error(f"分析失敗：{e}")
-            full = None
+            st.error(f"分析失敗: {type(e).__name__}: {e}")
 
     last_stock = st.session_state.get("last_stock")
-    if last_stock and (analyze_btn or ai_btn):
+    # 方案 A: 有 cached 結果就顯示 (不再依賴按鈕狀態)
+    if last_stock:
         full = last_stock["full"]; ind = last_stock["ind"]
         hits = last_stock["hits"]; score = last_stock["score"]; reasons = last_stock["reasons"]
         sid = last_stock["sid"]
@@ -2087,11 +2216,12 @@ with tab_stock:
         else:
             st.info("目前沒有命中任何條件。")
 
-        # ========== 🔬 深度分析 (法說 / PE / 籌碼 / K 形態) ==========
+        # ========== 🔬 深度分析 (已在「🚀 完整分析」步驟 2/4 自動跑) ==========
         st.markdown("---")
         st.markdown("### 🔬 深度分析")
-        if st.button("🔄 跑深度分析 (約 10-20 秒)", key=f"deep_btn_{sid}",
-                      help="抓重大訊息+Gemini 摘要 / PE vs 同業 / 外資持股變化 / K 線形態",
+        # 提供「重跑」按鈕 (萬一上次失敗或要刷新)
+        if st.button("🔄 重跑深度分析", key=f"deep_redo_btn_{sid}",
+                      help="重新抓 PE / 籌碼 / K 形態 / 法說 (約 10-20s)",
                       use_container_width=False):
             with st.spinner("深度分析中..."):
                 try:
@@ -2100,6 +2230,7 @@ with tab_stock:
                         sid, market="US" if full.get("is_us") else "TW",
                     )
                     st.session_state[f"deep_{sid}"] = deep
+                    st.rerun()
                 except Exception as e:
                     st.error(f"深度分析失敗: {type(e).__name__}: {e}")
                     st.session_state[f"deep_{sid}"] = None
@@ -2375,38 +2506,15 @@ with tab_stock:
                     for k, v in hits.items()]
             st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
-        # ================== AI 深度分析 ==================
-        if ai_btn:
-            if not ai_analyzer.gemini_available():
-                st.error("尚未設定 GEMINI_API_KEY 或 google-generativeai 未安裝。")
-            else:
-                with st.spinner("🤖 Gemini 思考中…約 10–20 秒"):
-                    # 把 tab_stock 下方深度分析結果一起餵進 AI prompt
-                    # (如果使用者已按過「跑深度分析」按鈕)
-                    deep_data = st.session_state.get(f"deep_{full['stock_id']}")
-                    ok, ai_text = ai_analyzer.analyze(
-                        stock_meta={
-                            "stock_id": full["stock_id"], "name": full["name"],
-                            "industry": full["industry"], "market": full["market"],
-                        },
-                        daily=full["daily"], ind=ind,
-                        inst=full["inst"], margin=full["margin"],
-                        hits=hits, score=score,
-                        deep_analysis=deep_data,
-                    )
-                if ok:
-                    st.session_state["last_ai"] = {"sid": sid, "text": ai_text}
-                    st.markdown("---")
-                    st.markdown("### 🤖 Gemini 深度分析")
-                    st.markdown(ai_text)
-                else:
-                    st.error(f"AI 分析失敗：{ai_text}")
-
-        # 顯示快取的 AI 結果 (即使這次沒按 AI 按鈕)
+        # ================== 🤖 AI 深度分析結果 (在「🚀 完整分析」步驟 3/4 自動跑) ==================
         last_ai = st.session_state.get("last_ai")
-        if last_ai and last_ai.get("sid") == sid and not ai_btn:
-            with st.expander("🤖 上次 AI 分析", expanded=False):
-                st.markdown(last_ai["text"])
+        if last_ai and last_ai.get("sid") == sid:
+            st.markdown("---")
+            st.markdown("### 🤖 Gemini 深度分析")
+            st.markdown(last_ai["text"])
+        elif ai_analyzer.gemini_available():
+            st.markdown("---")
+            st.caption("💡 想看 AI 觀點? 勾選頁面頂部「☑ 含 AI 觀點」後再按「🚀 完整分析」")
 
         # 推送 AI 到 TG
         last_ai = st.session_state.get("last_ai")
@@ -2679,6 +2787,44 @@ with tab_us:
 # =============================================================================
 with tab_mood:
     st.subheader("Fear & Greed + 板塊輪動 + 市場新聞題材")
+
+    # === 🌀 板塊輪動矩陣 (4 象限) ===
+    with st.expander("🌀 板塊輪動矩陣 (本週 vs 上週)", expanded=False):
+        col_r1, col_r2 = st.columns([1, 3])
+        with col_r1:
+            rot_mkt = st.radio("市場", ["US", "TW"], index=0, key="rot_mkt", horizontal=True)
+            rot_btn = st.button("🔄 重抓", key="rot_refresh", use_container_width=True)
+        if rot_btn or "sector_rot_cache" not in st.session_state:
+            with st.spinner("計算 sector rotation..."):
+                try:
+                    import sector_rotation as _sr
+                    st.session_state["sector_rot_cache"] = _sr.compute_sector_rotation(rot_mkt)
+                except Exception as _re:
+                    st.error(f"輪動矩陣失敗: {_re}")
+                    st.session_state["sector_rot_cache"] = None
+        rot = st.session_state.get("sector_rot_cache")
+        if rot and rot.get("quadrants"):
+            import sector_rotation as _sr
+            quads = rot["quadrants"]
+            cols = st.columns(4)
+            for i, (qkey, items) in enumerate(quads.items()):
+                emoji, label, hint = _sr.QUADRANT_LABELS.get(qkey, ("?", qkey, ""))
+                with cols[i]:
+                    st.markdown(f"### {emoji} {label}")
+                    st.caption(hint)
+                    if items:
+                        for it in items[:5]:
+                            st.markdown(
+                                f"- **{it['etf']}** {it['name']}  \n"
+                                f"  本週 {it['this_week_pct']:+.2f}% / 上週 {it['last_week_pct']:+.2f}%"
+                            )
+                    else:
+                        st.caption("(無)")
+            st.caption(
+                f"📊 中位數: 本週 {rot.get('median_this','?')}% / 上週 {rot.get('median_last','?')}% "
+                f"· 操作邏輯: 🟡 Improving 是新興強勢值得追, 🔵 Weakening 是漲多警訊"
+            )
+
     mood_btn = st.button("🔄 抓取市場情緒", use_container_width=True, type="primary",
                          key="mood_btn_main")
     if mood_btn:
@@ -3107,3 +3253,128 @@ with tab_entry:
                 st.info(ai_summary)
 
     st.caption("⚠️ 評估僅供參考, 不構成投資建議. 請自行做研究與風控.")
+
+
+# =============================================================================
+# Tab — 🩺 系統健康度 (Admin Dashboard)
+# =============================================================================
+with tab_health:
+    import system_health
+    st.subheader("🩺 系統健康度 (Admin Dashboard)")
+    st.caption("一頁看各 alert 模組狀態 / FinMind+Gemini 額度 / 推播紀錄 / Cron 活著嗎。")
+
+    # 🆕 自動 ping (用戶開頁時 record 一筆 DASHBOARD_PING, 建立時間錨)
+    # 5 min TTL: 用戶長時間停留時 ping 仍會 refresh, last_ping_ago 才不會 stale
+    import time as _t_health
+    _last_ping = st.session_state.get("_health_last_ping_ts", 0)
+    if _t_health.time() - _last_ping > 300:  # 5 min
+        try:
+            system_health.record_dashboard_open()
+            st.session_state["_health_last_ping_ts"] = _t_health.time()
+        except Exception:
+            pass
+
+    if st.button("🔄 重新整理", key="health_refresh", use_container_width=False):
+        # 重新整理時也 ping (reset ts 讓 next rerun 立即 ping)
+        st.session_state.pop("_health_last_ping_ts", None)
+        st.rerun()
+
+    with st.spinner("收集系統健康指標..."):
+        try:
+            health = system_health.collect_health()
+        except Exception as e:
+            st.error(f"❌ 收集失敗: {type(e).__name__}: {e}")
+            health = None
+
+    if health:
+        # === 🆕 Cron 健康度 (最重要 — 用「絕對時間錨」判斷) ===
+        cron = health.get("cron_health", {})
+        st.markdown(f"### {cron.get('status', '—')}")
+        st.caption(cron.get("label", ""))
+        cC1, cC2, cC3 = st.columns(3)
+        cC1.metric("最近 cron 推播", cron.get("last_cron_ago", "—"))
+        cC2.metric("最近 dashboard 開啟", cron.get("last_ping_ago", "—"))
+        ctx = []
+        if cron.get("is_weekend"): ctx.append("週末")
+        if not cron.get("in_session"): ctx.append("盤外")
+        cC3.metric("當前時段", " · ".join(ctx) if ctx else "盤中")
+        st.divider()
+
+        # === GH Actions 整體狀態 (大字醒目) ===
+        gh = health["gh_actions"]
+        st.markdown(f"### {gh['status']}")
+        st.caption(f"最近 1 個 alert 發生: {gh.get('latest_ago', '—')} ({gh.get('latest', '—')})")
+
+        st.divider()
+
+        # === 服務可用性 (4 卡) ===
+        st.markdown("#### 🔧 外部服務")
+        cSv1, cSv2, cSv3, cSv4 = st.columns(4)
+        with cSv1:
+            tg = health["telegram"]
+            st.metric("Telegram", "✅ OK" if tg["available"] else "❌ 未設")
+            if tg.get("err"):
+                st.caption(f"⚠ {tg['err'][:60]}")
+        with cSv2:
+            ge = health["gemini"]
+            st.metric("Gemini", "✅ OK" if ge["available"] else "❌ 未設")
+            if ge.get("err"):
+                st.caption(f"⚠ {ge['err'][:60]}")
+        with cSv3:
+            fm = health["finmind"]
+            if fm["available"]:
+                pct = fm.get("pct_used")
+                label = f"{fm.get('user_count','?')}/{fm.get('limit','?')}"
+                if pct is not None:
+                    label += f" ({pct}%)"
+                st.metric("FinMind 額度", label,
+                           delta="⚠️ 接近用完" if (pct or 0) > 80 else "充足",
+                           delta_color="inverse" if (pct or 0) > 80 else "normal")
+            else:
+                st.metric("FinMind", "❌ 不可用")
+                if fm.get("err"):
+                    st.caption(f"⚠ {fm['err'][:60]}")
+        with cSv4:
+            p24 = health["push_24h"]
+            st.metric("24h 推播", f"{p24['total']} 筆",
+                       delta=f"✅ {p24['ok']} / ❌ {p24['fail']}",
+                       delta_color="normal" if p24['fail'] == 0 else "inverse")
+
+        st.divider()
+
+        # === Alert 模組狀態 ===
+        st.markdown("#### 📡 Alert 模組狀態")
+        import pandas as pd
+        mod_df = pd.DataFrame(health["modules"])[
+            ["status", "module", "last_fired_ago", "today_count"]
+        ]
+        mod_df.columns = ["狀態", "模組", "上次觸發", "今日次數"]
+        st.dataframe(mod_df, use_container_width=True, hide_index=True)
+
+        st.divider()
+
+        # === 24h 推播明細 ===
+        st.markdown("#### 📋 最近 24h 推播紀錄")
+        recent = p24.get("recent") or []
+        if recent:
+            recent_df = pd.DataFrame(recent)
+            recent_df["ok"] = recent_df["ok"].map(lambda x: "✅" if x else "❌")
+            display_cols = [c for c in ["ts", "ok", "type", "err"] if c in recent_df.columns]
+            st.dataframe(recent_df[display_cols].iloc[::-1],
+                         use_container_width=True, hide_index=True)
+        else:
+            st.info("過去 24h 沒有推播紀錄 (可能 cron 沒跑, 或都被 cooldown 擋掉).")
+
+        # === 7d 統計 by type ===
+        st.markdown("#### 📊 過去 7 天推播統計 (by type)")
+        by_type = health["push_7d"].get("by_type") or {}
+        if by_type:
+            bt_df = pd.DataFrame([
+                {"類型": t, "成功": v["ok"], "失敗": v["fail"]}
+                for t, v in by_type.items()
+            ]).sort_values("成功", ascending=False)
+            st.dataframe(bt_df, use_container_width=True, hide_index=True)
+        else:
+            st.info("過去 7d 無推播紀錄.")
+
+        st.caption(f"⏰ 收集時間 (UTC): {health['ts']}")

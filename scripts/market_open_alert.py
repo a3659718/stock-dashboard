@@ -824,10 +824,32 @@ def main() -> int:
                     + ", ".join(a.get("symbol", "") for a in news_event_alerts),
                     flush=True,
                 )
-                ne_msg = notifier.fmt_news_event_alerts(news_event_alerts)
+                # C: 對 HIGH urgency 跑 Gemini 影響分析 (加進 message)
+                try:
+                    import news_impact_analyzer as _nia
+                    impact_block = _nia.analyze_news_impact(news_event_alerts)
+                except Exception as _ie:
+                    print(f"[news event] impact analyzer failed (skip): {_ie}", flush=True)
+                    impact_block = ""
+
+                ne_msg = notifier.fmt_news_event_alerts(news_event_alerts,
+                                                          impact_analysis=impact_block)
                 if ne_msg:
-                    ok_n, info_n = notifier.send_message(ne_msg, disable_preview=False)
-                    print(f"[news event] TG result: ok={ok_n} info={info_n}", flush=True)
+                    # B: 響鈴控制
+                    #  - 有 HIGH/MED urgency 響鈴
+                    #  - 純 LOW 新聞 → 靜音
+                    #  - 但持倉股 (tag=hold) 即使 LOW 也響鈴 (用戶在意)
+                    has_urgent = any(
+                        a.get("urgency") in ("HIGH", "MED") or a.get("tag") == "hold"
+                        for a in news_event_alerts
+                    )
+                    ok_n, info_n = notifier.send_message(
+                        ne_msg,
+                        disable_preview=False,
+                        disable_notification=(not has_urgent),
+                    )
+                    print(f"[news event] TG result: ok={ok_n} info={info_n} urgent={has_urgent}",
+                          flush=True)
                     if ok_n:
                         try:
                             _ne.mark_alerts_sent(news_event_alerts)
