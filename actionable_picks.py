@@ -136,7 +136,8 @@ def _score_pick(pick: Dict) -> float:
 
 def compute_actionable_picks(top_n: int = 5, market: str = "TW",
                                 respect_regime: bool = True,
-                                open_data: Optional[Dict] = None) -> List[Dict]:
+                                open_data: Optional[Dict] = None,
+                                mainstream_only: bool = False) -> List[Dict]:
     """從各訊號源 mash up 成 top N 可下單清單.
 
     來源優先序 (高 → 低):
@@ -343,10 +344,12 @@ def compute_actionable_picks(top_n: int = 5, market: str = "TW",
     except Exception as _e:
         print(f"[actionable] entry_label 計算失敗 (non-fatal): {_e}", flush=True)
 
-    # ABCD enrich: 3 層目標 + chip_price_divergence + 強勢族群 boost + 主力券商
+    # ABCDF enrich: 3 層目標 + chip_price_divergence + 強勢族群 boost + 主力券商
+    # + 主流板塊 +0.5 (mainstream_only=True 時 filter 只回主流板塊)
     try:
         import actionable_enhancer as _ae
-        result = _ae.enhance_picks(result, market=market)
+        result = _ae.enhance_picks(result, market=market,
+                                    mainstream_only=mainstream_only)
     except Exception as _e:
         print(f"[actionable] enhance_picks 失敗 (non-fatal): {_e}", flush=True)
 

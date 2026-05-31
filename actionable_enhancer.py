@@ -6,6 +6,7 @@ actionable_enhancer.py
   C. 強勢族群 boost (+ score / + reason)
   D. 主力券商買賣超 (進 reasons)
   E. 屬於哪個強勢族群 (label, 給 app.py 顯示用)
+  F. 主流板塊 boost (+0.5 分) — 科技/AI/能源/重電等 (新)
 
 設計成 standalone module 讓 actionable_picks 一次呼叫:
   result = compute_actionable_picks(...)
@@ -16,6 +17,35 @@ from __future__ import annotations
 from typing import Dict, List, Optional
 
 import data_sources as ds
+
+
+# F: 主流板塊定義 — 涵蓋科技/半導體/AI/能源/電子製造/重電
+MAINSTREAM_SECTORS = {
+    # 證交所產業分類 (industry_category)
+    "半導體業", "電腦及週邊設備業", "電子零組件業", "通信網路業",
+    "光電業", "電子通路業", "資訊服務業", "其他電子業",
+    "油電燃氣業", "電機機械",
+    # 熱門題材 (sector_pulse TW_THEMES)
+    "AI 伺服器", "AI 邊緣", "AI PC", "無人機", "低軌衛星",
+    "重電族群", "散熱", "機器人", "儲能", "高頻高速",
+    "ABF 載板", "矽光子", "CCL", "PCB", "被動元件", "面板",
+    "電動車", "汽車零件",
+}
+
+
+def _is_mainstream_sector(sector_name: str) -> bool:
+    """判斷一個族群名是否屬於主流板塊 (含模糊比對)."""
+    if not sector_name:
+        return False
+    s = sector_name.strip()
+    if s in MAINSTREAM_SECTORS:
+        return True
+    for mainstream in MAINSTREAM_SECTORS:
+        if mainstream in s or s in mainstream:
+            return True
+    keywords = ["半導體", "電子", "電腦", "AI", "晶片", "ic", "IC",
+                "能源", "電力", "重電", "光電", "機械"]
+    return any(kw in s for kw in keywords)
 
 
 # ---------------------------------------------------------------------------
@@ -185,6 +215,28 @@ def _apply_strong_sector_boost(pick: Dict, strong_sectors_map: Dict) -> None:
     pick["sector_avg_pct"] = avg
 
 
+def _apply_mainstream_boost(pick: Dict) -> None:
+    """F: 若 pick 屬於主流板塊 (科技/AI/能源/重電) → score +0.5 + 加 reason + flag.
+
+    判斷依據 (任一吻合即算): theme / sector_label / industry / sector.
+    """
+    candidates = [
+        pick.get("theme"),
+        pick.get("sector_label"),
+        pick.get("industry"),
+        pick.get("sector"),
+    ]
+    for c in candidates:
+        if c and _is_mainstream_sector(str(c)):
+            pick["score"] = round((pick.get("score", 0) or 0) + 0.5, 2)
+            pick["is_mainstream"] = True
+            pick.setdefault("reasons", []).append(
+                f"🎯 主流板塊 (科技/AI/能源/重電) +0.5 分"
+            )
+            return
+    pick["is_mainstream"] = False
+
+
 # ---------------------------------------------------------------------------
 # D: 主力券商買賣超
 # ---------------------------------------------------------------------------
@@ -229,27 +281,26 @@ def _add_main_broker(pick: Dict) -> None:
         print(f"[enhancer D] main_broker {sid}: {e}", flush=True)
 
 
-# ---------------------------------------------------------------------------
-# 主入口
-# ---------------------------------------------------------------------------
-def enhance_picks(picks: List[Dict], market: str = "TW") -> List[Dict]:
-    """對 actionable picks 一次性加 A+B+C+D enrich. 不 raise.
+def enhance_picks(picks: List[Dict], market: str = "TW",
+                   mainstream_only: bool = False) -> List[Dict]:
+    """對 actionable picks 一次性加 A+B+C+D+F enrich. 不 raise.
 
     呼叫順序: A 3 層目標 → B chip_divergence → C 強勢族群 boost →
-              D 主力券商 → 重新排序
+              D 主力券商 → F 主流板塊 +0.5 → 重新排序 → (可選 mainstream filter)
+
+    Args:
+      mainstream_only: True 時最後過濾只回主流板塊 picks (科技/AI/能源).
+                       預設 False (主流加分但不限制範圍, 仍看得到輪動).
     """
     if not picks or market != "TW":
         return picks
 
-    # 預先抓一次強勢族群 map (給 C 用), 避免每檔重複算
     strong_map = _get_current_strong_sectors()
 
     for p in picks:
-        # 跳過 dummy (_regime 等)
         if not p.get("stock_id"):
             continue
         try:
-            _add_three_tier_targets(p)
             _add_three_tier_targets(p)
         except Exception as e:
             print(f"[enhancer A] {p.get('stock_id')}: {e}", flush=True)
@@ -265,7 +316,12 @@ def enhance_picks(picks: List[Dict], market: str = "TW") -> List[Dict]:
             _add_main_broker(p)
         except Exception as e:
             print(f"[enhancer D] {p.get('stock_id')}: {e}", flush=True)
+        try:
+            _apply_mainstream_boost(p)
+        except Exception as e:
+            print(f"[enhancer F] {p.get('stock_id')}: {e}", flush=True)
 
-    # 強勢族群 boost 改變了 score, 重新排序
     picks.sort(key=lambda x: x.get("score", 0) or 0, reverse=True)
+    if mainstream_only:
+        picks = [p for p in picks if p.get("is_mainstream")]
     return picks

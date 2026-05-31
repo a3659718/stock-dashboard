@@ -2192,6 +2192,42 @@ def fmt_weak_open_alerts(alerts: list) -> str:
     return _truncate_tg_msg("\n".join(lines).rstrip())
 
 
+def fmt_news_event_alerts(alerts: list) -> str:
+    """事件型新聞推播 (news_event_alert.check_news_events 用).
+
+    alerts: list of {symbol, market, tag, title, link, publisher, keywords_hit}
+    """
+    if not alerts:
+        return ""
+    lines = [f"<b>📰 重大新聞事件 ({len(alerts)} 則)</b>", ""]
+    tag_emoji = {"hold": "💼", "watch": "👀", "main": "📌"}
+    tag_text = {"hold": "持倉", "watch": "觀察", "main": "主流"}
+    for a in alerts:
+        sym = _esc(a.get("symbol", ""))
+        market = _esc(a.get("market", ""))
+        tag = a.get("tag", "main")
+        t_emoji = tag_emoji.get(tag, "📌")
+        t_text = tag_text.get(tag, "")
+        title = _esc(a.get("title", ""))
+        link = a.get("link", "") or ""
+        publisher = _esc(a.get("publisher", ""))
+        hits = a.get("keywords_hit") or []
+        hits_str = ", ".join(_esc(k) for k in hits[:5])
+        lines.append(
+            f"{t_emoji} [{market}] <code>{sym}</code>  <i>{t_text}</i>  "
+            f"關鍵字: <b>{hits_str}</b>"
+        )
+        if link:
+            lines.append(f'  <a href="{link}">{title}</a>')
+        else:
+            lines.append(f"  {title}")
+        if publisher:
+            lines.append(f"  <i>來源: {publisher}</i>")
+        lines.append("")
+    lines.append("<i>※ 新聞驅動訊號, 仍須自行確認消息真偽與後續發展.</i>")
+    return _truncate_tg_msg("\n".join(lines).rstrip())
+
+
 def fmt_holdings_intraday_alerts(alerts: list) -> str:
     """持倉 intraday 風險警報訊息 (4 新).
 

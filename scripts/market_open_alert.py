@@ -813,6 +813,32 @@ def main() -> int:
             print(f"[holdings intraday] check failed (non-fatal): {_e}", flush=True)
             traceback.print_exc()
 
+        # === 5 (新): 事件型新聞推播 (Trump/FDA/buyback/併購 等命中關鍵字) ===
+        news_event_alerts = []
+        try:
+            import news_event_alert as _ne
+            news_event_alerts = _ne.check_news_events() or []
+            if news_event_alerts:
+                print(
+                    f"[news event] triggered {len(news_event_alerts)} 則: "
+                    + ", ".join(a.get("symbol", "") for a in news_event_alerts),
+                    flush=True,
+                )
+                ne_msg = notifier.fmt_news_event_alerts(news_event_alerts)
+                if ne_msg:
+                    ok_n, info_n = notifier.send_message(ne_msg, disable_preview=False)
+                    print(f"[news event] TG result: ok={ok_n} info={info_n}", flush=True)
+                    if ok_n:
+                        try:
+                            _ne.mark_alerts_sent(news_event_alerts)
+                            print(f"[news event] state updated", flush=True)
+                        except Exception as _me:
+                            print(f"[news event] mark_alerts_sent failed: {_me}", flush=True)
+        except Exception as _e:
+            import traceback
+            print(f"[news event] check/send failed (non-fatal): {_e}", flush=True)
+            traceback.print_exc()
+
         # === Q2: 盤中強勢族群推播 (per-day cap 1, 全域 60min cooldown) ===
         strong_sector_alerts = []
         try:

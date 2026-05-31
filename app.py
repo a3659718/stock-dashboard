@@ -551,6 +551,15 @@ with tab_actionable:
     with cA2:
         send_actionable_tg = st.button("✈️ 推 Top 10 到 TG", use_container_width=True,
                                          key="actionable_tg")
+    # B: 主流板塊 toggle (預設不限, 勾起來則 filter 只看科技/AI/能源/重電)
+    mainstream_only = st.checkbox(
+        "📊 只看主流板塊 (科技 / AI / 能源 / 重電)",
+        value=False,
+        key="actionable_mainstream",
+        help="預設不限 — 仍會看到輪動到其他族群的機會, 但主流板塊自動 +0.5 分排序更前面. "
+             "勾起來則只顯示主流板塊的 picks (科技/半導體/AI/能源/重電/儲能等), "
+             "適合你只想做這幾個板塊的時候."
+    )
     with cA3:
         # 顯示上次抓的時間 (從 cache timestamp)
         last_ts = st.session_state.get("actionable_picks_ts")
@@ -562,7 +571,9 @@ with tab_actionable:
         with st.spinner("整合所有訊號中… (這需要呼叫 Gemini + yfinance, 30-60 秒)"):
             try:
                 import actionable_picks as _ap
-                st.session_state["actionable_picks_cache"] = _ap.compute_actionable_picks(top_n=10)
+                st.session_state["actionable_picks_cache"] = _ap.compute_actionable_picks(
+                    top_n=10, mainstream_only=mainstream_only,
+                )
                 st.session_state["actionable_picks_ts"] = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
             except Exception as e:
                 st.error(f"整合失敗: {type(e).__name__}: {e}")
