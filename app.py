@@ -535,10 +535,10 @@ with _tab_bt_outer:
 
 
 # =============================================================================
-# Tab — 今日可行動 (整合各訊號的 Top 5 卡片)
+# Tab — 今日可行動 (整合各訊號的 Top 10 卡片)
 # =============================================================================
 with tab_actionable:
-    st.subheader("🎯 今日 Top 5 可行動")
+    st.subheader("🎯 今日 Top 10 可行動")
     st.caption(
         "整合「強勢族群龍頭 / 催化劑 / 隔日突破 / 潛力股」等所有訊號, "
         "用 R:R + 訊號交叉驗證 + 部位規模建議排出可下單清單. "
@@ -546,10 +546,10 @@ with tab_actionable:
     )
     cA1, cA2, cA3 = st.columns([1, 1, 2])
     with cA1:
-        load_actionable = st.button("🔄 重抓 Top 5", use_container_width=True,
+        load_actionable = st.button("🔄 重抓 Top 10", use_container_width=True,
                                       key="actionable_load", type="primary")
     with cA2:
-        send_actionable_tg = st.button("✈️ 推 Top 5 到 TG", use_container_width=True,
+        send_actionable_tg = st.button("✈️ 推 Top 10 到 TG", use_container_width=True,
                                          key="actionable_tg")
     with cA3:
         # 顯示上次抓的時間 (從 cache timestamp)
@@ -562,7 +562,7 @@ with tab_actionable:
         with st.spinner("整合所有訊號中… (這需要呼叫 Gemini + yfinance, 30-60 秒)"):
             try:
                 import actionable_picks as _ap
-                st.session_state["actionable_picks_cache"] = _ap.compute_actionable_picks(top_n=5)
+                st.session_state["actionable_picks_cache"] = _ap.compute_actionable_picks(top_n=10)
                 st.session_state["actionable_picks_ts"] = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
             except Exception as e:
                 st.error(f"整合失敗: {type(e).__name__}: {e}")
@@ -575,7 +575,7 @@ with tab_actionable:
     # 還沒按過按鈕 — 直接顯示提示, 不要自動跑
     if raw_picks is None:
         st.info(
-            "👆 按「重抓 Top 5」開始整合訊號. \n\n"
+            "👆 按「重抓 Top 10」開始整合訊號. \n\n"
             "這個分析會跑:\n"
             "- compute_hot_themes (族群熱度 + 催化劑 Gemini)\n"
             "- find_emerging_themes (萌芽族群 + 法人卡位)\n"
@@ -617,7 +617,7 @@ with tab_actionable:
                     "- 盤前 / 休市時資料還沒更新\n"
                     "- Gemini quota 已滿 (檢查 Google Cloud console)\n"
                     "- yfinance / FinMind 暫時失效\n\n"
-                    "再按一次「重抓 Top 5」試試, 或檢查 sidebar 的設定狀態."
+                    "再按一次「重抓 Top 10」試試, 或檢查 sidebar 的設定狀態."
                 )
         else:
             for i, p in enumerate(picks, 1):
@@ -638,8 +638,30 @@ with tab_actionable:
                         )
                         if p.get("theme"):
                             st.caption(f"族群: {p.get('theme')} · R:R {rr} {rr_emoji} · 綜合分數 {score}")
+                        # E: 標註屬於哪個強勢族群
+                        if p.get("sector_label"):
+                            sap = p.get("sector_avg_pct", 0)
+                            st.caption(f"📊 屬於強勢族群「{p['sector_label']}」(均漲 +{sap:.2f}%)")
                         if p.get("entry_score") is not None:
                             st.caption(f"入場評分 {p['entry_score']}/100 → {p.get('entry_action', '—')}")
+                        # A: 3 層目標價
+                        t_short = p.get("target_short") or p.get("target")
+                        t_mid = p.get("target_mid")
+                        t_long = p.get("target_long")
+                        if t_mid or t_long:
+                            cur_v = p.get("current") or 0
+                            def _gain(t):
+                                if t and cur_v:
+                                    return f"+{(t/cur_v-1)*100:.1f}%"
+                                return ""
+                            tlines = []
+                            if t_short:
+                                tlines.append(f"短線 {t_short} ({_gain(t_short)})")
+                            if t_mid:
+                                tlines.append(f"中線 {t_mid} ({_gain(t_mid)})")
+                            if t_long:
+                                tlines.append(f"長線 {t_long} ({_gain(t_long)})")
+                            st.caption("🎯 " + " / ".join(tlines))
                     with cH2:
                         if p.get("current") is not None:
                             st.metric("現價", f"{p['current']}")
@@ -681,7 +703,7 @@ with tab_actionable:
     # TG 推送 — 用 raw_picks (含空頭 dummy), 確保空頭 banner 也能推到 TG
     if send_actionable_tg:
         if raw_picks is None:
-            st.warning("還沒抓資料, 請先按「重抓 Top 5」")
+            st.warning("還沒抓資料, 請先按「重抓 Top 10」")
         elif not raw_picks:
             st.warning("沒可推送內容 (compute 回空)")
         else:
@@ -691,7 +713,7 @@ with tab_actionable:
                 if tg_msg:
                     ok, info = notifier.send_message(tg_msg)
                     if ok:
-                        st.toast("已推送 Top 5 到 Telegram", icon="✅")
+                        st.toast("已推送 Top 10 到 Telegram", icon="✅")
                     else:
                         st.error(f"推送失敗: {info}")
                 else:
@@ -1748,10 +1770,19 @@ with tab_pulse:
         )
         if leaders is not None and not leaders.empty:
             with st.expander("各產業龍頭 (前 5 名 + 盤中資訊)"):
+                # E: 標註該 leader 是否已在「今日可行動」 Top 內
+                _actionable = st.session_state.get("actionable_picks") or []
+                _actionable_sids = {str(p.get("stock_id", "")) for p in _actionable if p.get("stock_id")}
+                show_df = leaders.copy()
+                if _actionable_sids:
+                    show_df["在今日可行動"] = show_df["stock_id"].astype(str).map(
+                        lambda s: "✨" if s in _actionable_sids else ""
+                    )
                 show_cols = [c for c in ["industry_category", "stock_id", "stock_name",
-                                          "現價", "今日%", "振幅%", "量比", "5日%"]
-                             if c in leaders.columns]
-                _show_table(leaders[show_cols], market="TW")
+                                          "現價", "今日%", "振幅%", "量比", "5日%",
+                                          "入場標籤", "在今日可行動"]
+                             if c in show_df.columns]
+                _show_table(show_df[show_cols], market="TW")
 
         # 異常觸發推播 (任何格式化錯誤都不能炸掉整個 app)
         # 加假日/週末 guard: 避免在台股休市時推前一交易日的舊資料
@@ -2448,12 +2479,16 @@ with tab_stock:
 
 
 with tab_us:
-    st.subheader("美股 Top 10 推薦 (技術 + 動能 + 題材 + 市場情緒)")
-    st.caption("候選池可在 Streamlit secrets 加入 `US_WATCHLIST=AAPL,MSFT,...` 自訂。")
+    st.subheader("🇺🇸 美股 Top 10 可進場 (像台股今日可行動)")
+    st.caption(
+        "從 us_screener 候選池過篩, 篩 entry_score ≥ 55 的可進場個股, "
+        "卡片含 3 層目標 / 進場區間 / 停損 / 財報日警示 / 同類股 ETF 強度. "
+        "候選池可在 Streamlit secrets 加入 `US_WATCHLIST=AAPL,MSFT,...` 自訂。"
+    )
 
     cA, cB = st.columns([1, 1])
     with cA:
-        us_btn = st.button("🔄 更新美股推薦", use_container_width=True, type="primary")
+        us_btn = st.button("🔄 更新美股 Top 10", use_container_width=True, type="primary")
     with cB:
         send_us_tg = st.button("✈️ Send to TG", use_container_width=True,
                                disabled=not notifier.is_configured(),
@@ -2461,8 +2496,18 @@ with tab_us:
 
     if us_btn:
         try:
-            with st.spinner("掃描美股候選池中…(約 30~90 秒)"):
-                st.session_state["us_result"] = us_screener.run_us_recommendation(top_n=10)
+            with st.spinner("掃描美股可進場精選中…(約 60-90 秒)"):
+                # F fix: us_pool 抓一次, 傳給 us_actionable 避免重複抓 (省 60-90s)
+                _us_pool = us_screener.run_us_recommendation(top_n=20)
+                st.session_state["us_result"] = _us_pool
+                try:
+                    import us_actionable as _ua
+                    st.session_state["us_actionable"] = _ua.compute_us_actionable_picks(
+                        top_n=10, min_score=65, us_pool=_us_pool,
+                    )
+                except Exception as _ae:
+                    st.warning(f"actionable 精選失敗 (fallback table): {_ae}")
+                    st.session_state["us_actionable"] = []
         except Exception as e:
             st.error(f"美股掃描失敗：{e}")
 
@@ -2480,29 +2525,117 @@ with tab_us:
         if isinstance(wk, dict) and wk.get("score") is not None:
             cm3.metric("一週前", round(float(wk["score"]), 1), wk.get("rating", ""))
 
-    if top_picks is None or top_picks.empty:
+    # === 新: 卡片區 (entry_score >= 55 可進場精選) ===
+    us_actionable_list = st.session_state.get("us_actionable") or []
+    if us_actionable_list:
+        st.markdown(f"### 🎯 可進場精選 ({len(us_actionable_list)} 檔)")
+        for i, p in enumerate(us_actionable_list, 1):
+            score = p.get("score", 0)
+            score_color = "🟢" if score >= 6 else ("🟡" if score >= 4 else "🔴")
+            entry_emoji = p.get("entry_emoji", "")
+            entry_label = p.get("entry_label", "")
+            label_str = f" · {entry_emoji} {entry_label}" if entry_label else ""
+            with st.container(border=True):
+                cH1, cH2 = st.columns([3, 1])
+                with cH1:
+                    st.markdown(
+                        f"### {i}. `{p.get('symbol')}` {p.get('name', '')} "
+                        f"{score_color}{label_str}"
+                    )
+                    if p.get("theme"):
+                        st.caption(f"產業: {p.get('theme')} · 綜合分數 {score:.1f}")
+                    if p.get("entry_score") is not None:
+                        st.caption(
+                            f"入場評分 {p['entry_score']}/100 → "
+                            f"{p.get('entry_action', '—')}"
+                        )
+                with cH2:
+                    if p.get("current") is not None:
+                        today_pct = p.get("today_pct", 0) or 0
+                        try:
+                            today_pct = float(today_pct)
+                        except (TypeError, ValueError):
+                            today_pct = 0
+                        st.metric("現價",
+                                   f"${p['current']}",
+                                   f"{today_pct:+.2f}%")
+                cB1, cB2 = st.columns(2)
+                with cB1:
+                    if p.get("entry_low") and p.get("entry_high"):
+                        st.write(f"**進場區間**: ${p['entry_low']} ~ ${p['entry_high']}")
+                    if p.get("stop"):
+                        rr = p.get("rr", "—")
+                        st.write(f"**停損**: ${p['stop']} · **R:R**: {rr}")
+                    # 3 層目標
+                    cur_v = p.get("current") or 0
+                    t_s = p.get("target_short")
+                    t_m = p.get("target_mid")
+                    t_l = p.get("target_long")
+                    if t_s or t_m or t_l:
+                        def _gain(t):
+                            if t and cur_v:
+                                return f"+{(t/cur_v-1)*100:.1f}%"
+                            return ""
+                        tlines = []
+                        if t_s: tlines.append(f"短 ${t_s} ({_gain(t_s)})")
+                        if t_m: tlines.append(f"中 ${t_m} ({_gain(t_m)})")
+                        if t_l: tlines.append(f"長 ${t_l} ({_gain(t_l)})")
+                        st.write("🎯 " + " / ".join(tlines))
+                    if p.get("win_prob"):
+                        st.write(f"**上漲機率**: {p['win_prob']} · 持有 {p.get('hold_period','—')}")
+                with cB2:
+                    if p.get("pe_label"):
+                        st.write(f"**PE**: {p['pe_label']}")
+                    if p.get("forward_pe"):
+                        st.write(f"**Fwd PE**: {p['forward_pe']:.1f}")
+                    if p.get("eps") is not None:
+                        st.write(f"**EPS**: {p['eps']}")
+                    if p.get("marketcap_str") and p["marketcap_str"] != "—":
+                        st.write(f"**市值**: {p['marketcap_str']}")
+                    if p.get("earnings_date"):
+                        st.write(f"📅 **下次財報**: {p['earnings_date']}")
+                    if p.get("sector_etf"):
+                        # D fix: 防 None value 不被 default 救
+                        _etf_pct = p.get("sector_etf_5d_pct")
+                        _etf_pct_str = f"{_etf_pct:+.2f}%" if _etf_pct is not None else "—"
+                        st.write(
+                            f"🏷 同類股 ETF **{p['sector_etf']}** "
+                            f"5d {_etf_pct_str}"
+                        )
+                # Reasons
+                for r in (p.get("reasons") or [])[:4]:
+                    st.markdown(f"- ✅ {r}")
+                # Warnings
+                for w in (p.get("warnings") or [])[:3]:
+                    st.markdown(f"- ⚠️ {w}")
+        st.caption("⚠️ 僅供參考, 不構成投資建議. 請自行做研究與風控.")
+
+    # === 完整候選池 (含 entry_score < 55 的票) — 收摺疊 ===
+    if top_picks is not None and not top_picks.empty:
+        with st.expander(f"📊 完整候選池 ({len(top_picks)} 檔, 含 WAIT/AVOID)", expanded=False):
+            show_df = top_picks.drop(columns=["近期新聞"], errors="ignore")
+            _show_table(show_df, market="US")
+    elif not us_actionable_list:
         st.info("資料抓取中或無命中標的，請稍後再試。")
-    else:
-        show_df = top_picks.drop(columns=["近期新聞"], errors="ignore")
-        _show_table(show_df, market="US")
+    # G fix: 移除 if False 死碼, 改成正常 if top_picks 條件
+    if top_picks is not None and not top_picks.empty:
         # 催化劑顯示
         if "催化劑" in top_picks.columns and top_picks["催化劑"].astype(str).str.len().sum() > 0:
-            with st.expander("💡 各檔上漲原因 / 催化劑", expanded=True):
+            with st.expander("💡 各檔上漲原因 / 催化劑", expanded=False):
                 for _, row in top_picks.iterrows():
                     sym = row.get("symbol", "")
                     cat = row.get("催化劑", "")
                     if cat:
                         st.markdown(f"- **{sym}** — {cat}")
-        # 加「強制清 cache」按鈕 — yfinance 換 API 格式時舊 cache 會卡住
-        cN1, cN2 = st.columns([1, 4])
-        with cN1:
-            if st.button("🗑️ 清新聞 cache", key="us_news_clear",
-                          help="若新聞欄位顯示空白, 點此清掉 streamlit cache 強制重抓"):
-                st.cache_data.clear()
-                st.session_state.pop("us_result", None)
-                st.success("✅ Cache 已清, 請重新按「更新美股推薦」")
+        # 強制清 cache 按鈕
+        if st.button("🗑️ 清新聞 cache", key="us_news_clear",
+                      help="若新聞欄位顯示空白, 點此清掉 streamlit cache 強制重抓"):
+            st.cache_data.clear()
+            st.session_state.pop("us_result", None)
+            st.session_state.pop("us_actionable", None)
+            st.success("✅ Cache 已清, 請重新按「更新美股 Top 10」")
 
-        with st.expander("📰 候選個股近期新聞 / 題材", expanded=True):
+        with st.expander("📰 候選個股近期新聞 / 題材", expanded=False):
             for _, row in top_picks.iterrows():
                 sym = row.get("symbol", "")
                 theme_v = row.get("題材") or "—"
@@ -2517,14 +2650,13 @@ with tab_us:
                         continue
                     link = n.get("link")
                     publisher = n.get("publisher", "")
-                    # 修正: title 有但 link 沒有也要顯示 (新版 yfinance 偶爾抓不到 URL)
                     if link:
                         st.markdown(f"- [{title}]({link}) · _{publisher}_")
                     else:
                         st.markdown(f"- {title} · _{publisher}_  _(無連結)_")
                     shown += 1
                 if shown == 0:
-                    st.caption("  _(該股無近期新聞 — 若所有股都空, 請點上方「清新聞 cache」並重抓)_")
+                    st.caption("  _(該股無近期新聞)_")
                 st.markdown("---")
 
         if send_us_tg:
@@ -2874,7 +3006,6 @@ with tab_entry:
             v_text = verdict.get("verdict", "?")
             v_score = verdict.get("score", 0)
             st.markdown(f"### {v_emoji} 結論: **{v_text}** (評分 {v_score}/100)")
-            # 新增: 持倉決策 (加碼 / 減碼 / 出場 ...)
             pa = verdict.get("position_action")
             if pa:
                 pa_e = verdict.get("position_emoji", "")
@@ -2886,9 +3017,8 @@ with tab_entry:
 
             st.divider()
 
-            # === 個股現況 (H3 fix: None 值用 helper 防呆, 不能直接 f-string 格式化) ===
+            # === 個股現況 (safe-format) ===
             def _sf(v, fmt="+.2f", suffix="%"):
-                """safe-format: None → '—'."""
                 if v is None:
                     return "—"
                 try:
@@ -2923,7 +3053,7 @@ with tab_entry:
             else:
                 st.caption("(沒有抓到同族群股, 可能族群偏小)")
 
-            # === 相對大盤 RS (H2 fix: 改為差分 pp, 不是比值) ===
+            # === 相對大盤 RS ===
             if rs is not None:
                 if rs >= 1.5:
                     rs_emoji = "✅ 強跑贏"
@@ -2953,13 +3083,12 @@ with tab_entry:
             if fund.get("revenue_yoy_pct") is not None:
                 st.caption(f"營收 YoY: {fund['revenue_yoy_pct']:+.1f}%")
             if fund.get("earnings_date"):
-                st.caption(f"📅 下次財報: **{fund['earnings_date']}** (留意進入沉默期 / 行情消化)")
+                st.caption(f"📅 下次財報: **{fund['earnings_date']}**")
             if fund.get("marketcap") and fund["marketcap"] != "—":
                 st.caption(f"市值: {fund['marketcap']}")
             if fund.get("industry"):
                 st.caption(f"產業: {fund['industry']}")
 
-            # === Gemini AI 結論 ===
             ai_summary = result.get("ai_summary")
             if ai_summary:
                 st.divider()

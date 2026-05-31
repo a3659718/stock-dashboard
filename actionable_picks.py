@@ -343,6 +343,13 @@ def compute_actionable_picks(top_n: int = 5, market: str = "TW",
     except Exception as _e:
         print(f"[actionable] entry_label 計算失敗 (non-fatal): {_e}", flush=True)
 
+    # ABCD enrich: 3 層目標 + chip_price_divergence + 強勢族群 boost + 主力券商
+    try:
+        import actionable_enhancer as _ae
+        result = _ae.enhance_picks(result, market=market)
+    except Exception as _e:
+        print(f"[actionable] enhance_picks 失敗 (non-fatal): {_e}", flush=True)
+
     return result
 
 
