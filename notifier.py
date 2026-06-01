@@ -1964,6 +1964,8 @@ def fmt_intraday_reversal_alerts(alerts: list) -> str:
 
     drawdowns = [a for a in alerts if a.get("type") == "drawdown"]
     rebounds = [a for a in alerts if a.get("type") == "rebound"]
+    shrinks = [a for a in alerts if a.get("type") == "shrink"]
+    recovers = [a for a in alerts if a.get("type") == "recover"]
 
     # 取最大強度當訊息標題
     all_sev = [a.get("severity", "mild") for a in alerts]
@@ -1974,133 +1976,144 @@ def fmt_intraday_reversal_alerts(alerts: list) -> str:
     lines = [f"<b>🔄 盤中反轉警報{title_suffix}</b>", ""]
 
     if drawdowns:
-        lines.append("<b>📉 從今日高點回吐</b>")
+        lines.append("<b>📉 從高點回吐</b>")
         for a in drawdowns:
-            country = _esc(a.get("country", ""))
             name = _esc(a.get("name", ""))
             sym = _esc(a.get("symbol", ""))
             try:
-                cur = float(a.get("current", 0) or 0)
-                high = float(a.get("today_high", 0) or 0)
                 dd_pct = float(a.get("drawdown_pct", 0) or 0)
                 vs_open = float(a.get("pct_vs_open", 0) or 0)
             except (TypeError, ValueError):
-                cur = high = dd_pct = vs_open = 0.0
+                dd_pct = vs_open = 0.0
             sev = a.get("severity", "mild")
-            mstate = a.get("market_state", "")
-            speed = a.get("speed", "unknown")
-            mins = a.get("mins_since_extreme")
-            vstate = a.get("volume_state", "unknown")
-            vr = a.get("vol_ratio")
-
             badge = _rev_severity_badge(sev)
-            badge_part = f"  {badge}" if badge else ""
-            lines.append(f"[{country}] {name} <code>{sym}</code> {cur:,.2f}{badge_part}")
+            badge_p = f" {badge}" if badge else ""
             sign_o = "+" if vs_open > 0 else ""
-            lines.append(
-                f"  高點 {high:,.2f} → 回吐 <b>{dd_pct:+.2f}%</b> "
-                f"(vs 開盤 {sign_o}{vs_open:.2f}%)"
-            )
-            st_desc = _rev_drawdown_state_desc(mstate)
-            # 狀態行已隱藏 (用戶選 簡化推播)
-            _ = st_desc
-            sp_desc = _rev_speed_desc(speed, mins)
-            # 速度行已隱藏 (用戶選 簡化推播)
-            _ = sp_desc
-            vol_desc = _rev_volume_desc(vstate, vr)
-            # 量能行已隱藏 (用戶選 簡化推播)
-            _ = vol_desc
-            alerts_today = a.get("alerts_today") or 0
-            if alerts_today == 1:
-                lines.append("  首次反轉訊號")
-            elif alerts_today == 2:
-                lines.append("  今日第 2 次反轉 — 走勢轉弱")
-            elif alerts_today >= 3:
-                lines.append("  今日已 3 次反轉 ⚠️ 盤面極不穩, 建議減碼")
-            cm = a.get("cross_market") or []
-            if cm:
-                ctx = _rev_cross_market_ctx(vs_open, cm)
-                cm_short = _fmt_cross_market_short(cm)
-                ctx_part = f"  {ctx}" if ctx else ""
-                lines.append(f"  📊 對照: {cm_short}{ctx_part}")
-            advice = _rev_action_drawdown(sev, mstate)
-            if advice:
-                lines.append(f"  {advice}")
+            advice = _rev_action_drawdown(sev, a.get("market_state", "")) or "💡 觀望"
+            # 精簡: 標題 1 行 + 建議 1 行 + 弱股 top 3 1 行
+            lines.append(f"{name} <code>{sym}</code> 回吐 <b>{dd_pct:+.1f}%</b> "
+                          f"(vs 開盤 {sign_o}{vs_open:.1f}%){badge_p}")
+            lines.append(f"  {advice}")
             comp = a.get("companion_stocks") or []
             if comp:
-                lines.append("  📋 同向轉弱觀察:")
-                for c in comp[:5]:
-                    cid = _esc(c.get("stock_id", ""))
-                    cname = _esc(c.get("name", ""))
-                    try:
-                        cp = float(c.get("today_pct", 0) or 0)
-                        cdd = float(c.get("drawdown_from_high_pct", 0) or 0)
-                        cvr = float(c.get("vol_ratio", 0) or 0)
-                    except (TypeError, ValueError):
-                        cp = cdd = cvr = 0.0
-                    vol_tag = " 量增" if cvr >= 1.3 else ""
-                    el_emoji = c.get("entry_emoji", "")
-                    el_label = c.get("entry_label", "")
-                    el_tag = f" {el_emoji}{_esc(el_label)}" if el_label and el_label != "—" else ""
-                    lines.append(
-                        f"    <code>{cid}</code> {cname} "
-                        f"<b>{cp:+.2f}%</b> (高點回吐 {cdd:.2f}%){vol_tag}{el_tag}"
+                wk_line = " · ".join(
+                    f"{_esc(c.get('stock_id',''))} "
+                    f"{c.get('entry_emoji','')}"
+                    f"{float(c.get('today_pct',0) or 0):+.1f}%"
+                    for c in comp[:3]
+                )
+                lines.append(f"  同步弱: {wk_line}")
+                # 顯示「該減碼」(entry_label=AVOID 或 SELL) 的優先
+                avoid_list = [c for c in comp if c.get("entry_label") in ("AVOID", "SELL")][:3]
+                if avoid_list:
+                    av_line = " · ".join(
+                        f"{_esc(c.get('stock_id',''))} {float(c.get('today_pct',0) or 0):+.1f}%"
+                        for c in avoid_list
                     )
+                    lines.append(f"  ⚠️ <b>建議減碼</b>: {av_line}")
+            lines.append("")
+
+    # 漲幅萎縮 (瘦身: 1 行重點 + 同步弱股 top 3)
+    if shrinks:
+        lines.append("<b>📉 漲幅萎縮</b>")
+        for a in shrinks:
+            sym = _esc(a.get("symbol", ""))
+            name = _esc(a.get("name", ""))
+            try:
+                max_pct = float(a.get("max_pct_vs_open", 0) or 0)
+                vs_open = float(a.get("pct_vs_open", 0) or 0)
+                shrink_pp = float(a.get("shrink_pp", 0) or 0)
+            except (TypeError, ValueError):
+                max_pct = vs_open = shrink_pp = 0.0
+            sign_o = "+" if vs_open > 0 else ""
+            lines.append(
+                f"{name} <code>{sym}</code> 高 +{max_pct:.1f}% → {sign_o}{vs_open:.1f}% "
+                f"(<b>-{shrink_pp:.1f}pp</b>) 💡 分批停利"
+            )
+            companion = a.get("companion_stocks") or []
+            if companion:
+                wk_line = " · ".join(
+                    f"{_esc(cs.get('stock_id',''))} "
+                    f"{cs.get('entry_emoji','')}"
+                    f"{float(cs.get('today_pct',0) or 0):+.1f}%"
+                    for cs in companion[:3]
+                )
+                lines.append(f"  同步弱: {wk_line}")
+            lines.append("")
+
+    # #1 新增: recover (從跌轉漲) + #2 同步轉強權值 + #3 強勢族群
+    if recovers:
+        lines.append("<b>📈 從跌轉漲 (低點反彈)</b>")
+        for a in recovers:
+            sym = _esc(a.get("symbol", ""))
+            name = _esc(a.get("name", ""))
+            try:
+                min_pct = float(a.get("min_pct_vs_open", 0) or 0)
+                vs_open = float(a.get("pct_vs_open", 0) or 0)
+                recovery_pp = float(a.get("recovery_pp", 0) or 0)
+            except (TypeError, ValueError):
+                min_pct = vs_open = recovery_pp = 0.0
+            sign_o = "+" if vs_open > 0 else ""
+            lines.append(
+                f"{name} <code>{sym}</code> 低 {min_pct:.1f}% → {sign_o}{vs_open:.1f}% "
+                f"(<b>+{recovery_pp:.1f}pp</b>) 💡 留意轉強跟進"
+            )
+            up_stocks = a.get("companion_stocks_up") or []
+            if up_stocks:
+                # 加 entry_label emoji (🟢BUY / 🟡WAIT / 🔴AVOID)
+                st_line = " · ".join(
+                    f"{_esc(cs.get('stock_id',''))} "
+                    f"{cs.get('entry_emoji','')}"
+                    f"{float(cs.get('today_pct',0) or 0):+.1f}%"
+                    for cs in up_stocks[:3]
+                )
+                lines.append(f"  同步強: {st_line}")
+                # B: 明確「現在能買」區塊
+                # 主路徑: entry_label="BUY"; fallback (Gemini fail 時): entry_score >= 70
+                def _is_buy(cs):
+                    if cs.get("entry_label") == "BUY":
+                        return True
+                    score = cs.get("entry_score")
+                    try:
+                        return score is not None and float(score) >= 70
+                    except (TypeError, ValueError):
+                        return False
+                buy_list = [cs for cs in up_stocks if _is_buy(cs)][:3]
+                if buy_list:
+                    buy_line = " · ".join(
+                        f"{_esc(cs.get('stock_id',''))} "
+                        f"{float(cs.get('today_pct',0) or 0):+.1f}% "
+                        f"(score {cs.get('entry_score','—')})"
+                        for cs in buy_list
+                    )
+                    lines.append(f"  📊 <b>現在能買</b>: {buy_line}")
+            sl = a.get("sector_leaders") or []
+            if sl:
+                sec_line = " · ".join(
+                    f"{_esc(s.get('sector',''))} +{float(s.get('avg_change',0) or 0):.1f}%"
+                    for s in sl[:3]
+                )
+                lines.append(f"  強勢族群: {sec_line}")
             lines.append("")
 
     if rebounds:
-        lines.append("<b>📈 從今日低點反彈</b>")
+        lines.append("<b>📈 從低點反彈</b>")
         for a in rebounds:
-            country = _esc(a.get("country", ""))
             name = _esc(a.get("name", ""))
             sym = _esc(a.get("symbol", ""))
             try:
-                cur = float(a.get("current", 0) or 0)
-                low = float(a.get("today_low", 0) or 0)
                 rb_pct = float(a.get("rebound_pct", 0) or 0)
                 vs_open = float(a.get("pct_vs_open", 0) or 0)
             except (TypeError, ValueError):
-                cur = low = rb_pct = vs_open = 0.0
+                rb_pct = vs_open = 0.0
             sev = a.get("severity", "mild")
-            mstate = a.get("market_state", "")
-            speed = a.get("speed", "unknown")
-            mins = a.get("mins_since_extreme")
-            vstate = a.get("volume_state", "unknown")
-            vr = a.get("vol_ratio")
-
             badge = _rev_severity_badge(sev)
-            badge_part = f"  {badge}" if badge else ""
-            lines.append(f"[{country}] {name} <code>{sym}</code> {cur:,.2f}{badge_part}")
+            badge_p = f" {badge}" if badge else ""
             sign_o = "+" if vs_open > 0 else ""
-            lines.append(
-                f"  低點 {low:,.2f} → 反彈 <b>+{rb_pct:.2f}%</b> "
-                f"(vs 開盤 {sign_o}{vs_open:.2f}%)"
-            )
-            st_desc = _rev_rebound_state_desc(mstate)
-            # 狀態行已隱藏 (用戶選 簡化推播)
-            _ = st_desc
-            sp_desc = _rev_speed_desc(speed, mins)
-            # 速度行已隱藏 (用戶選 簡化推播)
-            _ = sp_desc
-            vol_desc = _rev_volume_desc(vstate, vr)
-            # 量能行已隱藏 (用戶選 簡化推播)
-            _ = vol_desc
-            alerts_today = a.get("alerts_today") or 0
-            if alerts_today == 1:
-                lines.append("  首次反彈訊號")
-            elif alerts_today == 2:
-                lines.append("  今日第 2 次反彈 — 動能延續")
-            elif alerts_today >= 3:
-                lines.append("  今日第 3 次反彈, 留意是否真正止跌")
-            cm = a.get("cross_market") or []
-            if cm:
-                ctx = _rev_cross_market_ctx(vs_open, cm)
-                cm_short = _fmt_cross_market_short(cm)
-                ctx_part = f"  {ctx}" if ctx else ""
-                lines.append(f"  📊 對照: {cm_short}{ctx_part}")
-            advice = _rev_action_rebound(sev, mstate)
-            if advice:
-                lines.append(f"  {advice}")
+            advice = _rev_action_rebound(sev, a.get("market_state", "")) or "💡 觀察跟進"
+            lines.append(f"{name} <code>{sym}</code> 反彈 <b>+{rb_pct:.1f}%</b> "
+                          f"(vs 開盤 {sign_o}{vs_open:.1f}%){badge_p}")
+            lines.append(f"  {advice}")
             lines.append("")
 
     lines.append("<i>※ 警報為動能訊號, 非進出建議. 請自行控管風險.</i>")
@@ -3062,23 +3075,21 @@ def fmt_watchlist_alert(stock_id: str, name: str, hits: list, latest_date: str,
             v = row.get("投信5日(張)")
             sign = "+" if isinstance(v, (int, float)) and v > 0 else ""
             inst_parts.append(f"5日累計 {sign}{_fmt_num(v)}張")
-        if row.get("投本比%") is not None:
-            inst_parts.append(f"投本比 {_fmt_num(row.get('投本比%'), '%')}")
+            inst_parts.append(f"投本比 {_fmt_num(row.get('投本比%'), suffix='%')}")
         if inst_parts:
-            body.append(" " + " · ".join(inst_parts))
-    body.append("命中: " + ", ".join(_esc(h) for h in hits))
-    return "\n".join(body)
+            lines.append("  💰 " + " · ".join(inst_parts))
+        lines.append("")
+    return "\n".join(lines)
 
 
-def fmt_fear_greed_alert(fg: dict, threshold_low: int = 25, threshold_high: int = 75) -> Optional[str]:
-    """美股 CNN F&G 極值警報. 中性區間回 None."""
+def fmt_us_fg_alert(fg: dict, threshold_low: int = 25, threshold_high: int = 75) -> Optional[str]:
+    """美股 F&G 極值警報."""
     if not fg or fg.get("score") is None:
         return None
     try:
         s = float(fg["score"])
     except (TypeError, ValueError):
         return None
-    rating = _esc(fg.get("rating", ""))
     if s <= threshold_low:
         return (f"⚠️ <b>美股市場極度恐慌</b>\n"
                 f"CNN F&amp;G Index: <b>{s:.0f}</b> ({rating})\n"
@@ -3090,8 +3101,8 @@ def fmt_fear_greed_alert(fg: dict, threshold_low: int = 25, threshold_high: int 
     return None
 
 
-def fmt_tw_pulse_alert(pulse: dict, threshold_low: int = 25, threshold_high: int = 75) -> Optional[str]:
-    """台股市場情緒指數極值警報 (中性區間回 None)."""
+def fmt_tw_pulse_alert(pulse: dict, threshold_low: int = 25, threshold_high: int = 75):
+    """台股市場情緒指數極值警報."""
     if not pulse or pulse.get("score") is None:
         return None
     try:
@@ -3100,11 +3111,7 @@ def fmt_tw_pulse_alert(pulse: dict, threshold_low: int = 25, threshold_high: int
         return None
     rating = _esc(pulse.get("rating", ""))
     if s <= threshold_low:
-        return (f"⚠️ <b>台股市場極度恐慌</b>\n"
-                f"TW Pulse: <b>{s:.0f}</b> ({rating})\n"
-                "歷史經驗為逢低分批布局訊號，仍須個股控管風險。")
+        return (f"⚠️ <b>台股市場極度恐慌</b>\nTW Pulse: <b>{s:.0f}</b> ({rating})")
     if s >= threshold_high:
-        return (f"⚠️ <b>台股市場極度貪婪</b>\n"
-                f"TW Pulse: <b>{s:.0f}</b> ({rating})\n"
-                "歷史經驗為短期回檔風險偏高訊號，建議分批減碼或停利。")
+        return (f"⚠️ <b>台股市場極度貪婪</b>\nTW Pulse: <b>{s:.0f}</b> ({rating})")
     return None
