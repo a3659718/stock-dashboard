@@ -850,18 +850,67 @@ with tab_wl:
             )
         if st.button("新增", use_container_width=True, type="primary",
                       key="wl_add", disabled=len(current_wl) >= 15):
-            if new_sid.strip():
-                ep = float(new_entry) if (new_entry and new_entry > 0) else None
-                ok = watchlist_store.add_to_watchlist(
-                    new_sid.strip().upper(), new_name.strip(), new_market, ep
+            raw_input = new_sid.strip()
+            if not raw_input:
+                st.error("代號不可為空")
+            else:
+                # 新: 支援「輸入名稱自動轉代號」(台股) — e.g. 「台玻」→ 1802
+                sid_to_save = raw_input.upper()
+                name_to_save = new_name.strip()
+                # 偵測: 不是純數字/英文字母組合 → 視為名稱, 嘗試 lookup
+                looks_like_chinese_name = (
+                    new_market == "TW"
+                    and not raw_input.isdigit()
+                    and not raw_input.isascii()
                 )
-                if ok:
-                    st.success(
-                        f"已新增 {new_sid}" + (f" (入場 {ep})" if ep else " (用當前價當基準)")
+                if looks_like_chinese_name:
+                    try:
+                        import data_sources as ds
+                        info = ds.get_taiwan_stock_info()
+                        if info is not None and not info.empty:
+                            # 精確比對 stock_name
+                            hit = info[info["stock_name"] == raw_input]
+                            if not hit.empty:
+                                sid_to_save = str(hit.iloc[0]["stock_id"])
+                                if not name_to_save:
+                                    name_to_save = raw_input
+                                st.info(f"🔍 「{raw_input}」自動對應為代號 **{sid_to_save}**")
+                            else:
+                                # 模糊比對 (contains)
+                                fuzzy = info[info["stock_name"].str.contains(raw_input, na=False, regex=False)]
+                                if not fuzzy.empty and len(fuzzy) <= 3:
+                                    sid_to_save = str(fuzzy.iloc[0]["stock_id"])
+                                    name_to_save = name_to_save or str(fuzzy.iloc[0]["stock_name"])
+                                    st.info(
+                                        f"🔍 「{raw_input}」找到 {len(fuzzy)} 檔, 用「{name_to_save}」"
+                                        f"({sid_to_save})"
+                                    )
+                                else:
+                                    st.error(
+                                        f"❌ 找不到「{raw_input}」對應代號. 請改輸入代號 (例: 1802)"
+                                    )
+                                    st.stop()
+                    except Exception as _le:
+                        st.warning(f"⚠️ 名稱查詢失敗: {_le}; 原樣存「{raw_input}」")
+                # 防呆: 台股代號應該是 4-6 位數字
+                if new_market == "TW" and not sid_to_save.isdigit():
+                    st.error(
+                        f"❌ 「{sid_to_save}」不像台股代號 (應為 4-6 位數字). "
+                        f"請改輸入代號 (例: 1802 台玻 / 2330 台積電)"
                     )
-                    st.rerun()
                 else:
-                    st.error("新增失敗 (可能已達 15 檔上限或代號為空)")
+                    ep = float(new_entry) if (new_entry and new_entry > 0) else None
+                    ok = watchlist_store.add_to_watchlist(
+                        sid_to_save, name_to_save, new_market, ep
+                    )
+                    if ok:
+                        st.success(
+                            f"✅ 已新增 {sid_to_save} {name_to_save}"
+                            + (f" (入場 {ep})" if ep else " (用當前價當基準)")
+                        )
+                        st.rerun()
+                    else:
+                        st.error("新增失敗 (可能已達 15 檔上限)")
 
     with cWL2:
         st.markdown("**目前自選股清單 (上限 15 檔)**")
