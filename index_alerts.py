@@ -872,6 +872,9 @@ def check_intraday_reversal() -> List[Dict]:
                 "sector_leaders": sector_leaders_r,
             })
             sym_state["recover_alerted_today"] = True
+            # B4 fix: recover 觸發後 mute 同 tick 的 rebound (避免重複訊息)
+            # 設個 in-memory 旗標, 下面 rebound check 看這個
+            sym_state["_skip_rebound_this_tick"] = True
 
         # per-symbol reversal threshold (TWII 用 0.5%, 其他用 default 1.0%)
         sym_reversal_threshold = float(cfg.get("reversal_pct", REVERSAL_THRESHOLD_PCT))
@@ -946,7 +949,10 @@ def check_intraday_reversal() -> List[Dict]:
         dip_pct_from_open = (today_low / today_open - 1) * 100 if today_open > 0 else 0.0
         has_real_dip = dip_pct_from_open <= -REVERSAL_MIN_DIP_FOR_REBOUND_PCT
         # rebound 也用 per-symbol threshold (跟 drawdown 對稱)
-        if rebound_pct >= sym_reversal_threshold and has_real_dip:
+        # B4 fix: recover 觸發後 mute 同 tick 的 rebound
+        if sym_state.pop("_skip_rebound_this_tick", False):
+            pass  # 跳過 rebound, 已被 recover 覆蓋
+        elif rebound_pct >= sym_reversal_threshold and has_real_dip:
             should_fire = False
             last_pct = sym_state.get("last_rebound_pct")
             last_at = sym_state.get("last_rebound_at")

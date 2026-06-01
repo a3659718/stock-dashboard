@@ -863,12 +863,15 @@ with tab_wl:
                     and not raw_input.isdigit()
                     and not raw_input.isascii()
                 )
+                lookup_ok = True  # MED fix: 用 flag 代替 st.stop()
                 if looks_like_chinese_name:
                     try:
                         import data_sources as ds
                         info = ds.get_taiwan_stock_info()
-                        if info is not None and not info.empty:
-                            # 精確比對 stock_name
+                        # LOW fix: 防 KeyError, 確認欄位存在
+                        if (info is not None and not info.empty
+                                and "stock_name" in info.columns
+                                and "stock_id" in info.columns):
                             hit = info[info["stock_name"] == raw_input]
                             if not hit.empty:
                                 sid_to_save = str(hit.iloc[0]["stock_id"])
@@ -876,41 +879,51 @@ with tab_wl:
                                     name_to_save = raw_input
                                 st.info(f"🔍 「{raw_input}」自動對應為代號 **{sid_to_save}**")
                             else:
-                                # 模糊比對 (contains)
-                                fuzzy = info[info["stock_name"].str.contains(raw_input, na=False, regex=False)]
+                                fuzzy = info[info["stock_name"].str.contains(
+                                    raw_input, na=False, regex=False
+                                )]
                                 if not fuzzy.empty and len(fuzzy) <= 3:
                                     sid_to_save = str(fuzzy.iloc[0]["stock_id"])
                                     name_to_save = name_to_save or str(fuzzy.iloc[0]["stock_name"])
                                     st.info(
-                                        f"🔍 「{raw_input}」找到 {len(fuzzy)} 檔, 用「{name_to_save}」"
-                                        f"({sid_to_save})"
+                                        f"🔍 「{raw_input}」找到 {len(fuzzy)} 檔, "
+                                        f"用「{name_to_save}」({sid_to_save})"
                                     )
                                 else:
                                     st.error(
-                                        f"❌ 找不到「{raw_input}」對應代號. 請改輸入代號 (例: 1802)"
+                                        f"❌ 找不到「{raw_input}」對應代號. "
+                                        f"請改輸入代號 (例: 1802)"
                                     )
-                                    st.stop()
+                                    lookup_ok = False
+                        else:
+                            st.warning("⚠️ 台股代號表暫時無法取得, 無法 lookup; 請輸入代號")
+                            lookup_ok = False
                     except Exception as _le:
-                        st.warning(f"⚠️ 名稱查詢失敗: {_le}; 原樣存「{raw_input}」")
-                # 防呆: 台股代號應該是 4-6 位數字
-                if new_market == "TW" and not sid_to_save.isdigit():
-                    st.error(
-                        f"❌ 「{sid_to_save}」不像台股代號 (應為 4-6 位數字). "
-                        f"請改輸入代號 (例: 1802 台玻 / 2330 台積電)"
-                    )
+                        st.warning(f"⚠️ 名稱查詢失敗: {_le}; 請改輸入代號")
+                        lookup_ok = False
+                # 若 lookup 失敗, 不進入後續存檔流程
+                if not lookup_ok:
+                    pass  # 跳過 add_to_watchlist
                 else:
-                    ep = float(new_entry) if (new_entry and new_entry > 0) else None
-                    ok = watchlist_store.add_to_watchlist(
-                        sid_to_save, name_to_save, new_market, ep
-                    )
-                    if ok:
-                        st.success(
-                            f"✅ 已新增 {sid_to_save} {name_to_save}"
-                            + (f" (入場 {ep})" if ep else " (用當前價當基準)")
+                    # 防呆: 台股代號應該是 4-6 位數字
+                    if new_market == "TW" and not sid_to_save.isdigit():
+                        st.error(
+                            f"❌ 「{sid_to_save}」不像台股代號 (應為 4-6 位數字). "
+                            f"請改輸入代號 (例: 1802 台玻 / 2330 台積電)"
                         )
-                        st.rerun()
                     else:
-                        st.error("新增失敗 (可能已達 15 檔上限)")
+                        ep = float(new_entry) if (new_entry and new_entry > 0) else None
+                        ok = watchlist_store.add_to_watchlist(
+                            sid_to_save, name_to_save, new_market, ep
+                        )
+                        if ok:
+                            st.success(
+                                f"✅ 已新增 {sid_to_save} {name_to_save}"
+                                + (f" (入場 {ep})" if ep else " (用當前價當基準)")
+                            )
+                            st.rerun()
+                        else:
+                            st.error("新增失敗 (可能已達 15 檔上限)")
 
     with cWL2:
         st.markdown("**目前自選股清單 (上限 15 檔)**")
@@ -3411,7 +3424,6 @@ with tab_health:
             display_cols = [c for c in ["ts", "ok", "type", "err"] if c in recent_df.columns]
             st.dataframe(recent_df[display_cols].iloc[::-1],
                          use_container_width=True, hide_index=True)
-        else:
             st.info("過去 24h 沒有推播紀錄 (可能 cron 沒跑, 或都被 cooldown 擋掉).")
 
         # === 7d 統計 by type ===
