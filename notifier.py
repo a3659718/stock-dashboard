@@ -3115,3 +3115,66 @@ def fmt_tw_pulse_alert(pulse: dict, threshold_low: int = 25, threshold_high: int
     if s >= threshold_high:
         return (f"⚠️ <b>台股市場極度貪婪</b>\nTW Pulse: <b>{s:.0f}</b> ({rating})")
     return None
+
+
+def fmt_volume_breakout_alerts(alerts: list) -> str:
+    """量爆突破推播 (Tier 1 — 立即響鈴).
+    alerts: volume_breakout_alert.check_volume_breakout() 回傳.
+    """
+    if not alerts:
+        return ""
+    lines = [f"🚨 <b>量爆突破 ({len(alerts)} 則)</b>", ""]
+    for a in alerts:
+        sym = _esc(a.get("symbol", ""))
+        market = _esc(a.get("market", ""))
+        cur = float(a.get("current", 0) or 0)
+        tp = float(a.get("today_pct", 0) or 0)
+        vr = float(a.get("vol_ratio", 0) or 0)
+        bp = float(a.get("breakout_pct", 0) or 0)
+        h60 = float(a.get("high_60d", 0) or 0)
+        lines.append(
+            f"⚡ [{market}] <code>{sym}</code> {cur:,.2f} <b>{tp:+.1f}%</b>"
+        )
+        lines.append(
+            f"  量比 <b>{vr:.1f}x</b> · 突破 60d 高 ({h60:,.2f}) +{bp:.1f}%"
+        )
+        lines.append("  💡 主力進場確定訊號, 留意拉回支撐 (60d high)")
+        lines.append("")
+    lines.append("<i>※ Tier 1 — 多空轉強最確定訊號. 持倉加碼 / 觀望者分批進.</i>")
+    return _truncate_tg_msg("\n".join(lines).rstrip())
+
+
+def fmt_chip_anomaly_alerts(alerts: list) -> str:
+    """籌碼異常推播 (Tier 2 — 響鈴批次).
+    alerts: chip_anomaly_alert.check_chip_anomaly() 回傳.
+    """
+    if not alerts:
+        return ""
+    buys = [a for a in alerts if a.get("direction") == "buy"]
+    sells = [a for a in alerts if a.get("direction") == "sell"]
+    lines = [f"📊 <b>籌碼異常 ({len(alerts)} 則)</b>", ""]
+    if buys:
+        lines.append("<b>🟢 法人連買 (進場訊號)</b>")
+        for a in buys:
+            sym = _esc(a.get("symbol", ""))
+            sd = a.get("streak_days", 0)
+            pct = float(a.get("pct_of_outstanding", 0) or 0)
+            cum = a.get("cum_5d_lots", 0)
+            lines.append(
+                f"  ⚡ <code>{sym}</code> 連買 {sd} 日 · "
+                f"累積 {cum:+,} 張 ({pct:.2f}% of 流通)"
+            )
+        lines.append("")
+    if sells:
+        lines.append("<b>🔴 法人連賣 (警示)</b>")
+        for a in sells:
+            sym = _esc(a.get("symbol", ""))
+            pct = float(a.get("pct_of_outstanding", 0) or 0)
+            cum = a.get("cum_5d_lots", 0)
+            lines.append(
+                f"  ⚠ <code>{sym}</code> 連賣 {sd} 日 · "
+                f"累積 {cum:+,} 張 ({pct:.2f}% of 流通)"
+            )
+        lines.append("")
+    lines.append("<i>※ Tier 2 — 大戶動向先行指標. 持倉者參考調整.</i>")
+    return _truncate_tg_msg("\n".join(lines).rstrip())

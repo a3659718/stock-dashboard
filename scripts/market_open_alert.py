@@ -861,6 +861,48 @@ def main() -> int:
             print(f"[news event] check/send failed (non-fatal): {_e}", flush=True)
             traceback.print_exc()
 
+        # === P2-A: 量爆突破 (Tier 1 — 立即響鈴) ===
+        try:
+            import volume_breakout_alert as _vb
+            vb_alerts = _vb.check_volume_breakout() or []
+            if vb_alerts:
+                print(f"[vol_breakout] triggered {len(vb_alerts)}: "
+                      + ", ".join(a.get("symbol", "") for a in vb_alerts),
+                      flush=True)
+                vb_msg = notifier.fmt_volume_breakout_alerts(vb_alerts)
+                if vb_msg:
+                    ok_vb, info_vb = notifier.send_message(
+                        vb_msg, disable_preview=False,
+                        disable_notification=False,  # Tier 1 響鈴
+                    )
+                    if ok_vb:
+                        _vb.mark_alerts_sent(vb_alerts)
+                        print(f"[vol_breakout] sent ok", flush=True)
+                    else:
+                        print(f"[vol_breakout] send fail: {info_vb}", flush=True)
+        except Exception as _e:
+            import traceback
+            print(f"[vol_breakout] failed (non-fatal): {_e}", flush=True)
+            traceback.print_exc()
+
+        # === P2-B: 籌碼異常 (Tier 2 — 響鈴批次) ===
+        try:
+            import chip_anomaly_alert as _ca
+            ca_alerts = _ca.check_chip_anomaly() or []
+            if ca_alerts:
+                print(f"[chip_anomaly] triggered {len(ca_alerts)}", flush=True)
+                ca_msg = notifier.fmt_chip_anomaly_alerts(ca_alerts)
+                if ca_msg:
+                    ok_ca, info_ca = notifier.send_message(
+                        ca_msg, disable_preview=False,
+                        disable_notification=False,  # Tier 2 響鈴
+                    )
+                    if ok_ca:
+                        _ca.mark_alerts_sent(ca_alerts)
+        except Exception as _e:
+            import traceback
+            print(f"[chip_anomaly] failed (non-fatal): {_e}", flush=True)
+
         # === Q2: 盤中強勢族群推播 (per-day cap 1, 全域 60min cooldown) ===
         strong_sector_alerts = []
         try:
@@ -944,73 +986,18 @@ def main() -> int:
             try:
                 active = index_alerts.get_active_session()
                 in_session = {
-                    c: index_alerts._is_market_in_session(c) for c in ["TW", "JP", "KR", "US"]
+                    c: index_alerts._is_market_in_session(c)
+                    for c in ["TW", "JP", "KR", "US"]
                 }
-                print(f"Active session: {active}, per-market in_session: {in_session}")
-                # 假日狀態
-                try:
-                    import holiday_check
-                    print(f"Market holiday status: {holiday_check.market_status_summary()}")
-                except Exception as _e:
-                    print(f"  (holiday_check unavailable: {_e})")
+                print(f"  active_session: {active}", flush=True)
+                print(f"  in_session map: {in_session}", flush=True)
             except Exception as _e:
-                print(f"  (session debug failed: {_e})")
+                print(f"  session diagnosis failed: {_e}", flush=True)
+        except Exception as _e:
+            print(f"[monitor] outer block failed: {_e}", flush=True)
 
-            wl = watchlist_alerts.check_watchlist_alerts()
-            # 重要: idx 已在 Phase 1 由 combined_msg 處理過, 這邊不再呼叫
-            #       避免重複 fetch + state thrash (cache 內也已有結果, 但保險不重複呼叫)
-            idx = []  # 已被 combined_msg 涵蓋
-            cry = []  # B: 用戶關閉 crypto 推播
-            # 持倉停損
-            try:
-                import holdings_tracker
-                sl_breaches = holdings_tracker.check_stop_loss_breaches()
-            except Exception as _e:
-                print(f"  (停損檢查失敗: {_e})", flush=True)
-                sl_breaches = []
-            # 自選股條件觸發 (價格穿越 / KD / MACD / MA 突破)
-            try:
-                import watchlist_triggers
-                fired_triggers = watchlist_triggers.check_triggers()
-            except Exception as _e:
-                print(f"  (條件觸發檢查失敗: {_e})", flush=True)
-                fired_triggers = []
-            print(
-                f"Alerts: watchlist={len(wl)} index={len(idx)} crypto={len(cry)} "
-                f"stop_loss={len(sl_breaches)} triggers={len(fired_triggers)}"
-            )
-            msg = notifier.fmt_monitor_alerts(wl, idx, cry)
-            if sl_breaches:
-                sl_msg = notifier.fmt_stop_loss_alerts(sl_breaches)
-                msg = sl_msg + "\n\n" + msg if msg else sl_msg
-            if fired_triggers:
-                tr_msg = watchlist_triggers.fmt_trigger_alerts(fired_triggers)
-                msg = tr_msg + "\n\n" + msg if msg else tr_msg
-            if not msg:
-                print("無新觸發警報，跳過推播")
-                return 0
-        except Exception as e:
-            print(f"Monitor mode failed: {e}")
-            return 1
-    else:
-        print(f"Unknown market: {market}", file=sys.stderr)
-        return 1
-
-    if not msg or not str(msg).strip():
-        print("⚠️  訊息為空，跳過 Telegram 推播 (return 0)")
-        return 0
-
-    print(f"=== Telegram Send ===")
-    print(f"訊息長度: {len(msg)} 字 / 約 {len(msg.encode('utf-8'))} bytes")
-    print(f"訊息預覽 (前 200 字): {msg[:200]!r}")
-    ok, info = notifier.send_message(msg)
-    if ok:
-        print(f"✓ Telegram sent OK ({info})")
-        return 0
-    fail_line = f"✗ Telegram failed: {info}"
-    print(fail_line)
-    print(fail_line, file=sys.stderr)
-    return 2
+    print("=== Done ===")
+    return 0
 
 
 if __name__ == "__main__":

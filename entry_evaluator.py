@@ -415,53 +415,66 @@ def _ai_verdict(symbol: str, snap: Dict, peers: Dict, rs, fund: Dict, verdict: D
 # 結論引擎
 # ---------------------------------------------------------------------------
 def _verdict(snap: Dict, peers: Dict, rs: Optional[float], fund: Dict) -> Dict:
-    """依各維度評分 + 給出 BUY/WAIT/AVOID 結論. 回 dict."""
-    reasons: List[str] = []
-    score = 50  # 中性起點
+    """依各維度評分 + 給出 BUY/WAIT/AVOID 結論. 回 dict.
 
-    # === 個股強弱 (weight 25) ===
+    Gap 3 修 7 bugs:
+      1. 距 52w 高 < -3% 改 +3 (突破訊號)
+      2. 今日漲跌 ±2% 權重 ±10 → ±5 (短線雜訊不壓過趨勢)
+      3. RSI 超買門檻 75 → 80, 配合量比看
+      4. PE → PEG fallback (高成長股不誤罰)
+      5. 趨勢對稱 (downtrend -10 → -8)
+      6. 加籌碼面 (法人連買/賣) — 台股關鍵
+      7. soft cap 反向 — 不壓 > 75 的好股票
+    """
+    import math
+    reasons: List[str] = []
+    score = 50
+
+    # Bug 2: 今日漲跌權重減半
     tp = snap.get("today_pct") or 0
     if tp >= 2.0:
-        score += 10; reasons.append(f"✅ 個股今日強漲 +{tp:.2f}%")
+        score += 5; reasons.append(f"✅ 今日強漲 +{tp:.2f}%")
     elif tp >= 0.5:
-        score += 5; reasons.append(f"➕ 個股小幅紅 +{tp:.2f}%")
+        score += 2; reasons.append(f"➕ 小幅紅 +{tp:.2f}%")
     elif tp <= -2.0:
-        score -= 10; reasons.append(f"❌ 個股今日大跌 {tp:.2f}%")
+        score -= 5; reasons.append(f"❌ 今日大跌 {tp:.2f}%")
     elif tp <= -0.5:
-        score -= 5; reasons.append(f"➖ 個股小幅黑 {tp:.2f}%")
+        score -= 2; reasons.append(f"➖ 小幅黑 {tp:.2f}%")
 
-    # 量比
     vr = snap.get("vol_ratio")
     if vr and vr >= 1.5:
         score += 5; reasons.append(f"✅ 量增 {vr:.1f}x (資金關注)")
     elif vr and vr < 0.7:
-        score -= 3; reasons.append(f"➖ 量縮 {vr:.1f}x (觀望)")
+        score -= 3; reasons.append(f"➖ 量縮 {vr:.1f}x")
 
-    # === 趨勢 (weight 15) ===
+    # Bug 5: 趨勢對稱
     trend = snap.get("trend")
     if trend == "uptrend":
-        score += 8; reasons.append("✅ 多頭排列 (站上 MA20/60)")
+        score += 8; reasons.append("✅ 多頭排列")
     elif trend == "downtrend":
-        score -= 10; reasons.append("❌ 空頭排列 (跌破 MA20/60)")
+        score -= 8; reasons.append("❌ 空頭排列")
 
-    # RSI
+    # Bug 3: RSI 超買門檻 75 → 80, 配合量比
     rsi = snap.get("rsi14")
     if rsi is not None:
-        if rsi >= 75:
-            score -= 6; reasons.append(f"⚠️ RSI {rsi:.0f} 超買, 短線回檔風險")
+        if rsi >= 80 and vr and vr >= 1.5:
+            score -= 5; reasons.append(f"⚠️ RSI {rsi:.0f}+放量 (回檔風險高)")
+        elif rsi >= 80:
+            score -= 2; reasons.append(f"⚠️ RSI {rsi:.0f} 偏高")
         elif rsi <= 30:
             score += 4; reasons.append(f"💡 RSI {rsi:.0f} 超賣, 反彈機會")
 
-    # 距 52w high
+    # Bug 1: 距 52w 高改 +3 (強勢突破)
     fh = snap.get("from_52w_high_pct")
     if fh is not None:
         if fh > -3:
-            score -= 3; reasons.append(f"⚠️ 距高點僅 {fh:.1f}%, 追高風險")
+            if rsi and rsi >= 80:
+                score -= 2; reasons.append(f"⚠️ 高點 {fh:.1f}% + RSI 超買")
+            else:
+                score += 3; reasons.append(f"✅ 距高點 {fh:.1f}% (強勢突破)")
         elif fh < -30:
-            reasons.append(f"📉 距高點 {fh:.1f}% (深度回檔, 留意止跌)")
+            reasons.append(f"📉 距高點 {fh:.1f}% (深度回檔)")
 
-
-    # === 族群表現 (weight 15) ===
     sap = peers.get("sector_avg_pct")
     upr = peers.get("up_ratio")
     if sap is not None and upr is not None:
@@ -470,20 +483,25 @@ def _verdict(snap: Dict, peers: Dict, rs: Optional[float], fund: Dict) -> Dict:
         elif sap <= -1.0:
             score -= 8; reasons.append(f"❌ 同族群同步走弱 均{sap:+.2f}%")
 
-    # === RS vs 大盤 (weight 10) — H2 fix: 改為差分 (pp), 不是比值 ===
     if rs is not None:
         if rs >= 1.5:
             score += 6; reasons.append(f"✅ 相對大盤強 (+{rs:.2f}pp)")
         elif rs <= -1.5:
             score -= 5; reasons.append(f"➖ 跑輸大盤 ({rs:+.2f}pp)")
 
-    # === 估值 (weight 10) ===
+    # Bug 4: PE → PEG fallback
     pe = fund.get("pe")
-    if pe is not None and pe > 0:
+    peg = fund.get("peg")
+    if peg is not None and 0 < peg < 100:
+        if peg <= 1.0:
+            score += 5; reasons.append(f"✅ PEG {peg:.2f} (合理成長估值)")
+        elif peg > 3:
+            score -= 4; reasons.append(f"⚠️ PEG {peg:.2f} 偏高")
+    elif pe is not None and pe > 0:
         if 10 <= pe <= 25:
-            score += 4; reasons.append(f"✅ 估值合理 PE={pe:.1f}")
-        elif pe > 40:
-            score -= 5; reasons.append(f"⚠️ 估值偏高 PE={pe:.1f}")
+            score += 4; reasons.append(f"✅ PE {pe:.1f} 合理")
+        elif pe > 50:  # 40 → 50 (高成長股 40+ 常見)
+            score -= 4; reasons.append(f"⚠️ PE {pe:.1f} 偏高")
     eyoy = fund.get("eps_yoy_pct")
     if eyoy is not None and not (isinstance(eyoy, float) and math.isnan(eyoy)):
         if eyoy >= 30:
@@ -491,13 +509,23 @@ def _verdict(snap: Dict, peers: Dict, rs: Optional[float], fund: Dict) -> Dict:
         elif eyoy <= -20:
             score -= 5; reasons.append(f"❌ EPS YoY {eyoy:.1f}% 衰退")
 
-    # === M4 fix: soft cap 防止多個小負同時觸發 score 暴跌至 AVOID ===
-    if score < 20:
-        excess = 20 - score
-        score += int(excess * 0.6)
-    if score > 80:
-        excess = score - 80
-        score -= int(excess * 0.4)
+    # Bug 6 (新): 加籌碼面 (snap 可提供 foreign_streak_days)
+    inst_streak = snap.get("foreign_streak_days") or 0
+    inst_5d_pct = snap.get("foreign_5d_pct_outstanding") or 0
+    if inst_streak >= 5 and inst_5d_pct > 0.5:
+        score += 6; reasons.append(f"✅ 外資連買 {inst_streak} 日 ({inst_5d_pct:.1f}% 流通)")
+    elif inst_streak <= -5 and inst_5d_pct < -0.5:
+        score -= 6; reasons.append(f"❌ 外資連賣 {abs(inst_streak)} 日")
+    main_bnet = snap.get("main_broker_net_pct") or 0
+    if main_bnet >= 1.0:
+        score += 3; reasons.append(f"✅ 主力券商買超 +{main_bnet:.1f}%")
+    elif main_bnet <= -1.0:
+        score -= 3; reasons.append(f"➖ 主力券商賣超 {main_bnet:.1f}%")
+
+    # Bug 7: soft cap 反向 — 不再壓抑 > 75, AVOID 拉抬縮小
+    if score < 25:
+        excess = 25 - score
+        score += int(excess * 0.3)  # 從 0.6 → 0.3, 留 AVOID 訊號
 
     # === 結論 ===
     score = max(0, min(100, score))
@@ -597,33 +625,86 @@ def _ai_verdict(symbol, snap, peers, rs, fund, verdict):
         return None
 
 
-# ---------------------------------------------------------------------------
 # 主入口
-# ---------------------------------------------------------------------------
 def evaluate_entry(symbol, market="auto"):
-    """完整個股入場評估 + 持倉決策建議. 失敗時相關欄位回 None, 不 raise."""
-    if market == "auto":
-        market = detect_market(symbol)
-    if market not in ("TW", "US"):
-        return {"error": f"無法判斷市場: {symbol}"}
+    """完整評估 (含 AI). 回 dict."""
+    try:
+        m = detect_market(symbol)
+        snap = _stock_snapshot(symbol, m)
+        snap = _enrich_chip_signal(snap, symbol, m)  # Bug 6 fix
+        peers = _tw_peers(symbol) if m == "TW" else _us_peers(symbol)
+        rs = _market_rs(snap, m)
+        fund = _fundamentals(symbol, m)
+        v = _verdict(snap, peers, rs, fund)
+        ai_text = _ai_verdict(symbol, snap, peers, rs, fund, v)
+        return {
+            "symbol": symbol,
+            "market": m,
+            "snap": snap,
+            "peers": peers,
+            "rs": {"market_rs_pp": rs, "market_label": "TWII" if m == "TW" else "SPY"},
+            "fundamentals": fund,
+            "verdict": v,
+            "ai_summary": ai_text,
+        }
+    except Exception as e:
+        return {"symbol": symbol, "err": f"{type(e).__name__}: {e}"}
 
-    snap = _stock_snapshot(symbol, market)
-    if snap.get("current") is None:
-        return {"error": f"無法取得 {symbol} 即時報價 (可能代號錯誤或暫時不可用)"}
 
-    peers = _tw_peers(symbol) if market == "TW" else _us_peers(symbol)
-    rs = _market_rs(snap, market)
-    fund = _fundamentals(symbol, market)
-    verdict = _verdict(snap, peers, rs, fund)
-    ai_summary = _ai_verdict(symbol, snap, peers, rs, fund, verdict)
+def _enrich_chip_signal(snap: Dict, symbol: str, market: str) -> Dict:
+    """為 _verdict Bug 6 補籌碼面資料 — 抓外資連買/賣天數 + 5d 累積 % of 流通.
+    台股才有, 美股 skip.
+    """
+    if market != "TW":
+        return snap
+    try:
+        import datetime as _dt
+        import data_sources as _ds
+        end = _dt.date.today().strftime("%Y-%m-%d")
+        start = (_dt.date.today() - _dt.timedelta(days=20)).strftime("%Y-%m-%d")
+        df = _ds.fetch_institutional_universe((symbol,), start, end)
+        if df is None or df.empty or "name" not in df.columns:
+            return snap
+        foreign = df[df["name"].astype(str).str.contains("Foreign|外資", na=False, regex=True)]
+        if foreign.empty or "buy" not in foreign.columns:
+            return snap
+        foreign = foreign.copy()
+        foreign["net_lots"] = (
+            foreign["buy"].astype(float) - foreign["sell"].astype(float)
+        ) / 1000.0
+        daily_net = foreign.groupby("date")["net_lots"].sum().sort_index()
+        if len(daily_net) < 5:
+            return snap
+        net_5d = daily_net.tail(5)
+        if (net_5d > 0).all():
+            streak = 5
+        elif (net_5d < 0).all():
+            streak = -5
+        else:
+            streak = 0
+        snap["foreign_streak_days"] = streak
+        cum_5d = net_5d.sum()
+        snap["foreign_5d_pct_outstanding"] = round(cum_5d / 50000 * 100, 2) if abs(cum_5d) > 0 else 0
+    except Exception as _e:
+        print(f"[entry_eval] enrich chip {symbol} failed: {_e}", flush=True)
+    return snap
 
-    return {
-        "symbol": symbol,
-        "market": market,
-        "snap": snap,
-        "peers": peers,
-        "rs_vs_market": rs,
-        "fundamentals": fund,
-        "verdict": verdict,
-        "ai_summary": ai_summary,
-    }
+
+def quick_evaluate(symbol, market="TW"):
+    """輕量版 (無 AI). 回 {entry_label, entry_emoji, entry_score, entry_action}."""
+    try:
+        m = detect_market(symbol)
+        snap = _stock_snapshot(symbol, m)
+        snap = _enrich_chip_signal(snap, symbol, m)
+        peers = _tw_peers(symbol) if m == "TW" else _us_peers(symbol)
+        rs = _market_rs(snap, m)
+        fund = _fundamentals(symbol, m)
+        v = _verdict(snap, peers, rs, fund)
+        return {
+            "entry_label": v.get("verdict"),
+            "entry_emoji": v.get("verdict_emoji"),
+            "entry_score": v.get("score"),
+            "entry_action": v.get("position_action"),
+        }
+    except Exception:
+        return {"entry_label": "—", "entry_emoji": "", "entry_score": None, "entry_action": "—"}

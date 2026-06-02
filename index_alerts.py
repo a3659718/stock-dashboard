@@ -48,17 +48,18 @@ import watchlist_store
 INDEX_CONFIG = {
     # 亞股
     # M3 fix: 把各指數 reversal_pct 都顯式設定, 避免 default 1.0% 漏掉「漲幅萎縮」
+    # P1 砍噪音: reversal 門檻全面提高 (專業推播標準, 0.5% 太敏感一天 3-5 次)
     "^N225":  {"name": "日經 225",   "threshold": 150.0, "country": "JP",
-               "reversal_pct": 0.8},  # 純參考, 較寬
+               "reversal_pct": 1.2},  # P1: 0.8 → 1.2
     "^KS11":  {"name": "韓國 KOSPI", "threshold": 50.0,  "country": "KR",
-               "reversal_pct": 0.5},  # 跟台股強連動, 最敏感
+               "reversal_pct": 0.8},  # P1: 0.5 → 0.8
     "^TWII":  {"name": "台灣加權",   "threshold": 200.0, "country": "TW",
-               "disable_atr_boost": True, "reversal_pct": 0.5},
-    # 美股 (台股 leading indicator)
+               "disable_atr_boost": True, "reversal_pct": 1.0},  # P1: 0.5 → 1.0
+    # 美股
     "^SOX":   {"name": "費城半導體", "threshold": 100.0, "country": "US",
-               "reversal_pct": 0.6},  # 對台股傳導性強, 略寬於 TWII
+               "reversal_pct": 1.0},  # P1: 0.6 → 1.0
     "^IXIC":  {"name": "那斯達克",   "threshold": 200.0, "country": "US",
-               "reversal_pct": 0.8},
+               "reversal_pct": 1.2},  # P1: 0.8 → 1.2
 }
 
 
@@ -804,7 +805,11 @@ def check_intraday_reversal() -> List[Dict]:
         MIN_PEAK_PCT = 0.5
         sym_shrink_threshold = float(cfg.get("shrink_pct",
                                               cfg.get("reversal_pct", REVERSAL_THRESHOLD_PCT)))
-        if (max_pct_vs_open >= MIN_PEAK_PCT
+        # P1 砍噪音: shrink 跟 drawdown 數學接近 → 禁用 emit (False 不會 alert)
+        # 仍記錄 state, 後續可用於 confluence 判斷
+        ENABLE_SHRINK_EMIT = False
+        if (ENABLE_SHRINK_EMIT
+                and max_pct_vs_open >= MIN_PEAK_PCT
                 and (max_pct_vs_open - pct_vs_open) >= sym_shrink_threshold
                 and not sym_state.get("shrink_alerted_today")):
             companion_stocks_s: List[Dict] = []
@@ -836,7 +841,10 @@ def check_intraday_reversal() -> List[Dict]:
             sym_state["shrink_alerted_today"] = True
 
         # #1 recover trigger: 跌過 -MIN_PEAK_PCT 後反彈 ≥ recovery_pp (鏡像 shrink)
-        if (min_pct_vs_open <= -MIN_PEAK_PCT
+        # P1 砍噪音: recover 跟 rebound 重複, 禁用 emit
+        ENABLE_RECOVER_EMIT = False
+        if (ENABLE_RECOVER_EMIT
+                and min_pct_vs_open <= -MIN_PEAK_PCT
                 and (pct_vs_open - min_pct_vs_open) >= sym_shrink_threshold
                 and not sym_state.get("recover_alerted_today")):
             companion_stocks_r: List[Dict] = []

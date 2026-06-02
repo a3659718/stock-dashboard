@@ -37,7 +37,7 @@ import sector_pulse
 SECTOR_AVG_THRESHOLD = 1.5        # 族群均漲 % (vs 昨收)
 SECTOR_UP_RATIO_THRESHOLD = 0.6   # 上漲家數占比 (0-1)
 SECTOR_MIN_STOCKS = 3             # 至少要 N 檔成份股 (避免單檔噪音)
-SECTOR_COOLDOWN_MIN = 60          # 兩批推播間最少間隔 (分)
+SECTOR_COOLDOWN_MIN = 60 * 24     # 兩批推播間最少間隔 (分)
 SECTOR_MAX_PER_BATCH = 3          # 一批最多 N 個族群
 
 # 強度標籤門檻

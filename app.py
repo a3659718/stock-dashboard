@@ -1270,6 +1270,55 @@ with tab_hold:
         "含短中期目標價 + 停損 + 隔日漲機率, 並 TG 推播."
     )
 
+    # 🆕 組合風險檢視 (sector 集中度 / 單檔權重)
+    with st.expander("⚠️ 組合風險檢視 (sector 集中度 / 單檔權重)", expanded=False):
+        try:
+            import portfolio_risk
+            risk = portfolio_risk.analyze_portfolio_risk()
+            if risk.get("holdings_n", 0) > 0:
+                # 警告區塊 (大字醒目)
+                for w in risk.get("warnings", []):
+                    if "🔴" in w:
+                        st.error(w, icon="🔴")
+                    elif "🟡" in w:
+                        st.warning(w, icon="🟡")
+                    elif "🟢" in w:
+                        st.success(w, icon="🟢")
+                    else:
+                        st.info(w)
+                # sector breakdown 表
+                if risk.get("sectors"):
+                    st.markdown("**📊 Sector 分布**")
+                    import pandas as pd
+                    sec_df = pd.DataFrame(risk["sectors"])
+                    sec_df = sec_df.rename(columns={
+                        "sector": "族群", "weight_pct": "權重 %",
+                        "n": "檔數", "stocks": "個股",
+                    })
+                    sec_df["個股"] = sec_df["個股"].apply(
+                        lambda xs: " · ".join(xs[:5]) if isinstance(xs, list) else str(xs or "")
+                    )
+                    st.dataframe(
+                        sec_df[["族群", "權重 %", "檔數", "個股"]],
+                        use_container_width=True, hide_index=True,
+                    )
+                # 單檔權重 top 5
+                if risk.get("stocks"):
+                    st.markdown("**🏆 個股權重 (Top 5)**")
+                    st_df = pd.DataFrame(risk["stocks"][:5])
+                    st_df = st_df.rename(columns={
+                        "stock_id": "代號", "weight_pct": "權重 %",
+                        "sector": "產業", "family": "族群",
+                    })
+                    st.dataframe(
+                        st_df[["代號", "權重 %", "產業", "族群"]],
+                        use_container_width=True, hide_index=True,
+                    )
+            else:
+                st.info(risk.get("warnings", ["無持倉"])[0] if risk.get("warnings") else "無持倉")
+        except Exception as _re:
+            st.warning(f"⚠️ 組合風險分析失敗: {_re}")
+
     import holdings_store
     import holdings_analyzer
     import holdings_tracker
@@ -3424,9 +3473,10 @@ with tab_health:
             display_cols = [c for c in ["ts", "ok", "type", "err"] if c in recent_df.columns]
             st.dataframe(recent_df[display_cols].iloc[::-1],
                          use_container_width=True, hide_index=True)
-            st.info("過去 24h 沒有推播紀錄 (可能 cron 沒跑, 或都被 cooldown 擋掉).")
+        else:
+            st.info("過去 24h 沒有推播紀錄.")
 
-        # === 7d 統計 by type ===
+        # === 7d by type ===
         st.markdown("#### 📊 過去 7 天推播統計 (by type)")
         by_type = health["push_7d"].get("by_type") or {}
         if by_type:
