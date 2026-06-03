@@ -111,17 +111,17 @@ def _score_speculation(m: Dict) -> Dict:
         score -= 5; reasons.append(f"⚠️ 6 個月範圍 {m['range_pct_6mo']:.0f}% 太寬")
     # ATR 小 → 等突破
     if m["atr_pct_30d"] <= 3.0:
-        score += 5; reasons.append(f"✅ 30d ATR {m['atr_pct_30d']:.1f}% (波動收斂)")
+        score += 5; reasons.append(f"✅ 30d ATR {m['atr_pct_30d']:.2f}% (波動收斂)")
     # RS 正向 (vs SPY)
     if m["rs_3mo_diff_vs_spy"] >= 5:
-        score += 10; reasons.append(f"✅ 3 月相對 SPY +{m['rs_3mo_diff_vs_spy']:.1f}pp (強勢)")
+        score += 10; reasons.append(f"✅ 3 月相對 SPY +{m['rs_3mo_diff_vs_spy']:.2f}pp (強勢)")
     elif m["rs_3mo_diff_vs_spy"] >= 0:
-        score += 5; reasons.append(f"➕ 3 月相對 SPY {m['rs_3mo_diff_vs_spy']:+.1f}pp")
+        score += 5; reasons.append(f"➕ 3 月相對 SPY {m['rs_3mo_diff_vs_spy']:+.2f}pp")
     elif m["rs_3mo_diff_vs_spy"] <= -20:
-        score -= 10; reasons.append(f"❌ 3 月跑輸 SPY {m['rs_3mo_diff_vs_spy']:.1f}pp")
+        score -= 10; reasons.append(f"❌ 3 月跑輸 SPY {m['rs_3mo_diff_vs_spy']:.2f}pp")
     # 量增 (signal of accumulation)
     if m["vol_ratio_recent"] >= 1.3:
-        score += 8; reasons.append(f"✅ 量增 {m['vol_ratio_recent']:.1f}x (吸籌中)")
+        score += 8; reasons.append(f"✅ 量增 {m['vol_ratio_recent']:.2f}x (吸籌中)")
     # 距 200d MA (站上 = stage 2, 跌破 = stage 4)
     if m["ma_200d_dist_pct"] > 0:
         score += 5; reasons.append(f"✅ 站上 200d MA")
@@ -129,7 +129,7 @@ def _score_speculation(m: Dict) -> Dict:
         score -= 8; reasons.append(f"⚠️ 距 200d MA {m['ma_200d_dist_pct']:.0f}% (深度回檔)")
     # 今日強勢 (突破)
     if m["today_pct"] >= 3:
-        score += 5; reasons.append(f"✅ 今日 +{m['today_pct']:.1f}% (可能突破)")
+        score += 5; reasons.append(f"✅ 今日 +{m['today_pct']:.2f}% (可能突破)")
 
     # 標籤
     score = max(0, min(100, score))

@@ -39,11 +39,11 @@ def check_quality(symbol: str) -> Dict:
             roe_pct = float(roe) * 100 if abs(roe) < 1 else float(roe)
             out["roe"] = round(roe_pct, 2)
             if roe_pct >= 15:
-                score += 5; reasons.append(f"✅ ROE {roe_pct:.1f}% (優質)")
+                score += 5; reasons.append(f"✅ ROE {roe_pct:.2f}% (優質)")
             elif roe_pct >= 10:
-                score += 2; reasons.append(f"➕ ROE {roe_pct:.1f}%")
+                score += 2; reasons.append(f"➕ ROE {roe_pct:.2f}%")
             elif roe_pct < 5:
-                score -= 3; reasons.append(f"❌ ROE {roe_pct:.1f}% 低 (品質差)")
+                score -= 3; reasons.append(f"❌ ROE {roe_pct:.2f}% 低 (品質差)")
 
         de = f.get("debtToEquity")
         if de is not None:
@@ -64,18 +64,18 @@ def check_quality(symbol: str) -> Dict:
             fcf_yield = float(fcf) / float(mcap) * 100
             out["fcf_yield"] = round(fcf_yield, 2)
             if fcf_yield > 5:
-                score += 3; reasons.append(f"✅ FCF Yield {fcf_yield:.1f}% (現金充沛)")
+                score += 3; reasons.append(f"✅ FCF Yield {fcf_yield:.2f}% (現金充沛)")
             elif fcf_yield < 0:
-                score -= 3; reasons.append(f"❌ FCF Yield {fcf_yield:.1f}% 負")
+                score -= 3; reasons.append(f"❌ FCF Yield {fcf_yield:.2f}% 負")
 
         pm = f.get("profitMargins")
         if pm is not None:
             pm_pct = float(pm) * 100 if abs(pm) < 1 else float(pm)
             out["profit_margin"] = round(pm_pct, 2)
             if pm_pct > 20:
-                score += 3; reasons.append(f"✅ Profit Margin {pm_pct:.1f}%")
+                score += 3; reasons.append(f"✅ Profit Margin {pm_pct:.2f}%")
             elif pm_pct < 5:
-                score -= 2; reasons.append(f"➖ Profit Margin {pm_pct:.1f}%")
+                score -= 2; reasons.append(f"➖ Profit Margin {pm_pct:.2f}%")
 
         # 品質標籤
         if score >= 8:

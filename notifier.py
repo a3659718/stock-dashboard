@@ -1157,10 +1157,10 @@ def _entry_zone_bar(current, entry_low, entry_high, width: int = 14) -> str:
     if cur < el:
         # 低於下緣 — 顯示 [●---區間---] 加距離標記
         dist_pct = (el - cur) / el * 100
-        return f"[●  區間  ]  低於下緣 {dist_pct:.1f}% (可進場)"
+        return f"[●  區間  ]  低於下緣 {dist_pct:.2f}% (可進場)"
     if cur > eh:
         dist_pct = (cur - eh) / eh * 100
-        return f"[  區間  ●]  高於上緣 {dist_pct:.1f}% (追高警告)"
+        return f"[  區間  ●]  高於上緣 {dist_pct:.2f}% (追高警告)"
     # 在區間內 — 算位置
     pos = int((cur - el) / span * (width - 1))
     pos = max(0, min(width - 1, pos))
@@ -1198,7 +1198,7 @@ def _fmt_potential_picks_block(picks: list, hide_low_rr: bool = True,
         enriched.append((p, rr))
 
     if not enriched:
-        out.append("(本日無 R:R ≥ {:.1f} 的標的)".format(rr_threshold))
+        out.append("(本日無 R:R ≥ {:.2f} 的標的)".format(rr_threshold))
         return out
 
     for i, (p, rr) in enumerate(enriched, 1):
@@ -1474,7 +1474,7 @@ def fmt_tw_close_analysis(data: dict) -> str:
                 sign = "+" if (today or 0) > 0 else ""
                 head += f"  {_esc(cur)} ({sign}{_esc(today)}%)"
             lines.append(head)
-            lines.append(f"     上漲機率 <b>{_esc(up_prob)}%</b> · 預期 +{target:.1f}%")
+            lines.append(f"     上漲機率 <b>{_esc(up_prob)}%</b> · 預期 +{target:.2f}%")
             if reason:
                 lines.append(f"     {_esc(reason)}")
 
@@ -1786,11 +1786,11 @@ def _rev_volume_desc(vstate: str, vr) -> str:
     if vrf is None:
         return ""
     if vstate == "heavy":
-        return f"量增放出 ({vrf:.1f}× 同期) ⚠️"
+        return f"量增放出 ({vrf:.2f}× 同期) ⚠️"
     if vstate == "light":
-        return f"量縮觀望 ({vrf:.1f}× 同期)"
+        return f"量縮觀望 ({vrf:.2f}× 同期)"
     if vstate == "normal":
-        return f"量能正常 ({vrf:.1f}× 同期)"
+        return f"量能正常 ({vrf:.2f}× 同期)"
     return ""
 
 
@@ -1991,15 +1991,15 @@ def fmt_intraday_reversal_alerts(alerts: list) -> str:
             sign_o = "+" if vs_open > 0 else ""
             advice = _rev_action_drawdown(sev, a.get("market_state", "")) or "💡 觀望"
             # 精簡: 標題 1 行 + 建議 1 行 + 弱股 top 3 1 行
-            lines.append(f"{name} <code>{sym}</code> 回吐 <b>{dd_pct:+.1f}%</b> "
-                          f"(vs 開盤 {sign_o}{vs_open:.1f}%){badge_p}")
+            lines.append(f"{name} <code>{sym}</code> 回吐 <b>{dd_pct:+.2f}%</b> "
+                          f"(vs 開盤 {sign_o}{vs_open:.2f}%){badge_p}")
             lines.append(f"  {advice}")
             comp = a.get("companion_stocks") or []
             if comp:
                 wk_line = " · ".join(
                     f"{_esc(c.get('stock_id',''))} "
                     f"{c.get('entry_emoji','')}"
-                    f"{float(c.get('today_pct',0) or 0):+.1f}%"
+                    f"{float(c.get('today_pct',0) or 0):+.2f}%"
                     for c in comp[:3]
                 )
                 lines.append(f"  同步弱: {wk_line}")
@@ -2007,7 +2007,7 @@ def fmt_intraday_reversal_alerts(alerts: list) -> str:
                 avoid_list = [c for c in comp if c.get("entry_label") in ("AVOID", "SELL")][:3]
                 if avoid_list:
                     av_line = " · ".join(
-                        f"{_esc(c.get('stock_id',''))} {float(c.get('today_pct',0) or 0):+.1f}%"
+                        f"{_esc(c.get('stock_id',''))} {float(c.get('today_pct',0) or 0):+.2f}%"
                         for c in avoid_list
                     )
                     lines.append(f"  ⚠️ <b>建議減碼</b>: {av_line}")
@@ -2027,15 +2027,15 @@ def fmt_intraday_reversal_alerts(alerts: list) -> str:
                 max_pct = vs_open = shrink_pp = 0.0
             sign_o = "+" if vs_open > 0 else ""
             lines.append(
-                f"{name} <code>{sym}</code> 高 +{max_pct:.1f}% → {sign_o}{vs_open:.1f}% "
-                f"(<b>-{shrink_pp:.1f}pp</b>) 💡 分批停利"
+                f"{name} <code>{sym}</code> 高 +{max_pct:.2f}% → {sign_o}{vs_open:.2f}% "
+                f"(<b>-{shrink_pp:.2f}pp</b>) 💡 分批停利"
             )
             companion = a.get("companion_stocks") or []
             if companion:
                 wk_line = " · ".join(
                     f"{_esc(cs.get('stock_id',''))} "
                     f"{cs.get('entry_emoji','')}"
-                    f"{float(cs.get('today_pct',0) or 0):+.1f}%"
+                    f"{float(cs.get('today_pct',0) or 0):+.2f}%"
                     for cs in companion[:3]
                 )
                 lines.append(f"  同步弱: {wk_line}")
@@ -2055,8 +2055,8 @@ def fmt_intraday_reversal_alerts(alerts: list) -> str:
                 min_pct = vs_open = recovery_pp = 0.0
             sign_o = "+" if vs_open > 0 else ""
             lines.append(
-                f"{name} <code>{sym}</code> 低 {min_pct:.1f}% → {sign_o}{vs_open:.1f}% "
-                f"(<b>+{recovery_pp:.1f}pp</b>) 💡 留意轉強跟進"
+                f"{name} <code>{sym}</code> 低 {min_pct:.2f}% → {sign_o}{vs_open:.2f}% "
+                f"(<b>+{recovery_pp:.2f}pp</b>) 💡 留意轉強跟進"
             )
             up_stocks = a.get("companion_stocks_up") or []
             if up_stocks:
@@ -2064,7 +2064,7 @@ def fmt_intraday_reversal_alerts(alerts: list) -> str:
                 st_line = " · ".join(
                     f"{_esc(cs.get('stock_id',''))} "
                     f"{cs.get('entry_emoji','')}"
-                    f"{float(cs.get('today_pct',0) or 0):+.1f}%"
+                    f"{float(cs.get('today_pct',0) or 0):+.2f}%"
                     for cs in up_stocks[:3]
                 )
                 lines.append(f"  同步強: {st_line}")
@@ -2082,7 +2082,7 @@ def fmt_intraday_reversal_alerts(alerts: list) -> str:
                 if buy_list:
                     buy_line = " · ".join(
                         f"{_esc(cs.get('stock_id',''))} "
-                        f"{float(cs.get('today_pct',0) or 0):+.1f}% "
+                        f"{float(cs.get('today_pct',0) or 0):+.2f}% "
                         f"(score {cs.get('entry_score','—')})"
                         for cs in buy_list
                     )
@@ -2090,7 +2090,7 @@ def fmt_intraday_reversal_alerts(alerts: list) -> str:
             sl = a.get("sector_leaders") or []
             if sl:
                 sec_line = " · ".join(
-                    f"{_esc(s.get('sector',''))} +{float(s.get('avg_change',0) or 0):.1f}%"
+                    f"{_esc(s.get('sector',''))} +{float(s.get('avg_change',0) or 0):.2f}%"
                     for s in sl[:3]
                 )
                 lines.append(f"  強勢族群: {sec_line}")
@@ -2111,8 +2111,8 @@ def fmt_intraday_reversal_alerts(alerts: list) -> str:
             badge_p = f" {badge}" if badge else ""
             sign_o = "+" if vs_open > 0 else ""
             advice = _rev_action_rebound(sev, a.get("market_state", "")) or "💡 觀察跟進"
-            lines.append(f"{name} <code>{sym}</code> 反彈 <b>+{rb_pct:.1f}%</b> "
-                          f"(vs 開盤 {sign_o}{vs_open:.1f}%){badge_p}")
+            lines.append(f"{name} <code>{sym}</code> 反彈 <b>+{rb_pct:.2f}%</b> "
+                          f"(vs 開盤 {sign_o}{vs_open:.2f}%){badge_p}")
             lines.append(f"  {advice}")
             lines.append("")
 
@@ -2702,7 +2702,7 @@ def _rule_based_crash_verdict(triggers: list, ctx: dict) -> str:
         verdict_lines.append(f"• 建議: <b>{action}</b>")
         verdict_lines.append(
             f"• 依據: 觸發 {n_trig} 檔標的, 最大盤中跌幅 {max_intraday:+.2f}%"
-            + (f", VIX {vix_f:.1f}" if vix_f is not None else "")
+            + (f", VIX {vix_f:.2f}" if vix_f is not None else "")
         )
         return "\n".join(verdict_lines)
     except Exception:
@@ -2840,7 +2840,7 @@ def fmt_holdings_daily(holdings: list) -> str:
                 pass
         m30 = _to_f(chip.get("margin_30d_pct", 0))
         if m30 and abs(m30) > 5:
-            chip_parts.append(f"融資30日 {m30:+.1f}%")
+            chip_parts.append(f"融資30日 {m30:+.2f}%")
         if chip_parts:
             lines.append("  籌碼: " + " · ".join(chip_parts))
 
@@ -3090,6 +3090,7 @@ def fmt_us_fg_alert(fg: dict, threshold_low: int = 25, threshold_high: int = 75)
         s = float(fg["score"])
     except (TypeError, ValueError):
         return None
+    rating = _esc(fg.get("rating", ""))
     if s <= threshold_low:
         return (f"⚠️ <b>美股市場極度恐慌</b>\n"
                 f"CNN F&amp;G Index: <b>{s:.0f}</b> ({rating})\n"
@@ -3133,10 +3134,10 @@ def fmt_volume_breakout_alerts(alerts: list) -> str:
         bp = float(a.get("breakout_pct", 0) or 0)
         h60 = float(a.get("high_60d", 0) or 0)
         lines.append(
-            f"⚡ [{market}] <code>{sym}</code> {cur:,.2f} <b>{tp:+.1f}%</b>"
+            f"⚡ [{market}] <code>{sym}</code> {cur:,.2f} <b>{tp:+.2f}%</b>"
         )
         lines.append(
-            f"  量比 <b>{vr:.1f}x</b> · 突破 60d 高 ({h60:,.2f}) +{bp:.1f}%"
+            f"  量比 <b>{vr:.2f}x</b> · 突破 60d 高 ({h60:,.2f}) +{bp:.2f}%"
         )
         lines.append("  💡 主力進場確定訊號, 留意拉回支撐 (60d high)")
         lines.append("")
@@ -3199,12 +3200,12 @@ def fmt_breakout_consolidation_alerts(alerts: list) -> str:
         theme = _esc(a.get("theme_tag", ""))
         theme_part = f" 🏷 {theme}" if theme else ""
         lines.append(
-            f"⚡ <code>{sym}</code> {cur:,.2f} <b>{tp:+.1f}%</b>{theme_part}"
+            f"⚡ <code>{sym}</code> {cur:,.2f} <b>{tp:+.2f}%</b>{theme_part}"
         )
         lines.append(
-            f"  20d 盤整 (range {rg:.1f}% / ATR {atr:.1f}%) → 突破 20d 高 {h20:,.2f} (+{bp:.1f}%)"
+            f"  20d 盤整 (range {rg:.2f}% / ATR {atr:.2f}%) → 突破 20d 高 {h20:,.2f} (+{bp:.2f}%)"
         )
-        lines.append(f"  量比 <b>{vr:.1f}x</b> · 💡 突破型態, 留意拉回 20d 高支撐")
+        lines.append(f"  量比 <b>{vr:.2f}x</b> · 💡 突破型態, 留意拉回 20d 高支撐")
         lines.append("")
     lines.append("<i>※ Tier 1 — 盤整突破最強訊號. 進場分批, 跌破 20d 高停損.</i>")
     return _truncate_tg_msg("\n".join(lines).rstrip())
@@ -3279,7 +3280,7 @@ def fmt_analyst_insider_alerts(alerts: list, gemini_analysis: str = "") -> str:
             ch = a.get("buy_ratio_change_pp", 0)
             lines.append(
                 f"  📊 <code>{sym}</code> BUY 占比: {prev}% → <b>{cur}%</b> "
-                f"(+{ch:.1f} pp)"
+                f"(+{ch:.2f} pp)"
             )
         lines.append("")
     if gemini_analysis:
@@ -3390,11 +3391,17 @@ def fmt_speculation_picks(picks: list) -> str:
             vr = p.get("vol_ratio_recent", 0)
             ma = p.get("ma_200d_dist_pct", 0)
             lines.append(
-                f"  ⚡ <code>{sym}</code> {cur:.2f} <b>{tp:+.1f}%</b> · score {sc} {lab}"
+                f"  ⚡ <code>{sym}</code> {cur:.2f} <b>{tp:+.2f}%</b> · score {sc} {lab}"
             )
             lines.append(
-                f"     RS vs SPY {rs:+.1f}pp · 量比 {vr:.1f}x · 距 200MA {ma:+.0f}%"
+                f"     RS vs SPY {rs:+.2f}pp · 量比 {vr:.2f}x · 距 200MA {ma:+.0f}%"
             )
         lines.append("")
     lines.append("<i>※ Tier 2 投機股. 高 beta + 高波動, 部位控制 ≤ 5% 為宜.</i>")
     return _truncate_tg_msg("\n".join(lines).rstrip())
+
+
+# alias: 舊名字 (app.py 在用)
+fmt_fear_greed_alert = fmt_us_fg_alert
+
+fmt_fear_greed_alert = fmt_us_fg_alert

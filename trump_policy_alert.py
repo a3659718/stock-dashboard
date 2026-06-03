@@ -36,8 +36,8 @@ TRUMP_KEYWORDS_EN = [
     "made in america", "reshore", "reshoring",
 ]
 
-TRUMP_COOLDOWN_MIN = 60
-TRUMP_MAX_PER_BATCH = 5
+TRUMP_COOLDOWN_MIN = 180  # 60 → 180 降頻
+TRUMP_MAX_PER_BATCH = 3  # 5 → 3 降量
 
 # 關鍵 universe (川普推文常影響的股)
 TRUMP_SENSITIVE_UNIVERSE = [
@@ -96,7 +96,8 @@ def check_trump_policy_news() -> List[Dict]:
             else:
                 pub_date = ""
             hits = _match_trump_keywords(head)
-            if not hits:
+            # 提高門檻: 至少 2 個關鍵字才推 (避免泛 trump 新聞淹沒)
+            if len(hits) < 2:
                 continue
             h_hash = _hash_title(head)
             if h_hash in alerted:

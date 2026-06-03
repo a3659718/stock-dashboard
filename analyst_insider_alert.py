@@ -233,7 +233,7 @@ def analyze_with_gemini(alerts: List[Dict]) -> str:
             if a.get("type") == "analyst_upgrade":
                 ctx_lines.append(
                     f"[{a['symbol']}] 分析師升評: 上月 BUY {a['buy_ratio_prev']}% "
-                    f"→ 本月 {a['buy_ratio_cur']}% (+{a['buy_ratio_change_pp']:.1f} pp)"
+                    f"→ 本月 {a['buy_ratio_cur']}% (+{a['buy_ratio_change_pp']:.2f} pp)"
                 )
             else:
                 ctx_lines.append(
