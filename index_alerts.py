@@ -57,7 +57,7 @@ INDEX_CONFIG = {
                "disable_atr_boost": True, "reversal_pct": 1.0},  # P1: 0.5 → 1.0
     # 美股
     "^SOX":   {"name": "費城半導體", "threshold": 100.0, "country": "US",
-               "reversal_pct": 1.0},  # P1: 0.6 → 1.0
+               "reversal_pct": 0.8},  # 台股 leading indicator, 留敏感 (0.6→1.0→0.8)
     "^IXIC":  {"name": "那斯達克",   "threshold": 200.0, "country": "US",
                "reversal_pct": 1.2},  # P1: 0.8 → 1.2
 }
@@ -1115,7 +1115,8 @@ def check_weak_open_alerts() -> List[Dict]:
         # H1/H3 fix: 開盤頭 15min 資料還沒分化 (today_high ≈ today_open 是正常未分化結果,
         #            而非「沒給過反彈機會」). 要求至少 4 根 5m bar (≥20min) 或開盤 ≥20min
         #            才允許 weak/strong_open 觸發, 避免開盤即弱誤判.
-        enough_data = bar_count >= 4 or (mins_since_open is not None and mins_since_open >= 20)
+        # 從 4 → 3 (≥15min), 配合 09:15 monitor cron 可抓到開盤+15min
+        enough_data = bar_count >= 3 or (mins_since_open is not None and mins_since_open >= 15)
         if not enough_data:
             continue
 
@@ -1725,7 +1726,6 @@ def check_crypto_alerts() -> List[Dict]:
             current = float(df["Close"].iloc[-1])
         except Exception:
             continue
-        # ... 此區段為 crypto monitor, 用戶已關閉, 不寫詳細邏輯 (保留 stub 結尾)
     state["crypto_alerts"] = ca_state
     watchlist_store.save_monitor_state(state)
     return alerts

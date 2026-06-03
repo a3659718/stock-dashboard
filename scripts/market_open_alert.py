@@ -301,6 +301,152 @@ def main() -> int:
         print(f"✗ FinMind test failed: {type(e).__name__}: {e}")
     print(f"========================\n")
 
+
+    # === 🇺🇸 川普政策推播 (monitor 跑時, 60min cooldown) ===
+    if market == "monitor":
+        try:
+            import trump_policy_alert as _tp
+            tp_alerts = _tp.check_trump_policy_news() or []
+            if tp_alerts:
+                print(f"[trump_policy] triggered {len(tp_alerts)}", flush=True)
+                gem = _tp.analyze_with_gemini(tp_alerts)
+                tp_msg = notifier.fmt_trump_policy_alerts(tp_alerts, gem)
+                if tp_msg:
+                    ok_tp, info_tp = notifier.send_message(
+                        tp_msg, disable_preview=False, disable_notification=False
+                    )
+                    if ok_tp:
+                        _tp.mark_alerts_sent(tp_alerts)
+                    print(f"[trump_policy] sent ok={ok_tp}", flush=True)
+        except Exception as _e:
+            import traceback
+            print(f"[trump_policy] failed: {_e}", flush=True)
+            traceback.print_exc()
+
+    # === 🌏 日韓 leading alert (monitor 跑時, 台股盤中) ===
+    if market == "monitor":
+        try:
+            import asia_leading_alert as _al
+            al_alerts = _al.check_asia_leading() or []
+            if al_alerts:
+                print(f"[asia_leading] triggered {len(al_alerts)}", flush=True)
+                al_msg = notifier.fmt_asia_leading_alerts(al_alerts)
+                if al_msg:
+                    ok_al, info_al = notifier.send_message(
+                        al_msg, disable_preview=True, disable_notification=False
+                    )
+                    if ok_al:
+                        _al.mark_alerts_sent(al_alerts)
+                    print(f"[asia_leading] sent ok={ok_al}", flush=True)
+        except Exception as _e:
+            import traceback
+            print(f"[asia_leading] failed: {_e}", flush=True)
+            traceback.print_exc()
+
+    # === 🏛 美股機構/內部人動向 (us_open 跑一次/天) ===
+    if market == "us_open":
+        try:
+            import analyst_insider_alert as _ai
+            ai_alerts = _ai.check_analyst_insider() or []
+            if ai_alerts:
+                print(f"[analyst_insider] triggered {len(ai_alerts)}", flush=True)
+                gem = _ai.analyze_with_gemini(ai_alerts)
+                ai_msg = notifier.fmt_analyst_insider_alerts(ai_alerts, gem)
+                if ai_msg:
+                    ok_a, info_a = notifier.send_message(
+                        ai_msg, disable_preview=True, disable_notification=False
+                    )
+                    if ok_a:
+                        _ai.mark_alerts_sent(ai_alerts)
+                    print(f"[analyst_insider] sent ok={ok_a}", flush=True)
+        except Exception as _e:
+            import traceback
+            print(f"[analyst_insider] failed: {_e}", flush=True)
+            traceback.print_exc()
+
+
+    # === 💰 利率週期建議 (週一 us_open 推一次/週) ===
+    if market == "us_open":
+        try:
+            import datetime as _dt2
+            if _dt2.date.today().weekday() == 0:  # Monday only
+                import rate_cycle_advisor as _rc
+                cyc = _rc.detect_cycle()
+                if cyc.get("cycle") != "unknown":
+                    advice = _rc.get_sector_advice(cyc["cycle"])
+                    # 加 Gemini 解讀看好族群
+                    try:
+                        gem = _rc.analyze_outperform_with_gemini(cyc["cycle"], advice)
+                        if gem: advice["gemini_analysis"] = gem
+                    except Exception:
+                        pass
+                    rc_msg = notifier.fmt_rate_cycle_advice(cyc, advice)
+                    if rc_msg:
+                        ok_rc, info_rc = notifier.send_message(
+                            rc_msg, disable_preview=True, disable_notification=False
+                        )
+                        print(f"[rate_cycle] sent ok={ok_rc}", flush=True)
+        except Exception as _e:
+            import traceback
+            print(f"[rate_cycle] failed: {_e}", flush=True)
+            traceback.print_exc()
+
+
+    # === 🎲 投機股精選 (週三 us_open 推 1 次/週, 避免 cluttering) ===
+    if market == "us_open":
+        try:
+            import datetime as _dt3
+            if _dt3.date.today().weekday() == 2:  # Wednesday only
+                import speculation_screener as _ss
+                spec_picks = _ss.compute_speculation_picks(top_n=10, min_score=60) or []
+                if spec_picks:
+                    spec_msg = notifier.fmt_speculation_picks(spec_picks)
+                    if spec_msg:
+                        ok_sp, info_sp = notifier.send_message(
+                            spec_msg, disable_preview=True, disable_notification=False
+                        )
+                        print(f"[speculation] sent ok={ok_sp}", flush=True)
+        except Exception as _e:
+            import traceback
+            print(f"[speculation] failed: {_e}", flush=True)
+            traceback.print_exc()
+
+    # === 🌅 morning_action 早盤情境推播 (tw_open / us_open 都跑) ===
+    if market in ("tw_open", "us_open"):
+        try:
+            import morning_action_alert as _ma
+            mk = "TW" if market == "tw_open" else "US"
+            ma_msg = _ma.build_morning_action_msg(mk)
+            if ma_msg:
+                ok_ma, info_ma = notifier.send_message(
+                    ma_msg, disable_preview=True, disable_notification=False
+                )
+                print(f"[morning_action] {mk} TG: ok={ok_ma}", flush=True)
+        except Exception as _e:
+            import traceback
+            print(f"[morning_action] failed (non-fatal): {_e}", flush=True)
+            traceback.print_exc()
+
+    # === 🚀 美股盤整突破 (US session 內每次 monitor 都掃) ===
+    if market in ("us_open", "us_mid", "monitor"):
+        try:
+            import breakout_consolidation_alert as _bc
+            bc_alerts = _bc.check_breakout_consolidation(top_n=5) or []
+            if bc_alerts:
+                print(f"[breakout] triggered {len(bc_alerts)}: "
+                      + ", ".join(a.get("symbol", "") for a in bc_alerts),
+                      flush=True)
+                bc_msg = notifier.fmt_breakout_consolidation_alerts(bc_alerts)
+                if bc_msg:
+                    ok_bc, info_bc = notifier.send_message(
+                        bc_msg, disable_preview=True, disable_notification=False
+                    )
+                    if ok_bc:
+                        _bc.mark_alerts_sent(bc_alerts)
+        except Exception as _e:
+            import traceback
+            print(f"[breakout] failed (non-fatal): {_e}", flush=True)
+
     if market in ("tw_open", "tw_mid"):
         label = "開盤後 30 分鐘 (09:30)" if market == "tw_open" else "中盤更新 (11:00)"
         print(f"Running TW {label}...")
@@ -959,42 +1105,8 @@ def main() -> int:
                             )
                         except Exception as _me:
                             print(f"[strong sector] mark_sectors_sent failed: {_me}", flush=True)
-                    if holdings_intraday_alerts:
-                        try:
-                            import holdings_intraday_alert as _hi_mark
-                            _hi_mark.mark_alerts_sent(holdings_intraday_alerts)
-                            print(
-                                f"[holdings intraday] state updated: "
-                                f"{len(holdings_intraday_alerts)} stocks marked sent",
-                                flush=True,
-                            )
-                        except Exception as _me:
-                            print(f"[holdings intraday] mark_alerts_sent failed: {_me}", flush=True)
-            else:
-                print("[super combined] 無警報觸發", flush=True)
-        except Exception as _ce:
-            import traceback
-            print(f"[super combined] formatter/send 失敗 (non-fatal, Phase 2 仍會跑): {_ce}", flush=True)
-            traceback.print_exc()
-
-        # 4 (MED-D1): 持倉 intraday 已合進 super_combined, 不再獨立 send
-
-        try:
-            import watchlist_alerts
-            import index_alerts
-            # 診斷: 印出當前 active session + 各市場 in_session 狀態
-            try:
-                active = index_alerts.get_active_session()
-                in_session = {
-                    c: index_alerts._is_market_in_session(c)
-                    for c in ["TW", "JP", "KR", "US"]
-                }
-                print(f"  active_session: {active}", flush=True)
-                print(f"  in_session map: {in_session}", flush=True)
-            except Exception as _e:
-                print(f"  session diagnosis failed: {_e}", flush=True)
         except Exception as _e:
-            print(f"[monitor] outer block failed: {_e}", flush=True)
+            print(f"[strong sector] handle fail: {_e}", flush=True)
 
     print("=== Done ===")
     return 0

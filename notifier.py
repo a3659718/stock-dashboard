@@ -3178,3 +3178,223 @@ def fmt_chip_anomaly_alerts(alerts: list) -> str:
         lines.append("")
     lines.append("<i>※ Tier 2 — 大戶動向先行指標. 持倉者參考調整.</i>")
     return _truncate_tg_msg("\n".join(lines).rstrip())
+
+
+def fmt_breakout_consolidation_alerts(alerts: list) -> str:
+    """美股盤整突破推播 (Tier 1 — 立即響鈴).
+    alerts: breakout_consolidation_alert.check_breakout_consolidation() 回傳.
+    """
+    if not alerts:
+        return ""
+    lines = [f"🚀 <b>盤整突破 — 開盤跳出 ({len(alerts)} 支)</b>", ""]
+    for a in alerts:
+        sym = _esc(a.get("symbol", ""))
+        cur = float(a.get("current", 0) or 0)
+        tp = float(a.get("today_pct", 0) or 0)
+        vr = float(a.get("vol_ratio", 0) or 0)
+        bp = float(a.get("breakout_pct", 0) or 0)
+        h20 = float(a.get("high_20d", 0) or 0)
+        atr = float(a.get("atr_pct_20d", 0) or 0)
+        rg = float(a.get("range_pct_20d", 0) or 0)
+        theme = _esc(a.get("theme_tag", ""))
+        theme_part = f" 🏷 {theme}" if theme else ""
+        lines.append(
+            f"⚡ <code>{sym}</code> {cur:,.2f} <b>{tp:+.1f}%</b>{theme_part}"
+        )
+        lines.append(
+            f"  20d 盤整 (range {rg:.1f}% / ATR {atr:.1f}%) → 突破 20d 高 {h20:,.2f} (+{bp:.1f}%)"
+        )
+        lines.append(f"  量比 <b>{vr:.1f}x</b> · 💡 突破型態, 留意拉回 20d 高支撐")
+        lines.append("")
+    lines.append("<i>※ Tier 1 — 盤整突破最強訊號. 進場分批, 跌破 20d 高停損.</i>")
+    return _truncate_tg_msg("\n".join(lines).rstrip())
+
+
+def fmt_asia_leading_alerts(alerts: list) -> str:
+    """日韓 leading alert 訊息 (Tier 2)."""
+    if not alerts:
+        return ""
+    has_down = any(a.get("direction") == "down" for a in alerts)
+    header_emoji = "📉" if has_down else "📈"
+    lines = [f"{header_emoji} <b>亞股先行 — 台股 leading 訊號 ({len(alerts)})</b>", ""]
+    for a in alerts:
+        name = _esc(a.get("name", ""))
+        sym = _esc(a.get("symbol", ""))
+        cur = float(a.get("current", 0) or 0)
+        pct = float(a.get("pct_vs_open", 0) or 0)
+        dir_emoji = "⬇️" if a.get("direction") == "down" else "⬆️"
+        lines.append(
+            f"{dir_emoji} {name} <code>{sym}</code> {cur:,.2f} "
+            f"<b>{pct:+.2f}%</b> (vs 開盤)"
+        )
+        twii = a.get("twii_pct_vs_open")
+        if twii is not None:
+            lines.append(f"  🇹🇼 台股加權: {twii:+.2f}% (vs 開盤)")
+        narr = a.get("narrative", "")
+        if narr:
+            lines.append(f"  💡 {narr}")
+        lines.append("")
+    lines.append("<i>※ Tier 2 — 亞股先行指標, 台股有機會跟動.</i>")
+    return _truncate_tg_msg("\n".join(lines).rstrip())
+
+
+def fmt_analyst_insider_alerts(alerts: list, gemini_analysis: str = "") -> str:
+    """分析師升評 + 內部人買進 推播 (Tier 1)."""
+    if not alerts:
+        return ""
+    upgrades = [a for a in alerts if a.get("type") == "analyst_upgrade"]
+    insider_buys = [a for a in alerts if a.get("type") == "insider_buy"]
+    ceo_buys = [a for a in insider_buys if a.get("is_ceo_cfo")]
+    other_buys = [a for a in insider_buys if not a.get("is_ceo_cfo")]
+
+    lines = [f"🏛 <b>機構/內部人動向 ({len(alerts)} 則)</b>", ""]
+    if ceo_buys:
+        lines.append("━━━━━━━ 🚨 CEO/CFO 買進 ━━━━━━━")
+        for a in ceo_buys[:5]:
+            sym = _esc(a.get("symbol", ""))
+            who = _esc(a.get("position") or a.get("name", ""))
+            val = a.get("value", 0)
+            shares = a.get("shares", 0)
+            price = float(a.get("price", 0) or 0)
+            d = _esc(a.get("filing_date", ""))
+            lines.append(
+                f"💼 <code>{sym}</code> {who}: "
+                f"<b>${val:,}</b> ({shares:,} 股 @ ${price:.2f}) [{d}]"
+            )
+        lines.append("")
+    if other_buys:
+        lines.append("━━━━━━━ 💰 內部人大額買進 ━━━━━━━")
+        for a in other_buys[:5]:
+            sym = _esc(a.get("symbol", ""))
+            who = _esc(a.get("position") or a.get("name", ""))
+            val = a.get("value", 0)
+            lines.append(f"  ⚡ <code>{sym}</code> {who}: <b>${val:,}</b>")
+        lines.append("")
+    if upgrades:
+        lines.append("━━━━━━━ 📈 分析師升評 wave ━━━━━━━")
+        for a in upgrades[:5]:
+            sym = _esc(a.get("symbol", ""))
+            cur = a.get("buy_ratio_cur", 0)
+            prev = a.get("buy_ratio_prev", 0)
+            ch = a.get("buy_ratio_change_pp", 0)
+            lines.append(
+                f"  📊 <code>{sym}</code> BUY 占比: {prev}% → <b>{cur}%</b> "
+                f"(+{ch:.1f} pp)"
+            )
+        lines.append("")
+    if gemini_analysis:
+        lines.append("━━━━━━━ 🤖 Gemini 分析 ━━━━━━━")
+        lines.append(_esc(gemini_analysis))
+        lines.append("")
+    lines.append("<i>※ Tier 1 — 內部人 (CEO/CFO) 買進是 strongest 內幕訊號.</i>")
+    return _truncate_tg_msg("\n".join(lines).rstrip())
+
+
+def fmt_rate_cycle_advice(cycle_info: dict, advice: dict) -> str:
+    """利率週期 + 族群建議推播."""
+    if not advice:
+        return ""
+    emoji = advice.get("emoji", "⚪")
+    label = _esc(advice.get("label", ""))
+    regime = _esc(advice.get("regime", ""))
+    evidence = _esc(cycle_info.get("evidence", ""))
+    lines = [
+        f"{emoji} <b>Fed Cycle 提示: {label} ({regime})</b>",
+        f"<i>{evidence}</i>",
+        "",
+    ]
+    out = advice.get("outperform") or []
+    if out:
+        lines.append("<b>📈 美股看好 (受惠類)</b>")
+        for item in out[:5]:
+            if len(item) >= 3:
+                tic, name, reason = item[0], item[1], item[2]
+                lines.append(f"  ✅ <code>{_esc(tic)}</code> {_esc(name)} — {_esc(reason)}")
+            elif len(item) >= 2:
+                lines.append(f"  ✅ <code>{_esc(item[0])}</code> {_esc(item[1])}")
+        lines.append("")
+    av = advice.get("avoid") or []
+    if av:
+        # 簡化: avoid 用單行帶過, 不展開
+        av_names = " · ".join(_esc(item[0]) if len(item) >= 1 else "" for item in av[:3])
+        lines.append(f"📉 美股避開: {av_names}")
+        lines.append("")
+    tw_out = advice.get("tw_outperform") or []
+    if tw_out:
+        lines.append("<b>🇹🇼 台股看好</b>")
+        for item in tw_out[:3]:
+            if len(item) >= 2:
+                lines.append(f"  ✅ <code>{_esc(item[0])}</code> {_esc(item[1])}")
+        lines.append("")
+    tw_av = advice.get("tw_avoid") or []
+    if tw_av:
+        tw_av_names = " · ".join(_esc(item[0]) if len(item) >= 1 else "" for item in tw_av[:3])
+        lines.append(f"📉 台股避開: {tw_av_names}")
+        lines.append("")
+    # Gemini 解讀看好族群 — 由 caller 注入
+    gem = advice.get("gemini_analysis", "")
+    if gem:
+        lines.append("━━━━━━━ 🤖 Gemini 看好族群解讀 ━━━━━━━")
+        lines.append(_esc(gem))
+        lines.append("")
+    lines.append("<i>※ Fed cycle 經典 playbook. 偵測依據 SHY+TLT 30d 走勢, 僅供參考.</i>")
+    return _truncate_tg_msg("\n".join(lines).rstrip())
+
+
+def fmt_trump_policy_alerts(alerts: list, gemini_analysis: str = "") -> str:
+    """川普政策推播 (Tier 1)."""
+    if not alerts:
+        return ""
+    lines = [f"🇺🇸 <b>川普政策動向 ({len(alerts)} 則)</b>", ""]
+    for a in alerts[:5]:
+        sym = _esc(a.get("symbol", ""))
+        title = _esc(a.get("title", ""))
+        link = a.get("link", "")
+        kw = ", ".join(_esc(k) for k in (a.get("keywords") or [])[:3])
+        sym_tag = f"[{sym}] " if sym and sym != "GENERAL" else ""
+        if link:
+            lines.append(f"⚡ {sym_tag}<a href=\"{link}\">{title}</a>")
+        else:
+            lines.append(f"⚡ {sym_tag}{title}")
+        if kw:
+            lines.append(f"  關鍵字: <i>{kw}</i>")
+        lines.append("")
+    if gemini_analysis:
+        lines.append("━━━━━━━ 🤖 Gemini 影響分析 ━━━━━━━")
+        lines.append(_esc(gemini_analysis))
+        lines.append("")
+    lines.append("<i>※ Tier 1 政治影響. 川普推文常瞬間影響特定股, 留意盤前波動.</i>")
+    return _truncate_tg_msg("\n".join(lines).rstrip())
+
+
+def fmt_speculation_picks(picks: list) -> str:
+    """投機股 (Story Stock) 推播 (Tier 2)."""
+    if not picks:
+        return ""
+    lines = [f"🎲 <b>投機股精選 ({len(picks)} 支)</b>",
+             "<i>盤整 + 強勢 + 有前景 (放寬條件)</i>", ""]
+    # 按 theme 分組
+    by_theme: dict = {}
+    for p in picks:
+        t = p.get("theme", "其他")
+        by_theme.setdefault(t, []).append(p)
+    for theme, items in by_theme.items():
+        lines.append(f"<b>🏷 {_esc(theme)}</b>")
+        for p in items:
+            sym = _esc(p.get("symbol", ""))
+            sc = p.get("score", 0)
+            lab = _esc(p.get("label", ""))
+            cur = p.get("current", 0)
+            tp = p.get("today_pct", 0)
+            rs = p.get("rs_3mo_diff_vs_spy", 0)
+            vr = p.get("vol_ratio_recent", 0)
+            ma = p.get("ma_200d_dist_pct", 0)
+            lines.append(
+                f"  ⚡ <code>{sym}</code> {cur:.2f} <b>{tp:+.1f}%</b> · score {sc} {lab}"
+            )
+            lines.append(
+                f"     RS vs SPY {rs:+.1f}pp · 量比 {vr:.1f}x · 距 200MA {ma:+.0f}%"
+            )
+        lines.append("")
+    lines.append("<i>※ Tier 2 投機股. 高 beta + 高波動, 部位控制 ≤ 5% 為宜.</i>")
+    return _truncate_tg_msg("\n".join(lines).rstrip())
