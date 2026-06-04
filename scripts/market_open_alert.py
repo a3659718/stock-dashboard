@@ -447,6 +447,43 @@ def main() -> int:
             import traceback
             print(f"[breakout] failed (non-fatal): {_e}", flush=True)
 
+
+
+    # === 📊 台股盤後總結 (TPE 16:00) ===
+    if market == "tw_post_market":
+        try:
+            import tw_post_market_summary as _pms
+            pms_msg = _pms.build_post_market_msg()
+            if pms_msg:
+                ok_pms, info_pms = notifier.send_message(
+                    pms_msg, disable_preview=True, disable_notification=False
+                )
+                print(f"[tw_post_market] sent ok={ok_pms}", flush=True)
+        except Exception as _e:
+            import traceback
+            print(f"[tw_post_market] failed: {_e}", flush=True)
+            traceback.print_exc()
+        print("=== Post-market done ===")
+        return 0
+
+    # === 🌅 pre_market_morning 推播 (TPE 08:15 / 08:30) ===
+    if market in ("pre_market_815", "pre_market_830"):
+        try:
+            import pre_market_alert as _pm
+            slot = "08:15" if market == "pre_market_815" else "08:30"
+            pm_msg = _pm.build_pre_market_msg(slot)
+            if pm_msg:
+                ok_pm, info_pm = notifier.send_message(
+                    pm_msg, disable_preview=True, disable_notification=False
+                )
+                print(f"[pre_market] {slot} sent ok={ok_pm}", flush=True)
+        except Exception as _e:
+            import traceback
+            print(f"[pre_market] failed: {_e}", flush=True)
+            traceback.print_exc()
+        print("=== Pre-market done ===")
+        return 0
+
     if market in ("tw_open", "tw_mid"):
         label = "開盤後 30 分鐘 (09:30)" if market == "tw_open" else "中盤更新 (11:00)"
         print(f"Running TW {label}...")
