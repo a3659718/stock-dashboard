@@ -980,6 +980,15 @@ def main() -> int:
         except Exception as _e:
             print(f"[strong stock alert] check failed (non-fatal): {_e}", flush=True)
 
+        # === 新增: 常態 intraday 強勢個股推播 (不需大盤大漲, cooldown 90min, daily cap 3) ===
+        try:
+            import strong_stock_alert as _ssa2
+            ssa2_result = _ssa2.check_and_push_intraday_strong()
+            if ssa2_result:
+                print(f"[intraday strong] {ssa2_result}", flush=True)
+        except Exception as _e:
+            print(f"[intraday strong] check failed (non-fatal): {_e}", flush=True)
+
         # === 4: 持倉 intraday 風險警報 (今日 ≤ -3% / 從早高回吐 ≥ 5% / 跌破停損) ===
         holdings_intraday_alerts = []
         try:

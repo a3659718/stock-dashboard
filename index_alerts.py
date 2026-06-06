@@ -50,16 +50,16 @@ INDEX_CONFIG = {
     # M3 fix: 把各指數 reversal_pct 都顯式設定, 避免 default 1.0% 漏掉「漲幅萎縮」
     # P1 砍噪音: reversal 門檻全面提高 (專業推播標準, 0.5% 太敏感一天 3-5 次)
     "^N225":  {"name": "日經 225",   "threshold": 150.0, "country": "JP",
-               "reversal_pct": 1.2},  # P1: 0.8 → 1.2
+               "reversal_pct": 0.8},  # 放寬: 1.2→0.8 (更敏感)
     "^KS11":  {"name": "韓國 KOSPI", "threshold": 50.0,  "country": "KR",
-               "reversal_pct": 0.8},  # P1: 0.5 → 0.8
+               "reversal_pct": 0.6},  # 放寬: 0.8→0.6
     "^TWII":  {"name": "台灣加權",   "threshold": 200.0, "country": "TW",
-               "disable_atr_boost": True, "reversal_pct": 1.0},  # P1: 0.5 → 1.0
+               "disable_atr_boost": True, "reversal_pct": 0.7},  # 放寬: 1.0→0.7 TWII
     # 美股
     "^SOX":   {"name": "費城半導體", "threshold": 100.0, "country": "US",
-               "reversal_pct": 0.8},  # 台股 leading indicator, 留敏感 (0.6→1.0→0.8)
+               "reversal_pct": 0.6},  # 放寬: 0.8→0.6 SOX (台股 leading 更敏感)
     "^IXIC":  {"name": "那斯達克",   "threshold": 200.0, "country": "US",
-               "reversal_pct": 1.2},  # P1: 0.8 → 1.2
+               "reversal_pct": 0.8},  # 放寬: 1.2→0.8 IXIC
 }
 
 
@@ -1033,19 +1033,19 @@ WEAK_OPEN_NO_REBOUND_PCT = 0.5  # 高/低點離開盤 < 0.5% = 沒回頭機會
 # Per-symbol 客製 (波動較大的指數用較高 threshold, 避免雜訊)
 # 弱開門檻 (跌)
 WEAK_OPEN_PCT_OVERRIDE = {
-    "^SOX": 1.5,
-    "^IXIC": 1.2,
-    "^N225": 1.0,
-    "^KS11": 1.0,
-    "^TWII": 1.0,
+    "^SOX": 1.0,    # 放寬: 1.5→1.0
+    "^IXIC": 0.8,
+    "^N225": 0.8,
+    "^KS11": 0.7,
+    "^TWII": 0.7,   # 放寬: 1.0→0.7
 }
 # 強開門檻 (漲) — 略低於弱開 (用戶想抓開盤大漲)
 STRONG_OPEN_PCT_OVERRIDE = {
-    "^SOX": 1.2,
-    "^IXIC": 1.0,
-    "^N225": 0.8,
-    "^KS11": 0.8,
-    "^TWII": 0.8,   # 台股 0.8% 開盤即強就足夠
+    "^SOX": 0.8,    # 放寬: 1.2→0.8
+    "^IXIC": 0.7,
+    "^N225": 0.6,
+    "^KS11": 0.6,
+    "^TWII": 0.5,   # 放寬: 0.8→0.5 (TWII 強開更敏感)
 }
 
 
