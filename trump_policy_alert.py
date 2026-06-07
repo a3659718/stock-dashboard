@@ -168,32 +168,121 @@ def check_trump_policy_news() -> List[Dict]:
     return all_news[:max_this_batch]
 
 
+def _rule_based_action(alerts: List[Dict]) -> Dict:
+    """規則式操作建議 — Gemini 不可用時 fallback. 根據新聞關鍵字推導.
+
+    回傳跟 Gemini 一樣的 dict 格式, 確保 notifier 永遠有操作建議區塊顯示.
+    """
+    if not alerts:
+        return {}
+    # 整理全部關鍵字 (跨所有新聞合計)
+    all_kw = set()
+    all_titles = " ".join((a.get("title") or "") for a in alerts).lower()
+    for a in alerts:
+        for k in (a.get("keywords") or []):
+            all_kw.add(k.lower())
+
+    # 分類: 利多 / 利空 / 中性
+    headline = "政策新聞 — 留意盤前波動"
+    us_imp = "視政策細節而定 (詳查主新聞連結)"
+    tw_imp = "視政策細節而定"
+    gold = "中性"; oil = "中性"; usd = "中性"; bonds = "中性"
+    long_play = "等盤前確定方向再進場, 不預判搶反彈/搶空"
+    short_play = "等盤前確定方向再進場, 不預判"
+    pos_advice = "持倉先觀察 30 分鐘, 不急著動作"
+    risk_alert = "政策落地時間 + 對等報復可能"
+
+    # === Rule 1: 關稅 / 貿易戰 → 黃金↑, 美元↑, 半導體↓ ===
+    if any(k in all_titles for k in ["tariff", "trade war", "china tariff", "關稅"]):
+        headline = "🔴 關稅 / 貿易戰升溫, 短期偏空"
+        us_imp = "半導體 (SOX/NVDA/AMD/ASML) + 出口股 (AAPL) 短壓; 國防 (LMT/RTX) + 國內基建 (CAT) 相對抗"
+        tw_imp = "半導體 (2330/2454/3711) + 蘋概 (2317) 開低風險; 重電/AI 伺服器 (2308/6669) 抗跌"
+        gold = "🟢 利多 — 避險買盤入場"
+        oil = "中性偏空 — 需求預期下調"
+        usd = "🟢 利多 — 風險規避強化"
+        bonds = "🟢 利多 — 殖利率下行"
+        long_play = "黃金 GLD ETF / 國防 (LMT/RTX) 等開盤拉回到 5MA 接, 停損 -3% 目標 +5-8%"
+        short_play = "半導體 (NVDA/AMD/2330/3711) 反彈到 5MA 空, 跌破今日低追空, 停損 +3% 目標 -5%"
+        pos_advice = "半導體部位減碼 50% 或全停損; 黃金 / 國防 / 公用事業 抱緊; 出口導向小型股先出場"
+        risk_alert = "若 48hr 內法院禁制令暫停或川普口頭軟化, 則翻盤; 注意中國對等公告"
+    # === Rule 2: 半導體出口管制 → SOX 短空 + AI 基建受惠 ===
+    elif any(k in all_titles for k in ["chip export", "semiconductor restrict", "ai chip", "tech ban"]):
+        headline = "🔴 半導體出口管制, AI 鏈短壓"
+        us_imp = "半導體 (NVDA/AMD/ASML/MU) 短壓; AI 軟體 (PLTR/CRM) 受惠; 國防 (LMT) 中性偏多"
+        tw_imp = "台積電 (2330) / 聯電 (2303) 開低風險; ABF 載板 (3037) + 重電 (2308) 抗跌"
+        gold = "🟢 利多 — 地緣風險"
+        oil = "中性"
+        usd = "🟢 利多"
+        bonds = "中性偏多"
+        long_play = "AI 軟體 (PLTR/CRM) + 重電 (2308/6669) 突破今日高追多, 停損 -3% 目標 +5%"
+        short_play = "半導體 (NVDA/2330) 開低不過盤中高就追空, 停損 +3% 目標 -5%"
+        pos_advice = "半導體大型股 (NVDA/2330/2454) 減碼 50%, 設停損; AI 應用 + 國防 抱緊"
+        risk_alert = "若政策細節溫和或排除盟友, 則反彈; 留意 ASML 評論"
+    # === Rule 3: 減稅 / 鬆綁 → 美股↑, 金融/能源/小型股 (排除 Fed/Powell 場景, 由 Rule 5 處理) ===
+    elif any(k in all_titles for k in ["tax cut", "deregulat", "減稅"]) and not any(k in all_titles for k in ["fed", "powell", "federal reserve"]):
+        headline = "🟢 減稅 / 鬆綁政策, 短期偏多"
+        us_imp = "金融 (XLF/JPM) + 能源 (XLE/XOM) + 小型股 (IWM) 受惠; 公用事業 (XLU) 跑輸"
+        tw_imp = "金融 (2891/2882) + 觀光/百貨 (2912/2731) 受惠; 防禦型股 (公用/食品) 跑輸"
+        gold = "🔴 利空 — 風險偏好提升"
+        oil = "🟢 利多 — 經濟預期改善"
+        usd = "🟢 利多 — 經濟強"
+        bonds = "🔴 利空 — 殖利率上行"
+        long_play = "金融 (XLF/JPM) + 能源 (XLE) + 小型股 (IWM) 等開盤後 +1% 突破追多, 停損 -3% 目標 +5%"
+        short_play = "公用事業 (XLU/2412) + REITs 反彈到 5MA 短空, 停損 +3% 目標 -5%"
+        pos_advice = "金融 / 能源 / 小型股 加碼; 公用事業 / 防禦型 減碼"
+        risk_alert = "若法案被擱置或縮水, 則翻盤; 留意參議院票數"
+    # === Rule 4: 制裁 / 中俄 / 地緣 → 原油↑, 國防↑, 中概↓ ===
+    elif any(k in all_titles for k in ["sanction", "russia", "iran", "war", "military"]):
+        headline = "🟡 地緣政治升溫, 國防/原油受惠"
+        us_imp = "國防 (LMT/RTX/NOC) + 能源 (XOM/CVX) 受惠; 中概股 (BABA/BIDU) 短壓"
+        tw_imp = "鋼鐵 (2002) / 國防相關 (2049) 受惠; 中國市場曝險高的電子股 (2317/2382) 短壓"
+        gold = "🟢 利多 — 避險"
+        oil = "🟢 利多 — 供給疑慮"
+        usd = "🟢 利多"
+        bonds = "🟢 利多 — 避險"
+        long_play = "國防 (LMT/RTX) + 能源 (XOM) + 黃金 (GLD) 突破前高追多, 停損 -3% 目標 +5-8%"
+        short_play = "中概 (BABA/BIDU) + 中國曝險電子 反彈短空, 停損 +3% 目標 -5%"
+        pos_advice = "國防 / 能源 / 黃金 加碼; 中國市場曝險高股票 (2317/2382) 減碼 30%"
+        risk_alert = "若停火協議或制裁解除, 國防/原油 反向; 留意聯合國公告"
+    # === Rule 5: Fed / Powell 壓力 ===
+    elif any(k in all_titles for k in ["fed pressure", "powell", "rate cut", "federal reserve"]):
+        headline = "🟡 Fed 政策壓力, 利率敏感股波動"
+        us_imp = "金融 (XLF) + 房地產 (XLRE) + 小型股 (IWM) 利率敏感; 大型科技 (QQQ) 受惠 (若鴿派)"
+        tw_imp = "金融 (2891/2882) + 房產建商 (2545) 利率敏感; 高息股 (00878) 受惠"
+        gold = "🟢 利多 (若鴿派)"
+        oil = "中性"
+        usd = "🔴 利空 (若鴿派)"
+        bonds = "🟢 利多 (殖利率下行)"
+        long_play = "高息 ETF (00878/2412) 拉回到 5MA 接; 大型科技 (QQQ) 突破追多, 停損 -3%"
+        short_play = "金融 (XLF/2891) 若殖利率快速下行則短空, 停損 +3% 目標 -5%"
+        pos_advice = "高息 / 公用事業 抱緊; 銀行股留意殖利率變動"
+        risk_alert = "Powell 公開回應將定調; CPI 公布前先減倉"
+
+    return {
+        "headline": headline,
+        "us_impact": us_imp,
+        "tw_impact": tw_imp,
+        "global_impact": {"gold": gold, "oil": oil, "usd": usd, "us_bonds": bonds},
+        "long_play": long_play,
+        "short_play": short_play,
+        "position_advice": pos_advice,
+        "risk_alert": risk_alert,
+        "_source": "rule_based",
+    }
+
+
 def analyze_with_gemini(alerts: List[Dict]) -> Dict:
     """用 Gemini 結構化分析: 對美股 / 台股 / 全球商品 影響 + 操作建議.
-
-    回傳 dict (給 notifier 顯示):
-      {
-        "headline": "一句話總結 (政策核心 + 利多/利空)",
-        "us_impact": "對美股 (科技/金融/能源/原物料) 影響, 含具體族群",
-        "tw_impact": "對台股影響 + 主要族群",
-        "global_impact": {
-            "gold": "黃金影響 1 句",
-            "oil": "原油影響 1 句",
-            "usd": "美元影響 1 句",
-            "us_bonds": "美債影響 1 句",
-            "btc": "比特幣影響 1 句",
-        },
-        "trade_action": "操作建議 1-2 句 (含族群方向)",
-      }
-    若 Gemini 不可用, 回 {} (notifier 自會 fallback 為純標題).
+    若 Gemini 不可用或失敗, fallback 到 _rule_based_action.
     """
     if not alerts:
         return {}
     try:
         import ai_analyzer
         if not ai_analyzer.gemini_available():
-            return {}
-        # 整理新聞文字 (取前 3 則, 每則限 200 字)
+            print("[trump_policy] gemini unavailable, using rule-based fallback", flush=True)
+            return _rule_based_action(alerts)
+        # 整理新聞文字
         news_lines = []
         for a in alerts[:3]:
             sym = a.get("symbol", "GENERAL")
@@ -201,7 +290,6 @@ def analyze_with_gemini(alerts: List[Dict]) -> Dict:
             kws = ", ".join((a.get("keywords") or [])[:3])
             news_lines.append(f"[{sym}] {title} (關鍵字: {kws})")
         news_block = "\n".join(news_lines)
-
         prompt = (
             "你是專業總體策略分析師. 以下是川普相關新聞:\n\n"
             f"{news_block}\n\n"
@@ -216,21 +304,22 @@ def analyze_with_gemini(alerts: List[Dict]) -> Dict:
             '    "usd": "對美元影響 (1 句)",\n'
             '    "us_bonds": "對美債殖利率影響 (1 句)"\n'
             "  },\n"
-            '  "long_play": "多單怎麼操作: 哪個族群/個股, 進場時機 (例: 開低殺到 -2% 接 / 突破前高追), 停損 -3%, 目標 +5-8% (1 句)",\n'
-            '  "short_play": "空單怎麼操作: 哪個族群/個股, 進場時機 (例: 反彈到 5MA 空 / 跌破前低追空), 停損 +3%, 目標 -5% (1 句)",\n'
-            '  "position_advice": "對現有持倉的處置: 哪些減碼/停損 (明確點名族群), 哪些可以續抱不動 (1 句)",\n'
-            '  "risk_alert": "本次最大風險點 + 何時失效 (1 句, 例如: 若 X 政策被司法擋下則翻盤)"\n'
+            '  "long_play": "多單怎麼操作: 哪個族群/個股, 進場時機, 停損 -3%, 目標 +5-8% (1 句)",\n'
+            '  "short_play": "空單怎麼操作: 哪個族群/個股, 進場時機, 停損 +3%, 目標 -5% (1 句)",\n'
+            '  "position_advice": "對現有持倉的處置 (1 句)",\n'
+            '  "risk_alert": "本次最大風險點 + 何時失效 (1 句)"\n'
             "}\n\n"
             "判斷準則:\n"
-            "- 關稅 / 貿易戰 → 黃金 ↑, 美元 ↑, 風險資產 ↓, 半導體/出口股壓力\n"
-            "- 減稅 / 鬆綁 → 美股 ↑, 美元 ↑, 金融/能源/小型股受惠\n"
+            "- 關稅 / 貿易戰 → 黃金 ↑, 美元 ↑, 半導體/出口股壓力\n"
+            "- 減稅 / 鬆綁 → 美股 ↑, 金融/能源/小型股受惠\n"
             "- 制裁中俄 → 原油 ↑, 國防股 ↑, 中概股 ↓\n"
-            "- 半導體出口管制 → SOX 短空, ASML/AMD 衝擊, 台積電要看細節\n"
+            "- 半導體出口管制 → SOX 短空, ASML/AMD 衝擊\n"
         )
         from ai_analyzer import _get_model
         model = _get_model()
         if model is None:
-            return {}
+            print("[trump_policy] gemini model None, using rule-based fallback", flush=True)
+            return _rule_based_action(alerts)
         resp = model.generate_content(prompt)
         raw = (resp.text or "").strip() if resp else ""
         if raw.startswith("```"):
@@ -239,10 +328,14 @@ def analyze_with_gemini(alerts: List[Dict]) -> Dict:
                 raw = raw[4:].strip()
         import json as _json
         data = _json.loads(raw)
-        return data if isinstance(data, dict) else {}
+        if not isinstance(data, dict) or not data:
+            print("[trump_policy] gemini parse failed, using rule-based fallback", flush=True)
+            return _rule_based_action(alerts)
+        data["_source"] = "gemini"
+        return data
     except Exception as e:
-        print(f"[trump_policy] gemini fail: {e}", flush=True)
-        return {}
+        print(f"[trump_policy] gemini fail: {e}, using rule-based fallback", flush=True)
+        return _rule_based_action(alerts)
 
 
 def mark_alerts_sent(alerts: List[Dict]) -> None:
@@ -257,9 +350,8 @@ def mark_alerts_sent(alerts: List[Dict]) -> None:
             h = _hash_title(a.get("title", ""))
             if h not in sent:
                 sent.append(h)
-        tpa["sent_hashes"] = sent[-200:]  # 保留近 200 筆
+        tpa["sent_hashes"] = sent[-200:]
         tpa["last_sent_ts"] = dt.datetime.utcnow().isoformat()
-        # daily counter (date-keyed)
         today = dt.date.today().strftime("%Y-%m-%d")
         daily = tpa.setdefault("daily_count", {})
         if not isinstance(daily, dict):
