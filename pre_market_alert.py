@@ -211,6 +211,31 @@ def build_pre_market_msg(slot: str = "08:15") -> str:
             )
         lines.append("")
 
+    # 新增: 外資籌碼面 (8:30 推, 期交所昨日數據已 release)
+    if slot == "08:30":
+        try:
+            import institutional_positioning as _ip
+            pos_snap = _ip.fetch_institutional_snapshot()
+            pos_msg = _ip.format_positioning_for_tg(pos_snap)
+            if pos_msg:
+                lines.append(pos_msg)
+                lines.append("")
+        except Exception as _pe:
+            print(f"[pre_market] positioning fail: {_pe}", flush=True)
+
+    # 新增: Gemini 結構化走勢預測 (08:30 才推, 08:15 太早資料不全)
+    if slot == "08:30":
+        try:
+            import daily_outlook_advisor as _doa
+            outlook = _doa.predict_tw_outlook()
+            ot_msg = _doa.format_outlook_for_tg(outlook)
+            if ot_msg:
+                lines.append("━━━━━━━ 🎯 走勢預測 ━━━━━━━")
+                lines.append(ot_msg)
+                lines.append("")
+        except Exception as _oe:
+            print(f"[pre_market] outlook fail: {_oe}", flush=True)
+
     # Gemini 建議
     gem = _gemini_summary(us_snaps, asia_snaps, slot)
     if gem:

@@ -111,7 +111,7 @@ def classify_urgency(alert: Dict) -> str:
 DEFAULT_US_UNIVERSE_NEWS = [
     "NVDA", "AAPL", "MSFT", "GOOGL", "AMZN", "META", "TSLA",
     "AVGO", "AMD", "PLTR", "DELL", "ORCL", "CRM", "LLY", "REGN",
-    "MSTR", "COIN", "RKLB", "ASTS", "BABA", "TSM",
+    "RKLB", "ASTS", "BABA", "TSM",
 ]
 DEFAULT_TW_UNIVERSE_NEWS = [
     "2330", "2317", "2454", "2382", "2308",

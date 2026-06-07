@@ -374,7 +374,7 @@ with st.sidebar:
                 )
             if not sys_status["yf"][0]:
                 st.warning(
-                    "⚠️ yfinance 失效 → 大盤點數 / 美股 / 加密幣相關按鈕會 silent fail. "
+                    "⚠️ yfinance 失效 → 大盤點數 / 美股 相關按鈕會 silent fail. "
                     "通常是 IP 被 rate-limit, 等 1-2 hr 自動恢復."
                 )
         else:
@@ -1211,9 +1211,6 @@ with tab_wl:
   - 台灣加權 每 ±100 點
   - 費城半導體 SOX 每 ±100 點 (~1.7%, 台股 leading)
   - 那斯達克 IXIC 每 ±200 點 (~1%)
-- 加密貨幣 (BTC / ETH):
-  - 固定推播: 台北 12:00 / 23:00 各一次, 比對「跟上一個 slot 推播相比」
-  - 盤中加碼: 同 slot 內 (約 30 分後) 若漲跌再 ±2.5%+ 才會發第二次, 標題會標「盤中變動警報」
 - 連續同方向觸發 → 加上 [連續警示]，提醒台股可能要減碼
 
 cron 每 30 分執行一次 (24x7)。
@@ -1225,7 +1222,7 @@ cron 每 30 分執行一次 (24x7)。
                 import index_alerts
                 wl_alerts = watchlist_alerts.check_watchlist_alerts()
                 idx_alerts = index_alerts.check_index_alerts()
-                cry_alerts = index_alerts.check_crypto_alerts()
+                cry_alerts = []  # 已停用加密
                 st.session_state["last_manual_alerts"] = {
                     "wl": wl_alerts, "idx": idx_alerts, "cry": cry_alerts,
                 }
@@ -1247,10 +1244,6 @@ cron 每 30 分執行一次 (24x7)。
                 st.markdown("大盤觸發:")
                 for a in idx:
                     st.text(f"  {a['name']}: {a['current']} ({a['diff']:+.0f} 點) 觸發 {int(a['threshold_bucket'])}")
-            if cry:
-                st.markdown("加密貨幣觸發:")
-                for a in cry:
-                    st.text(f"  {a['name']}: ${a['current']} ({a['change_pct']:+.2f}%) 觸發 {a.get('threshold_pct', 2.5)}%")
             if st.button("Send 警報 to TG", use_container_width=True, key="send_alerts_tg",
                           disabled=not notifier.is_configured()):
                 msg = notifier.fmt_monitor_alerts(wl, idx, cry)

@@ -107,7 +107,7 @@ US_SECTOR_STOCKS: Dict[str, List[str]] = {
 US_GROWTH_IPO_POOL = [
     "RDDT", "CRWV", "ARM", "ASTS", "RBLX", "CART", "KLC",
     "IONQ", "RGTI", "QBTS", "SOUN", "BBAI",  # AI/Quantum
-    "PLTR", "SMCI", "MSTR", "COIN",            # high-momentum
+    "PLTR", "SMCI",            # high-momentum
     "OKLO", "VST", "CEG",                       # nuclear/power
     "CRWD", "PANW", "DDOG", "MDB",              # cyber/cloud
     "HOOD", "SOFI", "AFRM",                     # fintech

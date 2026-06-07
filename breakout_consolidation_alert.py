@@ -28,7 +28,7 @@ import watchlist_store
 DEFAULT_US_UNIVERSE_BREAKOUT = [
     "NVDA", "AAPL", "MSFT", "GOOGL", "AMZN", "META", "TSLA",
     "AVGO", "AMD", "PLTR", "DELL", "ORCL", "CRM", "LLY", "REGN",
-    "MSTR", "COIN", "RKLB", "ASTS", "BABA", "TSM", "ARM", "SMCI",
+    "RKLB", "ASTS", "BABA", "TSM", "ARM", "SMCI",
     "SOFI", "MARA", "RIOT", "CELH", "DUOL", "NET", "DDOG",
 ]
 

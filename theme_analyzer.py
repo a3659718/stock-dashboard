@@ -65,10 +65,6 @@ THEME_KEYWORDS = {
         "nuclear", "smr", "small modular reactor", "fusion", "uranium",
         "reactor", "power grid", "lng", "natural gas",
     ],
-    "Crypto / Web3": [
-        "bitcoin", "ethereum", "crypto", "blockchain", "stablecoin",
-        "etf approval", "halving", "defi", "altcoin", "btc", "eth",
-    ],
     "Robotics / Autonomous": [
         "robot", "humanoid", "autonomous", "optimus", "self-driving",
         "robotaxi", "fsd",
@@ -95,7 +91,7 @@ THEME_KEYWORDS = {
 
 # High-heat themes (catalysts that historically drive bigger moves)
 HIGH_HEAT_THEMES = {"AI / LLM", "Semiconductors / HBM", "Nuclear / Energy",
-                    "Quantum", "Robotics / Autonomous", "Crypto / Web3"}
+                    "Quantum", "Robotics / Autonomous"}
 
 
 # Symbol -> sector ETF mapping (aligned with us_upside_screener DEFAULT_US_UNIVERSE)
@@ -119,7 +115,7 @@ SYMBOL_TO_SECTOR_ETF = {
     ]},
     **{s: "XLF" for s in [
         "JPM", "BAC", "V", "MA", "GS", "MS", "C", "BLK", "AXP", "WFC", "BRK-B",
-        "COIN", "HOOD", "SOFI", "AFRM", "PYPL", "SQ", "MSTR",
+        "HOOD", "SOFI", "AFRM", "PYPL", "SQ",
         "MARA", "RIOT", "HUT",
     ]},
     **{s: "XLE" for s in [

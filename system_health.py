@@ -72,7 +72,6 @@ def _extract_module_status(monitor_state: Dict) -> List[Dict]:
         ("strong_sector_alert", "🚀 強勢族群", "last_batch_at", "sectors_alerted"),
         ("holdings_intraday_alert", "⚠️ 持倉風險", "last_alert_at", "alerted"),
         ("news_event_alert", "📰 事件新聞", "last_batch_at", "alerted"),
-        ("crypto_alerts", "💰 加密幣", "last_alert_at", None),
         ("morning_brief", "🌅 晨報", "last_sent_at", None),
         ("market_close_brief", "🌆 收盤摘要", "last_sent_at", None),
         ("tw_mid", "🇹🇼 TW 中盤", "last_sent_at", None),

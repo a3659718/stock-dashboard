@@ -633,13 +633,6 @@ def _fmt_external_signals_block() -> list:
             parts.append(f"10Y {_esc(macro['10年美債殖利率'].get('value'))}% ({_safe_pct(macro['10年美債殖利率'].get('pct_5d'))})")
         if "VIX" in macro:
             parts.append(f"VIX {_esc(macro['VIX'].get('value'))} ({_safe_pct(macro['VIX'].get('pct_5d'), '+.1f')})")
-        if "BTC" in macro:
-            btc_val = macro['BTC'].get('value')
-            try:
-                btc_str = f"{float(btc_val):,.0f}" if btc_val is not None else "—"
-            except (TypeError, ValueError):
-                btc_str = "—"
-            parts.append(f"BTC ${btc_str} ({_safe_pct(macro['BTC'].get('pct_5d'), '+.1f')})")
         if parts:
             out.append(f"<i>{' · '.join(parts)}</i>")
     # Trump 最近一條
@@ -910,47 +903,8 @@ def fmt_monitor_alerts(watchlist_alerts: list, index_alerts: list, crypto_alerts
                 lines.append(f"  ({' · '.join(extra_parts)})")
         lines.append("")
 
-    if crypto_alerts:
-        slot_zh = _esc(crypto_alerts[0].get("slot_label_zh", ""))
-        alert_type = crypto_alerts[0].get("alert_type", "scheduled")
-        if alert_type == "intra_slot":
-            lines.append(f"<b>幣 ({slot_zh} 盤中變動)</b>")
-        else:
-            lines.append(f"<b>幣 ({slot_zh})</b>" if slot_zh else "<b>幣</b>")
-
-        for a in crypto_alerts:
-            name = _esc(a.get("name", ""))
-            try:
-                cur = float(a.get("current", 0) or 0)
-            except (TypeError, ValueError):
-                cur = 0.0
-            prev = a.get("prev_price")
-            try:
-                prev_f = float(prev) if prev is not None else None
-            except (TypeError, ValueError):
-                prev_f = None
-            try:
-                pct = float(a.get("change_pct", 0) or 0)
-            except (TypeError, ValueError):
-                pct = 0.0
-            is_first = a.get("is_first", False)
-            a_type = a.get("alert_type", "scheduled")
-
-            sign = "+" if pct > 0 else ""
-            if a_type == "intra_slot" and prev_f is not None:
-                lines.append(
-                    f"{name} {cur:,.0f} 自{slot_zh}首推 ${prev_f:,.0f} {sign}{pct:.2f}%"
-                )
-            elif is_first or prev_f is None:
-                lines.append(f"{name} {cur:,.0f} (首次紀錄)")
-            else:
-                lines.append(
-                    f"{name} {cur:,.0f} 自上次 ${prev_f:,.0f} {sign}{pct:.2f}%"
-                )
-        lines.append("")
-
-    # G7 fix: byte-length truncation (取代舊的 char-based len() 檢查)
-    return _truncate_tg_msg("\n".join(lines))
+    # crypto_alerts 已停用 (用戶要求取消加密貨幣)
+    # if crypto_alerts: skip
 
 
 def fmt_weekend_recap(data: dict) -> str:
@@ -982,20 +936,6 @@ def fmt_weekend_recap(data: dict) -> str:
                 continue
             arrow = "📈" if pct >= 0 else "📉"
             extras.append(f"{arrow} {name}: {last:,.2f} ({pct:+.2f}%)")
-
-    crypto_perf = data.get("crypto_perf") or {}
-    if crypto_perf:
-        extras.append("")
-        extras.append("------ 加密 7d ------")
-        for sym, info in crypto_perf.items():
-            try:
-                name = _esc(info.get("name", sym))
-                last = float(info.get("last", 0) or 0)
-                pct = float(info.get("pct_5d", 0) or 0)
-            except (TypeError, ValueError):
-                continue
-            arrow = "📈" if pct >= 0 else "📉"
-            extras.append(f"{arrow} {name}: ${last:,.0f} ({pct:+.2f}%)")
 
     etf_snapshot = data.get("etf_snapshot") or []
     if etf_snapshot:
@@ -2336,8 +2276,9 @@ def fmt_holdings_intraday_alerts(alerts: list) -> str:
         el_emoji = a.get("entry_emoji", "")
         el_label = a.get("entry_label", "")
         el_tag = f"  {el_emoji} {_esc(el_label)}" if el_label and el_label != "—" else ""
+        market_tag = f"[{market}] " if market else ""   # Bug fix: 空 market 不顯示 []
         lines.append(
-            f"{sev_emoji} [{market}] <code>{sid}</code> {name} {cur:,.2f}  "
+            f"{sev_emoji} {market_tag}<code>{sid}</code> {name} {cur:,.2f}  "
             f"<b>{tp:+.2f}%</b>{el_tag}"
         )
         # 觸發理由 (來自 check 模組)
@@ -3133,8 +3074,9 @@ def fmt_volume_breakout_alerts(alerts: list) -> str:
         vr = float(a.get("vol_ratio", 0) or 0)
         bp = float(a.get("breakout_pct", 0) or 0)
         h60 = float(a.get("high_60d", 0) or 0)
+        market_tag = f"[{market}] " if market else ""   # Bug fix: 空 market 不顯示 []
         lines.append(
-            f"⚡ [{market}] <code>{sym}</code> {cur:,.2f} <b>{tp:+.2f}%</b>"
+            f"⚡ {market_tag}<code>{sym}</code> {cur:,.2f} <b>{tp:+.2f}%</b>"
         )
         lines.append(
             f"  量比 <b>{vr:.2f}x</b> · 突破 60d 高 ({h60:,.2f}) +{bp:.2f}%"
@@ -3342,30 +3284,109 @@ def fmt_rate_cycle_advice(cycle_info: dict, advice: dict) -> str:
     return _truncate_tg_msg("\n".join(lines).rstrip())
 
 
-def fmt_trump_policy_alerts(alerts: list, gemini_analysis: str = "") -> str:
-    """川普政策推播 (Tier 1)."""
+def fmt_trump_policy_alerts(alerts: list, gemini_analysis="") -> str:
+    """川普政策推播 (Tier 1) — 重點凸顯版.
+
+    gemini_analysis 可以是 str (舊版) 或 dict (新版結構化, 含 headline/us_impact/tw_impact/global_impact/trade_action)
+    新版優先用 dict 顯示影響重點, 不放一堆新聞連結 (用戶要求: 連結別太多, 重點要清楚).
+    """
     if not alerts:
         return ""
-    lines = [f"🇺🇸 <b>川普政策動向 ({len(alerts)} 則)</b>", ""]
-    for a in alerts[:5]:
-        sym = _esc(a.get("symbol", ""))
-        title = _esc(a.get("title", ""))
-        link = a.get("link", "")
-        kw = ", ".join(_esc(k) for k in (a.get("keywords") or [])[:3])
-        sym_tag = f"[{sym}] " if sym and sym != "GENERAL" else ""
-        if link:
-            lines.append(f"⚡ {sym_tag}<a href=\"{link}\">{title}</a>")
-        else:
-            lines.append(f"⚡ {sym_tag}{title}")
-        if kw:
-            lines.append(f"  關鍵字: <i>{kw}</i>")
+
+    lines = ["🇺🇸 <b>川普政策動向</b>"]
+
+    if isinstance(gemini_analysis, dict) and gemini_analysis:
+        g = gemini_analysis
+        headline = _esc(g.get("headline", ""))
+        if headline:
+            lines.append(f"<i>{headline}</i>")
         lines.append("")
-    if gemini_analysis:
-        lines.append("━━━━━━━ 🤖 Gemini 影響分析 ━━━━━━━")
-        lines.append(_esc(gemini_analysis))
+
+        # 主新聞 1 條 (帶連結)
+        if alerts:
+            a0 = alerts[0]
+            sym = _esc(a0.get("symbol", ""))
+            title = _esc((a0.get("title") or "")[:80])
+            link = a0.get("link", "")
+            sym_tag = f"[{sym}] " if sym and sym != "GENERAL" else ""
+            if link:
+                lines.append(f"📰 {sym_tag}<a href=\"{link}\">{title}</a>")
+            else:
+                lines.append(f"📰 {sym_tag}{title}")
+            # 其他新聞只列題目, 不放連結
+            for a2 in alerts[1:3]:
+                t2 = _esc((a2.get("title") or "")[:80])
+                lines.append(f"  · {t2}")
+            lines.append("")
+
+        # 影響分析
+        us_imp = _esc(g.get("us_impact", ""))
+        tw_imp = _esc(g.get("tw_impact", ""))
+        if us_imp:
+            lines.append(f"🇺🇸 <b>美股影響</b>: {us_imp}")
+        if tw_imp:
+            lines.append(f"🇹🇼 <b>台股影響</b>: {tw_imp}")
+        if us_imp or tw_imp:
+            lines.append("")
+
+        # 全球商品
+        gi = g.get("global_impact") or {}
+        if isinstance(gi, dict):
+            gi_lines = []
+            for key, label, emoji in [
+                ("gold", "黃金", "🟡"),
+                ("oil", "原油", "🛢️"),
+                ("usd", "美元", "💵"),
+                ("us_bonds", "美債", "📊"),
+            ]:
+                v = gi.get(key, "")
+                if v:
+                    gi_lines.append(f"  {emoji} {label}: {_esc(v)}")
+            if gi_lines:
+                lines.append("🌐 <b>全球商品影響</b>")
+                lines.extend(gi_lines)
+                lines.append("")
+
+        # 操作建議 — 三段式
+        long_play = _esc(g.get("long_play", ""))
+        short_play = _esc(g.get("short_play", ""))
+        pos_advice = _esc(g.get("position_advice", ""))
+        risk_alert = _esc(g.get("risk_alert", ""))
+        ta_fallback = _esc(g.get("trade_action", ""))  # 舊版相容
+        if long_play or short_play or pos_advice or risk_alert:
+            lines.append("💡 <b>操作建議</b>")
+            if long_play:
+                lines.append(f"  🟢 多單: {long_play}")
+            if short_play:
+                lines.append(f"  🔴 空單: {short_play}")
+            if pos_advice:
+                lines.append(f"  📦 持倉: {pos_advice}")
+            if risk_alert:
+                lines.append(f"  ⚠️ 風險: {risk_alert}")
+            lines.append("")
+        elif ta_fallback:
+            lines.append(f"💡 <b>操作建議</b>: {ta_fallback}")
+            lines.append("")
+    else:
+        # 舊版 fallback: Gemini 不可用 → 只顯示新聞 + 純文字分析
+        for i, a in enumerate(alerts[:3]):
+            sym = _esc(a.get("symbol", ""))
+            title = _esc((a.get("title") or "")[:100])
+            link = a.get("link", "")
+            sym_tag = f"[{sym}] " if sym and sym != "GENERAL" else ""
+            if link and i == 0:
+                lines.append(f"⚡ {sym_tag}<a href=\"{link}\">{title}</a>")
+            else:
+                lines.append(f"⚡ {sym_tag}{title}")
         lines.append("")
-    lines.append("<i>※ Tier 1 政治影響. 川普推文常瞬間影響特定股, 留意盤前波動.</i>")
+        if isinstance(gemini_analysis, str) and gemini_analysis:
+            lines.append("🤖 <b>Gemini 影響分析</b>")
+            lines.append(_esc(gemini_analysis))
+            lines.append("")
+
+    lines.append("<i>※ Tier 1 政治影響, 留意盤前波動.</i>")
     return _truncate_tg_msg("\n".join(lines).rstrip())
+
 
 
 def fmt_speculation_picks(picks: list) -> str:
@@ -3374,34 +3395,21 @@ def fmt_speculation_picks(picks: list) -> str:
         return ""
     lines = [f"🎲 <b>投機股精選 ({len(picks)} 支)</b>",
              "<i>盤整 + 強勢 + 有前景 (放寬條件)</i>", ""]
-    # 按 theme 分組
     by_theme: dict = {}
     for p in picks:
         t = p.get("theme", "其他")
         by_theme.setdefault(t, []).append(p)
     for theme, items in by_theme.items():
-        lines.append(f"<b>🏷 {_esc(theme)}</b>")
-        for p in items:
-            sym = _esc(p.get("symbol", ""))
-            sc = p.get("score", 0)
-            lab = _esc(p.get("label", ""))
-            cur = p.get("current", 0)
-            tp = p.get("today_pct", 0)
-            rs = p.get("rs_3mo_diff_vs_spy", 0)
-            vr = p.get("vol_ratio_recent", 0)
-            ma = p.get("ma_200d_dist_pct", 0)
-            lines.append(
-                f"  ⚡ <code>{sym}</code> {cur:.2f} <b>{tp:+.2f}%</b> · score {sc} {lab}"
-            )
-            lines.append(
-                f"     RS vs SPY {rs:+.2f}pp · 量比 {vr:.2f}x · 距 200MA {ma:+.0f}%"
-            )
+        lines.append(f"<b>🔥 {_esc(theme)}</b>")
+        for p in items[:5]:
+            sym = _esc(p.get("symbol", p.get("stock_id", "")))
+            nm = _esc(p.get("name", ""))
+            tp = float(p.get("today_pct", 0) or 0)
+            lines.append(f"  • <code>{sym}</code> {nm} {tp:+.2f}%")
         lines.append("")
-    lines.append("<i>※ Tier 2 投機股. 高 beta + 高波動, 部位控制 ≤ 5% 為宜.</i>")
+    lines.append("<i>※ 高風險, 部位控制 ≤5%</i>")
     return _truncate_tg_msg("\n".join(lines).rstrip())
 
 
-# alias: 舊名字 (app.py 在用)
-fmt_fear_greed_alert = fmt_us_fg_alert
-
+# 相容別名 (app.py 舊版本可能呼叫)
 fmt_fear_greed_alert = fmt_us_fg_alert

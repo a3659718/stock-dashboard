@@ -281,3 +281,236 @@ def check_and_push_if_surge() -> Optional[Dict]:
     except Exception as e:
         print(f"[strong_stock_alert] notifier 失敗: {e}", flush=True)
         return {"triggered": True, "n_picks": len(picks), "sent": False}
+
+
+# ===========================================================================
+# 新增: 常態 intraday 強勢股推播 (不依賴大盤大漲)
+# ===========================================================================
+# 用戶要求: 即使大盤平淡, 也要推當下強勢個股 (避免錯過題材股噴出)
+# Cooldown 90min, 一天最多 3 次 (避免噪音)
+
+INTRADAY_STRONG_COOLDOWN_MIN = 90
+INTRADAY_STRONG_DAILY_CAP = 3
+INTRADAY_STRONG_MIN_PCT = 3.0   # 個股漲幅門檻 ≥3%
+INTRADAY_STRONG_MIN_VR = 1.5    # 量比 ≥1.5
+INTRADAY_STRONG_TOP_N = 5       # 用戶要求 top 5
+
+
+def scan_intraday_strong_stocks(top_n: int = INTRADAY_STRONG_TOP_N,
+                                  min_pct: float = INTRADAY_STRONG_MIN_PCT,
+                                  min_vr: float = INTRADAY_STRONG_MIN_VR,
+                                  max_workers: int = 8) -> List[Dict]:
+    """常態掃強勢股 (不需大盤大漲也跑).
+
+    門檻: today_pct ≥3% + vol_ratio ≥1.5
+    回 top_n 檔, 按 score (today_pct*2 + vr*1) 排序
+    """
+    universe = [
+        # 大型權值
+        "2330", "2317", "2454", "2412", "2308", "2382", "2891", "2882", "2881",
+        # AI / 半導體
+        "3231", "2376", "6669", "3017", "3661", "2379", "3711", "8046",
+        # 重電 / 核電
+        "1513", "1519", "1503", "1504", "1514",
+        # 航運 / 汽車
+        "2603", "2609", "2618", "2207", "1536",
+        # 太空 / 衛星 / 機器人
+        "3491", "6285", "3178", "4585",
+        # ABF / 載板
+        "3037",
+        # 其他熱門
+        "8069", "6531", "1216", "2912",
+        # 量子 / SMR / 光通訊
+        "2308", "3450", "2331", "6271",
+        # 生技 / 醫材
+        "4138", "1707",
+    ]
+    try:
+        import watchlist_store
+        wl = watchlist_store.load_watchlist() or []
+        universe = list(dict.fromkeys(universe + wl))
+    except Exception:
+        pass
+    try:
+        import holdings_store
+        hd = [str(x.get("stock_id", "")).strip() for x in (holdings_store.load_holdings() or [])]
+        universe = list(dict.fromkeys(universe + [h for h in hd if h]))
+    except Exception:
+        pass
+
+    print(f"[intraday_strong] 掃描 {len(universe)} 檔...", flush=True)
+    results = []
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        futures = {ex.submit(_stock_strength_metrics, sid): sid for sid in universe}
+        for fut in as_completed(futures):
+            m = fut.result()
+            if m is None:
+                continue
+            tp = m.get("today_pct", 0)
+            vr = m.get("vol_ratio", 0)
+            if tp < min_pct or vr < min_vr:
+                continue
+            m["score"] = round(tp * 2 + vr * 1, 2)
+            results.append(m)
+    results.sort(key=lambda x: x["score"], reverse=True)
+    return results[:top_n]
+
+
+def _enrich_picks_with_entry_label(picks: List[Dict]) -> List[Dict]:
+    """加 entry_label / entry_emoji / 進場參考 / 停損 (給 user 直接決策)."""
+    for p in picks:
+        sid = str(p.get("stock_id", ""))
+        cur = p.get("current") or 0
+        # 1. quick_evaluate 提供 BUY/HOLD/AVOID
+        try:
+            import entry_evaluator as _ee
+            qe = _ee.quick_evaluate(sid, market="TW")
+            p["entry_label"] = qe.get("entry_label", "—")
+            p["entry_emoji"] = qe.get("entry_emoji", "")
+            p["entry_action"] = qe.get("entry_action", "—")
+        except Exception:
+            p["entry_label"] = "—"
+            p["entry_emoji"] = ""
+            p["entry_action"] = "—"
+        # 2. 建議停損 (-3% trailing 或最近低點, 取較高者)
+        try:
+            cur_f = float(cur)
+            stop_trail = round(cur_f * 0.97, 2)  # -3% trailing
+            p["suggest_stop"] = stop_trail
+            # 進場參考: 當前 -1% (給一點回拉空間, 不追最高)
+            p["suggest_entry"] = round(cur_f * 0.99, 2)
+            # 目標: +5% (~ 1.7R)
+            p["suggest_target"] = round(cur_f * 1.05, 2)
+        except (TypeError, ValueError):
+            p["suggest_stop"] = None
+            p["suggest_entry"] = None
+            p["suggest_target"] = None
+    return picks
+
+
+def _fmt_intraday_strong_msg(picks: List[Dict]) -> str:
+    """格式化常態強勢股 TG 訊息 (含進出場建議)."""
+    import html as _html
+    def _esc(s):
+        return _html.escape(str(s) if s is not None else "", quote=False)
+    if not picks:
+        return ""
+    # Enrich with entry_label + 進出場價
+    picks = _enrich_picks_with_entry_label(picks)
+
+    now_tpe = (dt.datetime.utcnow() + dt.timedelta(hours=8)).strftime("%H:%M")
+    lines = [
+        f"💪 <b>盤中強勢股 Top {len(picks)}</b> · {now_tpe} TPE",
+        "<i>(個股 ≥3% + 量比 ≥1.5x)</i>",
+        "",
+    ]
+    # 補股名
+    name_map = {}
+    try:
+        info = ds.get_taiwan_stock_info()
+        if info is not None and not info.empty:
+            name_map = info.set_index("stock_id")["stock_name"].to_dict()
+    except Exception:
+        pass
+
+    # 先按 entry_label 分組: BUY/HOLD 優先, AVOID 警示
+    label_order = {"BUY": 0, "STRONG_BUY": 0, "HOLD": 1, "WAIT": 2, "AVOID": 3, "SELL": 4, "—": 5}
+    picks_sorted = sorted(picks, key=lambda p: (label_order.get(p.get("entry_label", "—"), 5), -p.get("score", 0)))
+
+    for i, p in enumerate(picks_sorted, 1):
+        sid = str(p.get("stock_id", ""))
+        name = _esc(name_map.get(sid, ""))
+        cur = p.get("current", "—")
+        tp = p.get("today_pct", 0)
+        vr = p.get("vol_ratio", 0)
+        el = p.get("entry_label", "—")
+        em = p.get("entry_emoji", "")
+        ea = p.get("entry_action", "—")
+        # 主行
+        el_tag = f" {em}{_esc(el)}" if el and el != "—" else ""
+        lines.append(
+            f"{i}. <code>{_esc(sid)}</code> {name} · "
+            f"{cur:.2f} <b>+{tp:.2f}%</b> · 量比 {vr:.2f}x{el_tag}"
+        )
+        # 進出場建議 (只給 BUY/HOLD 標的, AVOID 改顯警告)
+        if el in ("BUY", "STRONG_BUY", "HOLD"):
+            se = p.get("suggest_entry")
+            ss = p.get("suggest_stop")
+            st = p.get("suggest_target")
+            if se and ss and st:
+                lines.append(
+                    f"   📍 進場參考 {se:.2f} · 停損 {ss:.2f} · 目標 {st:.2f}"
+                )
+        elif el in ("AVOID", "SELL"):
+            lines.append("   ⚠️ 已漲多 + 體質不佳, 避免追高")
+        elif ea and ea != "—":
+            lines.append(f"   💡 {_esc(ea)}")
+
+    lines.append("")
+    lines.append("<i>※ 短線動能掃描. 建議停損 -3%, 目標 +5%.</i>")
+    return "\n".join(lines)
+
+
+def check_and_push_intraday_strong() -> Optional[Dict]:
+    """常態 intraday 強勢股推播 (不需大盤大漲).
+
+    Cooldown 90min + 一天最多 3 次.
+    回 {triggered, n_picks, sent, reason}
+    """
+    # 必須在台股 session 內 (09:00-13:30 TPE = UTC 01:00-05:30)
+    now_utc = dt.datetime.utcnow()
+    if now_utc.hour < 1 or now_utc.hour > 5:
+        return None
+    # 假日 skip
+    try:
+        import holiday_check
+        if holiday_check.is_market_closed_today("TW"):
+            return None
+    except Exception:
+        pass
+
+    # Cooldown + daily cap 檢查
+    state = None
+    isa = None
+    today_data = None
+    try:
+        import watchlist_store
+        state = watchlist_store.load_monitor_state()
+        isa = state.setdefault("intraday_strong_alert", {})
+        today_str = dt.date.today().strftime("%Y-%m-%d")
+        today_data = isa.setdefault(today_str, {"count": 0, "last_ts": None})
+        # daily cap
+        if today_data.get("count", 0) >= INTRADAY_STRONG_DAILY_CAP:
+            return {"triggered": False, "reason": "daily_cap_reached"}
+        # cooldown
+        last_ts = today_data.get("last_ts")
+        if last_ts:
+            try:
+                last_dt = dt.datetime.fromisoformat(last_ts)
+                if (now_utc - last_dt).total_seconds() < INTRADAY_STRONG_COOLDOWN_MIN * 60:
+                    return {"triggered": False, "reason": "cooldown"}
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    picks = scan_intraday_strong_stocks()
+    if not picks:
+        return {"triggered": False, "reason": "no_picks"}
+
+    msg = _fmt_intraday_strong_msg(picks)
+    try:
+        import notifier
+        ok, info = notifier.send_message(msg, disable_preview=True)
+        if ok and today_data is not None:
+            today_data["count"] = today_data.get("count", 0) + 1
+            today_data["last_ts"] = now_utc.isoformat()
+            try:
+                import watchlist_store
+                watchlist_store.save_monitor_state(state)
+            except Exception:
+                pass
+        return {"triggered": True, "n_picks": len(picks), "sent": ok}
+    except Exception as e:
+        print(f"[intraday_strong] notifier 失敗: {e}", flush=True)
+        return {"triggered": True, "n_picks": len(picks), "sent": False}

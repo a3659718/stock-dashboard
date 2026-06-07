@@ -30,7 +30,7 @@ DEFAULT_UNIVERSE = [
     "BRK-B", "JPM", "BAC", "V", "MA", "WMT", "COST", "PG", "JNJ", "UNH", "HD",
     "XOM", "CVX", "GE", "BA", "CAT", "DE", "LMT",
     # Consumer / momentum
-    "NFLX", "DIS", "MCD", "SBUX", "NKE", "ABNB", "UBER", "SHOP", "COIN", "MSTR",
+    "NFLX", "DIS", "MCD", "SBUX", "NKE", "ABNB", "UBER", "SHOP", 
     # EV / energy
     "RIVN", "LCID", "ENPH", "FSLR", "OKLO", "CEG", "VST",
     # ETF benchmark
@@ -106,8 +106,7 @@ THEME_KEYWORDS = {
     "Cybersecurity": ["cyber", "security", "ransomware"],
     "EV/Battery": ["EV", "electric vehicle", "battery", "Tesla"],
     "Energy": ["oil", "OPEC", "natural gas", "LNG"],
-    "Crypto": ["bitcoin", "crypto", "ETF approval", "ethereum"],
-    "Fed/Rates": ["Fed", "rate cut", "FOMC", "inflation", "CPI"],
+        "Fed/Rates": ["Fed", "rate cut", "FOMC", "inflation", "CPI"],
     "Earnings": ["earnings", "guidance", "beats", "misses"],
 }
 
@@ -146,7 +145,7 @@ _US_ETF_BLACKLIST = {
 _US_CORRELATED_GROUPS = [
     {"NVDA", "TSM", "ASML", "AVGO"},          # AI 半導體 (高度同向)
     {"MSFT", "GOOGL", "META", "AAPL"},        # mega-cap tech (相關係數 > 0.8)
-    {"COIN", "MSTR", "MARA", "RIOT"},          # 加密貨幣概念
+    { "MARA", "RIOT"},          # 加密貨幣概念
     {"OKLO", "SMR", "CEG", "VST", "NEE"},     # 核電 / 公用事業
     {"PLTR", "AI", "BBAI", "SOUN"},           # AI 軟體
     {"IONQ", "RGTI", "QBTS"},                  # 量子運算

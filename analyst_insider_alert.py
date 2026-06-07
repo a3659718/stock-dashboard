@@ -31,7 +31,7 @@ CEO_INSIDER_BUY_THRESHOLD_USD = 50_000   # CEO/CFO 較低門檻
 DEFAULT_UNIVERSE = [
     "NVDA", "AAPL", "MSFT", "GOOGL", "AMZN", "META", "TSLA",
     "AVGO", "AMD", "PLTR", "DELL", "ORCL", "CRM", "LLY",
-    "MSTR", "COIN", "RKLB", "BABA", "TSM", "ARM",
+    "RKLB", "BABA", "TSM", "ARM",
 ]
 
 
