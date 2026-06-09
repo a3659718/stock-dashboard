@@ -78,6 +78,30 @@ import market_open_picks
 import notifier
 
 
+# === Monitor check timeout helper — 防單一 check 卡死 ===
+def _run_with_timeout(fn, name: str, timeout_sec: int = 30, default=None):
+    """跑一個函式, 給 timeout. 若超時或拋異常, log + return default.
+
+    用 ThreadPoolExecutor 不用 signal (signal 在 thread / Windows 不能用).
+    """
+    import concurrent.futures as _cf
+    try:
+        with _cf.ThreadPoolExecutor(max_workers=1) as ex:
+            fut = ex.submit(fn)
+            try:
+                return fut.result(timeout=timeout_sec)
+            except _cf.TimeoutError:
+                print(f"[monitor timeout] {name} > {timeout_sec}s, skip", flush=True)
+                # 不能 cancel running thread, 讓它自然結束 (背景跑完無影響)
+                return default
+            except Exception as e:
+                print(f"[monitor error] {name}: {type(e).__name__}: {str(e)[:100]}", flush=True)
+                return default
+    except Exception as e:
+        print(f"[monitor wrapper fail] {name}: {e}", flush=True)
+        return default
+
+
 def _summarize_tw_for_ai(data: dict) -> str:
     if data.get("error"):
         return ""
@@ -805,36 +829,19 @@ def main() -> int:
         print(f"Got {len(data.get('news', []))} news items")
         msg = notifier.fmt_holiday_news(data)
     elif market == "crypto_picks":
-        # B: 用戶關閉加密貨幣推播 — 早期 return, 即使有 manual dispatch 也不推
-        print("[B] crypto_picks 已用戶關閉, 跳過")
+        print("[crypto_picks] 已停用 (用戶要求取消加密貨幣)")
         return 0
-        # 下面是舊邏輯, 保留供日後參考 (unreachable)
-        print("Running crypto picks (daily noon)...")
-        try:
-            import crypto_picker
-            data = crypto_picker.get_crypto_picks(top_n=5)
-            n_picks = len(data.get("picks", []) or [])
-            print(f"Got {n_picks} crypto picks (universe scanned: {data.get('universe_size', 0)})")
-            if data.get("market_context"):
-                print(f"Market context: {data['market_context']}")
-            msg = crypto_picker.fmt_crypto_picks_tg(data)
-        except Exception as e:
-            print(f"crypto_picks fatal failure: {e}", flush=True)
-            err_msg = (
-                f"<b>加密貨幣推播失敗</b>\n\n"
-                f"原因: <code>{type(e).__name__}: {str(e)[:200]}</code>\n\n"
-                f"建議檢查:\n"
-                f"  • Gemini API key 是否有效\n"
-                f"  • yfinance 是否被 rate-limit"
-            )
-            try:
-                notifier.send_message(err_msg)
-            except Exception:
-                pass
-            return 1
+
     elif market == "heartbeat":
         # 系統健康日報: 探外部 API + 印 ETF 資料新鮮度
+        # Bug fix #3: 順便跑 signal_tracker.evaluate_pending() — 累積真實勝率
         print("Running heartbeat health check...")
+        try:
+            import signal_tracker as _st_eval
+            n_validated = _st_eval.evaluate_pending()
+            print(f"[signal_tracker] auto-evaluate validated {n_validated} signals", flush=True)
+        except Exception as _se:
+            print(f"[signal_tracker] auto-evaluate failed (non-fatal): {_se}", flush=True)
         try:
             import heartbeat
             msg = heartbeat.build_heartbeat_message()
@@ -864,10 +871,10 @@ def main() -> int:
             in_any_session = any(
                 _ia_pre._is_market_in_session(c) for c in ["TW", "JP", "KR", "US"]
             )
-            is_crypto_hour = cur_hour in getattr(_ia_pre, "CRYPTO_SCHEDULE_UTC_HOURS", {})
-            if not in_any_session and not is_crypto_hour:
+            # Bug fix: 加密貨幣已停用, 不再保留 crypto_hour fallback
+            if not in_any_session:
                 print(
-                    f"Monitor mode: 無 market session 且非 crypto 時段 "
+                    f"Monitor mode: 無 market session "
                     f"(UTC hour={cur_hour}). Early-exit 省 ~30s API. "
                     f"in_session: TW={_ia_pre._is_market_in_session('TW')}, "
                     f"JP={_ia_pre._is_market_in_session('JP')}, "
@@ -980,14 +987,21 @@ def main() -> int:
         except Exception as _e:
             print(f"[strong stock alert] check failed (non-fatal): {_e}", flush=True)
 
-        # === 新增: 常態 intraday 強勢個股推播 (不需大盤大漲, cooldown 90min, daily cap 3) ===
-        try:
+        # === 新增: 常態 intraday 強勢個股推播 (帶 timeout 防卡死) ===
+        def _strong_check():
             import strong_stock_alert as _ssa2
-            ssa2_result = _ssa2.check_and_push_intraday_strong()
-            if ssa2_result:
-                print(f"[intraday strong] {ssa2_result}", flush=True)
-        except Exception as _e:
-            print(f"[intraday strong] check failed (non-fatal): {_e}", flush=True)
+            return _ssa2.check_and_push_intraday_strong()
+        ssa2_result = _run_with_timeout(_strong_check, "intraday_strong", timeout_sec=60)
+        if ssa2_result:
+            print(f"[intraday strong] {ssa2_result}", flush=True)
+
+        # === 新增: 常態 intraday 弱勢個股推播 (短空候選, 多空雙向; 帶 timeout) ===
+        def _weak_check():
+            import short_candidates as _sc
+            return _sc.check_and_push_intraday_weak()
+        sc_result = _run_with_timeout(_weak_check, "intraday_weak", timeout_sec=60)
+        if sc_result:
+            print(f"[intraday weak] {sc_result}", flush=True)
 
         # === 4: 持倉 intraday 風險警報 (今日 ≤ -3% / 從早高回吐 ≥ 5% / 跌破停損) ===
         holdings_intraday_alerts = []
@@ -1138,7 +1152,7 @@ def main() -> int:
                     print(f"[super combined] TG #{i} result: ok={ok_c} info={info_c}", flush=True)
                     if not ok_c:
                         all_ok = False
-                # 只有「全部 send 成功」才 mark state (HIGH 防 silent fail)
+                # 只有「全部 send 成功」才 mark state
                 if all_ok:
                     if strong_sector_alerts:
                         try:

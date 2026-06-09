@@ -196,17 +196,61 @@ def _enrich_pick(row: Dict) -> Dict:
         "news_count": len(row.get("近期新聞") or []),
     }
 
-    # 上漲機率 / 持有期 (用 entry_label 簡單映射)
-    label = eval_res.get("entry_label", "")
-    if label == "BUY":
-        pick["win_prob"] = "60%"
-        pick["hold_period"] = "5-15 日"
-    elif label == "WAIT":
-        pick["win_prob"] = "50%"
-        pick["hold_period"] = "—"
+    # 上漲機率 / 持有期 — 用 entry_score 細分 (0-100), 並加入動能修正
+    # Bug fix: 原本只用 entry_label 3 檔映射, 大多數股票卡 WAIT (45-69) 全變 50%, 無鑑別度
+    score = eval_res.get("entry_score") or 0
+    try:
+        score_n = float(score)
+    except (TypeError, ValueError):
+        score_n = 0.0
+
+    # 動能加分: 近期上漲速度 (從 row "今日%" 或 5d_pct)
+    momentum_bonus = 0
+    try:
+        today_pct = float(row.get("今日%") or 0)
+        if today_pct >= 3: momentum_bonus += 3
+        elif today_pct >= 1: momentum_bonus += 1
+        elif today_pct <= -2: momentum_bonus -= 3
+    except (TypeError, ValueError):
+        pass
+
+    # 量比加分
+    try:
+        vr = float(row.get("量比") or row.get("vol_ratio") or 0)
+        if vr >= 2.0: momentum_bonus += 3
+        elif vr >= 1.5: momentum_bonus += 1
+    except (TypeError, ValueError):
+        pass
+
+    # RS 加分 (vs S&P 500)
+    try:
+        rs = float(row.get("RS") or 0)
+        if rs >= 1.10: momentum_bonus += 2
+        elif rs >= 1.0: momentum_bonus += 1
+    except (TypeError, ValueError):
+        pass
+
+    adj_score = max(0, min(100, score_n + momentum_bonus))
+
+    # 細分 6 檔 (取代原 3 檔):
+    if adj_score >= 85:
+        pick["win_prob"] = "75%"; pick["hold_period"] = "5-15 日"
+    elif adj_score >= 75:
+        pick["win_prob"] = "68%"; pick["hold_period"] = "5-15 日"
+    elif adj_score >= 65:
+        pick["win_prob"] = "60%"; pick["hold_period"] = "5-10 日"
+    elif adj_score >= 55:
+        pick["win_prob"] = "55%"; pick["hold_period"] = "5-10 日"
+    elif adj_score >= 45:
+        pick["win_prob"] = "50%"; pick["hold_period"] = "—"
+    elif adj_score >= 35:
+        pick["win_prob"] = "45%"; pick["hold_period"] = "—"
     else:
-        pick["win_prob"] = "40%"
-        pick["hold_period"] = "—"
+        pick["win_prob"] = "40%"; pick["hold_period"] = "—"
+
+    # debug: 把 score 也記下 (方便 audit)
+    pick["_entry_score"] = round(score_n, 1)
+    pick["_adj_score"] = round(adj_score, 1)
 
     # 加 reasons (從 us_screener catalyst + 入場行為)
     if row.get("催化劑"):
@@ -235,45 +279,49 @@ def _enrich_pick(row: Dict) -> Dict:
     return pick
 
 
+
+
 def compute_us_actionable_picks(top_n: int = 10, min_score: int = 65,
                                   us_pool: Optional[Dict] = None) -> List[Dict]:
     """美股可進場精選 (對應 actionable_picks).
 
     流程:
-      1. 從 us_screener.run_us_recommendation 拿候選池 (HIGH-F fix:
-         caller 已抓過可傳 us_pool 避免重複, 省 60-90s)
-      2. 每檔跑 _enrich_pick 加 entry_label/3-tier targets/earnings_date/sector ETF
-      3. 篩 entry_score >= min_score (HIGH-E fix: 預設 65 涵蓋純 BUY + 高分 WAIT;
-         若不足 5 檔 fallback 降到 55, 避免回空清單)
-      4. 按 entry_score 降冪取 top_n
+      1. 從 us_screener.run_us_recommendation 拿候選池 (us_pool 可傳避免重複)
+      2. 每檔跑 _enrich_pick 加 entry_label / win_prob / 3 層目標
+      3. 按 entry_score 排序取 top_n
     """
-    try:
-        if us_pool is None:
-            import us_screener
-            us_pool = us_screener.run_us_recommendation(top_n=max(top_n * 2, 20))
-        top_picks = us_pool.get("top_picks")
-        if top_picks is None or top_picks.empty:
+    import us_screener as _us
+    if us_pool is None:
+        try:
+            us_pool = _us.run_us_recommendation()
+        except Exception as e:
+            print(f"[us_actionable] fetch us_pool fail: {e}", flush=True)
             return []
-        rows = top_picks.to_dict("records")
-    except Exception as e:
-        print(f"[us_actionable] us_screener 失敗: {e}", flush=True)
+    sector_picks = (us_pool or {}).get("sector_picks") or []
+    if not sector_picks:
         return []
 
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-    picks: List[Dict] = []
-    # HIGH-H fix: max_workers 從 4 → 2, 避免跟 us_screener 內部 thread 疊套撞 Yahoo rate limit
-    with ThreadPoolExecutor(max_workers=2) as ex:
-        futs = {ex.submit(_enrich_pick, r): r for r in rows}
-        for fut in as_completed(futs):
-            p = fut.result()
-            if p:
-                picks.append(p)
+    all_rows = []
+    for sp in sector_picks:
+        stocks = sp.get("stocks")
+        if stocks is None:
+            continue
+        if hasattr(stocks, "to_dict"):
+            rows = stocks.to_dict("records")
+        else:
+            rows = list(stocks)
+        for r in rows:
+            all_rows.append(r)
 
-    # 篩 entry_score (純 BUY 為主)
-    qualified = [p for p in picks if (p.get("entry_score") or 0) >= min_score]
-    # E fix: 若不足 5 檔, fallback 降到 55 (涵蓋 WAIT 高分段)
-    if len(qualified) < 5 and min_score > 55:
-        qualified = [p for p in picks if (p.get("entry_score") or 0) >= 55]
-        print(f"[us_actionable] min_score={min_score} 不足 5 檔, fallback 55", flush=True)
-    qualified.sort(key=lambda x: x.get("entry_score", 0) or 0, reverse=True)
-    return qualified[:top_n]
+    enriched = []
+    for r in all_rows:
+        try:
+            p = _enrich_pick(r)
+            if p:
+                enriched.append(p)
+        except Exception as _e:
+            print(f"[us_actionable] enrich fail {r.get('symbol')}: {_e}", flush=True)
+
+    # 依 _adj_score (含動能) 排序
+    enriched.sort(key=lambda x: -float(x.get("_adj_score") or 0))
+    return enriched[:top_n]

@@ -571,13 +571,102 @@ watchlist = parse_watchlist(watchlist_raw)
 # ---------------------------------------------------------------------------
 # Tabs
 # ---------------------------------------------------------------------------
-# 外層 11 個 tab (個股+入場合一個 outer, 回測+追蹤合一個 outer, 新增系統健康)
-(tab_wl, tab_actionable, tab_hold, tab_tw, tab_pulse, tab_growth,
+# 外層 12 個 tab — 新增「今日總覽」放最前面 (Tab 0)
+(tab_overview, tab_wl, tab_actionable, tab_hold, tab_tw, tab_pulse, tab_growth,
  _tab_stock_outer, tab_us, tab_mood, _tab_bt_outer, tab_health) = st.tabs(
-    ["📋 自選股", "🎯 今日可行動", "💼 持倉分析", "🇹🇼 台股篩選", "🚀 強勢族群",
+    ["🏠 今日總覽", "📋 自選股", "🎯 今日可行動", "💼 持倉分析", "🇹🇼 台股篩選", "🚀 強勢族群",
      "🌱 成長動能", "🔍 個股 (分析+入場)", "🇺🇸 美股 Top 10", "🧭 市場情緒",
      "📊 策略驗證 (回測+追蹤)", "🩺 系統健康"]
 )
+
+# ===== 🏠 今日總覽 (新 Tab 0) =====
+with tab_overview:
+    st.subheader("🏠 今日總覽 — 一頁看完該關注/避開")
+    # 大局 4 個 metric
+    col1, col2, col3, col4 = st.columns(4)
+    try:
+        import data_sources as _ds_ov
+        sp = _ds_ov.fetch_yf_history("^GSPC", period="2d", interval="1d")
+        sox = _ds_ov.fetch_yf_history("^SOX", period="2d", interval="1d")
+        twii = _ds_ov.fetch_yf_history("^TWII", period="2d", interval="1d")
+        vix = _ds_ov.fetch_yf_history("^VIX", period="2d", interval="1d")
+        for c, df, label in [(col1, sp, "S&P 500"), (col2, sox, "費半 SOX"),
+                              (col3, twii, "台灣加權"), (col4, vix, "VIX")]:
+            if df is not None and not df.empty and len(df) >= 2:
+                cur = float(df["Close"].iloc[-1])
+                prev = float(df["Close"].iloc[-2])
+                pct = (cur / prev - 1) * 100
+                c.metric(label, f"{cur:,.2f}", f"{pct:+.2f}%")
+            else:
+                c.metric(label, "—", "—")
+    except Exception:
+        st.info("大局數據抓取中...")
+
+    st.divider()
+
+    # 今日該關注 — Bug fix: 改用 quick_evaluate 取代 ensemble_voter
+    # 原本 5 支 × 6 策略 = 30 個 yfinance call, 30-60s 太慢
+    # 改 5 支 × 1 quick_evaluate = 5 個 call, 5-10s
+    # 若用戶想要完整 ensemble 評分, 點進個股 tab 看
+    cols_ov = st.columns(2)
+    with cols_ov[0]:
+        st.markdown("### 🟢 今日該關注 (快速評估)")
+        try:
+            import entry_evaluator as _ee_ov
+            import watchlist_store as _ws_ov
+            wl = (_ws_ov.load_watchlist() or [])[:5]
+            if not wl:
+                st.info("自選股空, 請先到「📋 自選股」加幾支")
+            else:
+                with st.spinner(f"快速評估 {len(wl)} 支..."):
+                    shown_any = False
+                    for sid in wl:
+                        try:
+                            qe = _ee_ov.quick_evaluate(sid, market="auto")
+                            label = qe.get("entry_label", "—")
+                            emoji = qe.get("entry_emoji", "")
+                            score = qe.get("entry_score") or 0
+                            action = qe.get("entry_action", "")
+                            if label in ("BUY", "STRONG_BUY"):
+                                st.markdown(f"**{emoji} {sid}** — score {score:.0f}/100"
+                                             + (f" · {action}" if action and action != "—" else ""))
+                                shown_any = True
+                            elif label == "HOLD" or label == "WAIT":
+                                st.markdown(f"<small>🟡 {sid} — score {score:.0f}/100 (觀望)</small>",
+                                             unsafe_allow_html=True)
+                                shown_any = True
+                        except Exception as _ve:
+                            st.markdown(f"<small>{sid}: 評估失敗</small>",
+                                         unsafe_allow_html=True)
+                    if not shown_any:
+                        st.info("自選股目前無 BUY/HOLD 訊號")
+                    st.caption("💡 想看 6 策略完整評分? 到「🔍 個股」tab 跑深度分析")
+        except Exception as _oe:
+            st.error(f"quick_evaluate 載入失敗: {_oe}")
+
+    with cols_ov[1]:
+        st.markdown("### 🔴 該避開 / 持倉警報")
+        # 持倉風險 (從 holdings_intraday_alert)
+        try:
+            import holdings_intraday_alert as _hi_ov
+            risks = _hi_ov.check_holdings_intraday_risk() or []
+            if risks:
+                for r in risks[:5]:
+                    sid = r.get("stock_id", "")
+                    tp = r.get("today_pct", 0)
+                    st.markdown(f"⚠️ **{sid}** 今日 {tp:+.2f}% — {r.get('triggers', [''])[0]}")
+            else:
+                st.success("🟢 持倉無重大風險")
+        except Exception:
+            st.info("持倉檢查跳過 (未設持倉?)")
+
+        st.markdown("---")
+        st.markdown("**📌 點以下 tab 看細節**")
+        st.markdown("- 🎯 今日可行動: 多策略精選 Top 10")
+        st.markdown("- 🚀 強勢族群: 哪些族群有資金流入")
+        st.markdown("- 💼 持倉分析: 整體部位健康度")
+
+    st.caption("※ 本頁每次打開即時計算, 跑 5 支自選股約需 15-30 秒")
 
 # Sub-tabs: 個股 outer 內含 2 個 (入場評估 / 深度分析)
 with _tab_stock_outer:
@@ -2216,12 +2305,15 @@ with tab_stock:
     # 方案 A: 不再用獨立 AI 按鈕, 改 checkbox include_ai
     ai_btn = False
 
-    # 一鍵全跑 — 4 步驟用 st.status 顯示進度
+    # 一鍵全跑 — 4 步驟用 st.status + st.progress 雙顯示
     if analyze_btn and sid_input.strip():
         sid = sid_input.strip()
+        # 新增: progress bar (跟 status 並行, 更顯眼)
+        _progress = st.progress(0, text=f"準備分析 {sid}...")
         try:
             with st.status(f"完整分析 {sid} 中...", expanded=True) as status:
                 # 步驟 1/4: 抓技術 + 籌碼
+                _progress.progress(10, text=f"📊 步驟 1/4 {sid} - 抓技術 + 籌碼 (預計 5s)")
                 st.write("📊 步驟 1/4: 抓技術指標 + 籌碼資料...")
                 full = stock_analyzer.fetch_stock_full(sid)
                 if full["daily"].empty:
@@ -2241,6 +2333,7 @@ with tab_stock:
                     st.write(f"✅ 技術評分: {score}/10 (命中 {len(reasons)} 條件)")
 
                     # 步驟 2/4: 深度分析
+                    _progress.progress(40, text=f"🔬 步驟 2/4 {sid} - 深度分析 (預計 10s)")
                     st.write("🔬 步驟 2/4: 跑深度分析 (PE 同業比 / 月營收 / K 形態 / 法說)...")
                     try:
                         import stock_deep_analyzer
@@ -2255,6 +2348,7 @@ with tab_stock:
 
                     # 步驟 3/4: AI (可選)
                     if include_ai and ai_analyzer.gemini_available():
+                        _progress.progress(70, text=f"🤖 步驟 3/4 {sid} - Gemini AI (預計 10-15s)")
                         st.write("🤖 步驟 3/4: 跑 Gemini AI 觀點...")
                         try:
                             deep_data = st.session_state.get(f"deep_{sid}")
@@ -2281,9 +2375,15 @@ with tab_stock:
                         st.write("⏭️ 步驟 3/4: 跳過 AI (未勾選或無 GEMINI key)")
 
                     # 步驟 4/4
+                    _progress.progress(95, text=f"📋 步驟 4/4 {sid} - 渲染結果...")
                     st.write("📋 步驟 4/4: 渲染結果...")
                     status.update(label=f"✅ {sid} 完整分析完成", state="complete", expanded=False)
+            _progress.progress(100, text=f"✅ {sid} 完成")
+            import time as _t
+            _t.sleep(0.5)
+            _progress.empty()
         except Exception as e:
+            _progress.empty()
             st.error(f"分析失敗: {type(e).__name__}: {e}")
 
     last_stock = st.session_state.get("last_stock")
@@ -3391,94 +3491,16 @@ with tab_health:
             health = None
 
     if health:
-        # === 🆕 Cron 健康度 (最重要 — 用「絕對時間錨」判斷) ===
         cron = health.get("cron_health", {})
         st.markdown(f"### {cron.get('status', '—')}")
         st.caption(cron.get("label", ""))
         cC1, cC2, cC3 = st.columns(3)
         cC1.metric("最近 cron 推播", cron.get("last_cron_ago", "—"))
         cC2.metric("最近 dashboard 開啟", cron.get("last_ping_ago", "—"))
-        ctx = []
-        if cron.get("is_weekend"): ctx.append("週末")
-        if not cron.get("in_session"): ctx.append("盤外")
-        cC3.metric("當前時段", " · ".join(ctx) if ctx else "盤中")
-        st.divider()
-
-        # === GH Actions 整體狀態 (大字醒目) ===
-        gh = health["gh_actions"]
-        st.markdown(f"### {gh['status']}")
-        st.caption(f"最近 1 個 alert 發生: {gh.get('latest_ago', '—')} ({gh.get('latest', '—')})")
-
-        st.divider()
-
-        # === 服務可用性 (4 卡) ===
-        st.markdown("#### 🔧 外部服務")
-        cSv1, cSv2, cSv3, cSv4 = st.columns(4)
-        with cSv1:
-            tg = health["telegram"]
-            st.metric("Telegram", "✅ OK" if tg["available"] else "❌ 未設")
-            if tg.get("err"):
-                st.caption(f"⚠ {tg['err'][:60]}")
-        with cSv2:
-            ge = health["gemini"]
-            st.metric("Gemini", "✅ OK" if ge["available"] else "❌ 未設")
-            if ge.get("err"):
-                st.caption(f"⚠ {ge['err'][:60]}")
-        with cSv3:
-            fm = health["finmind"]
-            if fm["available"]:
-                pct = fm.get("pct_used")
-                label = f"{fm.get('user_count','?')}/{fm.get('limit','?')}"
-                if pct is not None:
-                    label += f" ({pct}%)"
-                st.metric("FinMind 額度", label,
-                           delta="⚠️ 接近用完" if (pct or 0) > 80 else "充足",
-                           delta_color="inverse" if (pct or 0) > 80 else "normal")
-            else:
-                st.metric("FinMind", "❌ 不可用")
-                if fm.get("err"):
-                    st.caption(f"⚠ {fm['err'][:60]}")
-        with cSv4:
-            p24 = health["push_24h"]
-            st.metric("24h 推播", f"{p24['total']} 筆",
-                       delta=f"✅ {p24['ok']} / ❌ {p24['fail']}",
-                       delta_color="normal" if p24['fail'] == 0 else "inverse")
-
-        st.divider()
-
-        # === Alert 模組狀態 ===
-        st.markdown("#### 📡 Alert 模組狀態")
-        import pandas as pd
-        mod_df = pd.DataFrame(health["modules"])[
-            ["status", "module", "last_fired_ago", "today_count"]
-        ]
-        mod_df.columns = ["狀態", "模組", "上次觸發", "今日次數"]
-        st.dataframe(mod_df, use_container_width=True, hide_index=True)
-
-        st.divider()
-
-        # === 24h 推播明細 ===
-        st.markdown("#### 📋 最近 24h 推播紀錄")
-        recent = p24.get("recent") or []
-        if recent:
-            recent_df = pd.DataFrame(recent)
-            recent_df["ok"] = recent_df["ok"].map(lambda x: "✅" if x else "❌")
-            display_cols = [c for c in ["ts", "ok", "type", "err"] if c in recent_df.columns]
-            st.dataframe(recent_df[display_cols].iloc[::-1],
-                         use_container_width=True, hide_index=True)
-        else:
-            st.info("過去 24h 沒有推播紀錄.")
-
-        # === 7d by type ===
-        st.markdown("#### 📊 過去 7 天推播統計 (by type)")
-        by_type = health["push_7d"].get("by_type") or {}
-        if by_type:
-            bt_df = pd.DataFrame([
-                {"類型": t, "成功": v["ok"], "失敗": v["fail"]}
-                for t, v in by_type.items()
-            ]).sort_values("成功", ascending=False)
-            st.dataframe(bt_df, use_container_width=True, hide_index=True)
-        else:
-            st.info("過去 7d 無推播紀錄.")
-
-        st.caption(f"⏰ 收集時間 (UTC): {health['ts']}")
+        cC3.metric("狀態", cron.get("status", "—"))
+        if cron.get("is_within_window"):
+            st.info("✓ 目前在 cron 排程窗口內")
+        if cron.get("is_weekend"):
+            st.caption("週末: cron 預期較少, 健康度可放寬")
+    else:
+        st.warning("health 資料抓取失敗")

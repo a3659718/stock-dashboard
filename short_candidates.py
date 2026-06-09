@@ -255,6 +255,15 @@ def check_and_push_intraday_weak() -> Optional[Dict]:
         return {"triggered": False, "reason": "no_picks"}
 
     msg = _fmt_intraday_weak_msg(picks)
+    # 末段加歷史績效 (空單訊號)
+    try:
+        import signal_tracker as _st
+        perf = _st.fmt_compact_perf("intraday_weak_short", lookback_days=30)
+        if perf:
+            msg = msg + "\n\n" + perf
+    except Exception:
+        pass
+
     try:
         import notifier
         ok, _ = notifier.send_message(msg, disable_preview=True)
@@ -266,6 +275,12 @@ def check_and_push_intraday_weak() -> Optional[Dict]:
                 watchlist_store.save_monitor_state(state)
             except Exception:
                 pass
+            try:
+                import signal_tracker as _st2
+                _st2.record_batch("intraday_weak_short", picks,
+                                   evaluate_after_days=5, expected_direction="down")
+            except Exception as _re:
+                print(f"[intraday_weak] record_batch failed: {_re}", flush=True)
         return {"triggered": True, "n_picks": len(picks), "sent": ok}
     except Exception as e:
         print(f"[intraday_weak] notifier 失敗: {e}", flush=True)

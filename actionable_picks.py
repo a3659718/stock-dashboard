@@ -389,10 +389,30 @@ def _build_from_upside(p: Dict) -> Optional[Dict]:
     if cur is None:
         return None
 
-    # 反推勝率 (粗估): 起漲初期 65, 動能繼續 60, 反轉型 55
-    win_prob_map = {"early_stage": "65%", "momentum": "60%", "reversal": "55%"}
-    hold_map = {"early_stage": "10-20 日", "momentum": "5-10 日", "reversal": "5-15 日"}
+    # 反推勝率 — Bug fix: 不再只用 category map (太粗糙), 改用 upside_score + RR + 動能微調
+    # base 從 category 起跳, 再依分數調整
     cat = p.get("category", "")
+    base_map = {"early_stage": 60, "momentum": 58, "reversal": 52, "revival_setup": 55}
+    base_prob = base_map.get(cat, 50)
+    # upside_score (0-100, 高分加分)
+    try:
+        us_score = float(p.get("score", 0) or 0)
+    except (TypeError, ValueError):
+        us_score = 0
+    if us_score >= 85: base_prob += 8
+    elif us_score >= 75: base_prob += 5
+    elif us_score >= 65: base_prob += 3
+    elif us_score >= 55: base_prob += 1
+    # R:R 加分 (≥2 更好)
+    try:
+        rr_v = float(rr or 0)
+        if rr_v >= 2.5: base_prob += 3
+        elif rr_v >= 2.0: base_prob += 1
+    except (TypeError, ValueError):
+        pass
+    base_prob = max(35, min(80, base_prob))  # cap 35-80%
+    win_prob_str = f"{int(base_prob)}%"
+    hold_map = {"early_stage": "10-20 日", "momentum": "5-10 日", "reversal": "5-15 日", "revival_setup": "10-15 日"}
 
     reasons = list(p.get("reasons", []))[:5]
     warnings = list(p.get("warnings", []))[:3]
@@ -408,7 +428,7 @@ def _build_from_upside(p: Dict) -> Optional[Dict]:
         "current": cur,
         "entry_low": el, "entry_high": eh,
         "target": target, "stop": stop, "rr": rr,
-        "win_prob": win_prob_map.get(cat, "55%"),
+        "win_prob": win_prob_str,
         "hold_period": hold_map.get(cat, "5-10 日"),
         "catalyst": "",
         "reasons": reasons,

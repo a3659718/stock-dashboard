@@ -68,6 +68,115 @@ def _fetch_snap(symbol: str, intraday: bool = False) -> Dict:
 
 
 
+def _interpret_asia_leading(asia_pcts: Dict[str, float]) -> str:
+    """根據日韓盤中漲跌, 解讀對台股的 leading 影響.
+
+    asia_pcts: {"^N225": +0.85, "^KS11": -0.50}
+    回一句話, 例: "日韓同向偏多, 台股可能跟漲, 留意半導體/AI"
+    """
+    if not asia_pcts:
+        return ""
+    n225 = asia_pcts.get("^N225")
+    ks11 = asia_pcts.get("^KS11")
+
+    # 兩個都有
+    if n225 is not None and ks11 is not None:
+        if n225 >= 0.5 and ks11 >= 0.5:
+            return "日韓同步走強 → 台股偏多開機率高, 可看半導體/AI"
+        if n225 <= -0.5 and ks11 <= -0.5:
+            return "日韓同步走弱 → 台股偏空開機率高, 持倉留意減碼"
+        if n225 >= 0.5 and ks11 <= -0.5:
+            return f"日強韓弱 (混合訊號) → 台股可能震盪, 觀察韓股是否反彈 (現 {ks11:+.2f}%)"
+        if n225 <= -0.5 and ks11 >= 0.5:
+            return f"日弱韓強 → 台股可能震盪, 觀察日股是否反彈 (現 {n225:+.2f}%)"
+        # 兩者皆小幅
+        return "日韓盤整 → 台股可能平盤震盪, 等開盤明朗"
+    # 只有一個
+    if n225 is not None:
+        if n225 >= 0.5:
+            return "日經偏強 → 台股偏多開"
+        if n225 <= -0.5:
+            return "日經偏弱 → 台股偏空開"
+        return "日經平盤 → 台股可能跟著平盤"
+    if ks11 is not None:
+        if ks11 >= 0.5:
+            return "KOSPI 偏強 → 台股可能跟漲 (韓股對半導體連動高)"
+        if ks11 <= -0.5:
+            return "KOSPI 偏弱 → 台股可能跟跌"
+    return ""
+
+
+def _build_tldr(us_snaps: Dict, asia_snaps: Dict) -> str:
+    """一句話 TL;DR — 給 08:30 推播第一行用. 整合美股強弱 + 亞股先開 + 籌碼 bias.
+
+    例: "美股費半 +1.8%, 日韓盤中弱 → 台股偏多開, 多看半導體拉回, 空看航運"
+    """
+    parts = []
+
+    # 1. 美股核心訊號 (費半 + 那指, 取最大絕對值)
+    us_strong = []
+    us_weak = []
+    for sym, label in [("^SOX", "費半"), ("^IXIC", "那指"), ("QQQ", "QQQ")]:
+        s = us_snaps.get(sym, {})
+        if s and s.get("pct_vs_prev") is not None:
+            p = s["pct_vs_prev"]
+            if p >= 1.5:
+                us_strong.append(f"{label} {p:+.2f}%")
+            elif p <= -1.5:
+                us_weak.append(f"{label} {p:+.2f}%")
+    if us_strong:
+        parts.append(", ".join(us_strong[:2]))
+    elif us_weak:
+        parts.append(", ".join(us_weak[:2]))
+
+    # 2. 亞股先開方向
+    asia_avg = None
+    try:
+        ps = [asia_snaps[s].get("pct_vs_open", 0)
+              for s in asia_snaps if asia_snaps[s]]
+        if ps:
+            asia_avg = sum(ps) / len(ps)
+    except Exception:
+        pass
+    asia_tag = ""
+    if asia_avg is not None:
+        if asia_avg >= 0.5:
+            asia_tag = "日韓強"
+        elif asia_avg <= -0.5:
+            asia_tag = "日韓弱"
+
+    # 3. 籌碼 bias (若 FinMind 可用)
+    bias = ""
+    try:
+        import institutional_positioning as _ip
+        snap = _ip.fetch_institutional_snapshot()
+        b_label = snap.get("bias_label", "")
+        if "偏多" in b_label:
+            bias = "外資偏多"
+        elif "偏空" in b_label:
+            bias = "外資偏空"
+    except Exception:
+        pass
+
+    # 4. 走勢 + 操作方向
+    direction = ""
+    if us_strong and (asia_tag != "日韓弱"):
+        direction = "→ 台股偏多開, 多看半導體/AI拉回"
+    elif us_weak or asia_tag == "日韓弱":
+        direction = "→ 台股偏空開, 空看弱勢族群, 多單觀望"
+    elif asia_tag == "日韓強":
+        direction = "→ 台股偏多開, 留意拉回買點"
+    else:
+        direction = "→ 台股平盤震盪, 等開盤明朗"
+
+    tldr_parts = []
+    if parts: tldr_parts.append(" / ".join(parts))
+    if asia_tag: tldr_parts.append(asia_tag)
+    if bias: tldr_parts.append(bias)
+    tldr = " · ".join(tldr_parts) + " " + direction
+    return tldr.strip()
+
+
 def _predict_tw_strong_sectors() -> list:
     """預測台股今日可能強勢族群 — 基於昨夜美股板塊 + 台股昨日 sector_pulse."""
     out = []
@@ -167,7 +276,18 @@ def build_pre_market_msg(slot: str = "08:15") -> str:
     except Exception:
         pass
 
-    lines = [f"🌅 <b>台股盤前 ({slot})</b>", "━━━━━━━━━━━━━━━━━"]
+    # TL;DR — 第一行濃縮重點 (只在 08:30 完整版顯示, 08:15 資料不夠)
+    tldr = ""
+    if slot == "08:30":
+        try:
+            tldr = _build_tldr(us_snaps, asia_snaps)
+        except Exception as _te:
+            print(f"[pre_market] tldr fail: {_te}", flush=True)
+
+    lines = [f"🌅 <b>台股盤前 ({slot})</b>"]
+    if tldr:
+        lines.append(f"⚡ <b>TL;DR</b>: {tldr}")
+    lines.append("━━━━━━━━━━━━━━━━━")
 
     # 美股昨夜
     us_parts = []
@@ -184,21 +304,30 @@ def build_pre_market_msg(slot: str = "08:15") -> str:
             lines.append(f"  CNN F&amp;G: <b>{fg['score']:.0f}</b> ({_esc(fg.get('rating', ''))})")
         lines.append("")
 
-    # 日韓盤中
+    # 日韓盤中 — 含當下價位 + 對台股的 leading 解讀
     asia_parts = []
-    for sym, label in [("^N225", "日經"), ("^KS11", "KOSPI")]:
+    asia_pcts = {}
+    for sym, label, flag in [("^N225", "日經 225", "🇯🇵"), ("^KS11", "KOSPI", "🇰🇷")]:
         s = asia_snaps.get(sym, {})
         if s.get("current"):
             pct = s.get("pct_vs_open", 0)
+            cur = s.get("current", 0)
+            asia_pcts[sym] = pct
             tag = "🟢" if pct >= 0 else "🔴"
-            asia_parts.append(f"{tag} {label} 開盤 <b>{pct:+.2f}%</b>")
+            asia_parts.append(f"{tag} {flag} {label} {cur:,.0f} (開盤 <b>{pct:+.2f}%</b>)")
     if asia_parts:
-        offset = "開盤 +15min" if slot == "08:15" else "開盤 +30min"
-        lines.append(f"🌏 <b>亞股盤中 ({offset})</b>")
+        offset = "日韓開盤 +15min" if slot == "08:15" else "日韓開盤 +30min"
+        lines.append(f"🌏 <b>日韓股市盤中 ({offset})</b>")
+        lines.append(f"<i>※ 日韓 08:00 先開, 台股 09:00 開盤前的領先指標</i>")
         for p in asia_parts:
             lines.append(f"  {p}")
+        # Leading 解讀: 對台股影響
+        leading_msg = _interpret_asia_leading(asia_pcts)
+        if leading_msg:
+            lines.append(f"  💡 <b>對台股</b>: {leading_msg}")
         lines.append("")
 
+    # 強勢族群預測 (基於美股 sector ETF)
     # 強勢族群預測 (基於美股 sector ETF)
     pred_sectors = _predict_tw_strong_sectors()
     if pred_sectors:
@@ -211,7 +340,7 @@ def build_pre_market_msg(slot: str = "08:15") -> str:
             )
         lines.append("")
 
-    # 新增: 外資籌碼面 (8:30 推, 期交所昨日數據已 release)
+    # 外資籌碼面 (8:30 推, FinMind 抓不到自動 skip)
     if slot == "08:30":
         try:
             import institutional_positioning as _ip
@@ -223,7 +352,18 @@ def build_pre_market_msg(slot: str = "08:15") -> str:
         except Exception as _pe:
             print(f"[pre_market] positioning fail: {_pe}", flush=True)
 
-    # 新增: Gemini 結構化走勢預測 (08:30 才推, 08:15 太早資料不全)
+        # 大戶空單 (借券餘額 / 借券賣出 / 融券 / 券資比)
+        try:
+            import short_interest_alert as _si
+            si_snap = _si.fetch_short_interest_snapshot()
+            si_msg = _si.format_short_for_tg(si_snap)
+            if si_msg:
+                lines.append(si_msg)
+                lines.append("")
+        except Exception as _se:
+            print(f"[pre_market] short_interest fail: {_se}", flush=True)
+
+    # Gemini 結構化走勢預測 (08:30 才推)
     if slot == "08:30":
         try:
             import daily_outlook_advisor as _doa
@@ -236,16 +376,15 @@ def build_pre_market_msg(slot: str = "08:15") -> str:
         except Exception as _oe:
             print(f"[pre_market] outlook fail: {_oe}", flush=True)
 
-    # Gemini 建議
+    # Gemini 文字建議
     gem = _gemini_summary(us_snaps, asia_snaps, slot)
     if gem:
         lines.append("━━━━━━━ 🤖 Gemini 對台股建議 ━━━━━━━")
         lines.append(_esc(gem))
         lines.append("")
 
-    # 簡易推論 fallback (Gemini 失敗)
+    # Fallback 簡易推論
     if not gem:
-        # 用美股+日韓平均推測台股偏多/偏空
         try:
             us_avg = sum(us_snaps[s].get("pct_vs_prev", 0) for s in us_snaps
                           if us_snaps[s]) / max(1, sum(1 for s in us_snaps if us_snaps[s]))

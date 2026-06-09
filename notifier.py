@@ -31,6 +31,14 @@ def _esc(s) -> str:
         return ""
 
 
+def _strip_caret(sym: str) -> str:
+    """剝 ^TWII → TWII (yfinance ticker 顯示給用戶看的清理)."""
+    if not sym:
+        return ""
+    s = str(sym)
+    return s[1:] if s.startswith("^") else s
+
+
 def _safe_pct(v, fmt: str = "+.2f", default: str = "—", suffix: str = "%") -> str:
     """安全格式化百分比. v 為 None / NaN / 非數字時回 default.
 
@@ -191,9 +199,24 @@ def send_message(text: str, disable_preview: bool = True,
       6. 自動寫入 system_health.push_history (供 admin dashboard 顯示)
       7. disable_notification=True → silent push (不響鈴, 用於普通新聞分流)
     """
-    ok, info = _send_message_inner(text, disable_preview, reply_markup, disable_notification)
-    _record_push_safe(text, ok, info)
-    return ok, info
+    # Bug fix: 加 3 次 retry — 網路抖動 / TG API 暫時 503 不會漏推
+    import time as _time
+    last_info = ""
+    for attempt in range(3):
+        ok, info = _send_message_inner(text, disable_preview, reply_markup, disable_notification)
+        last_info = info
+        if ok:
+            if attempt > 0:
+                print(f"[notifier] send_message OK on retry #{attempt+1}", flush=True)
+            _record_push_safe(text, ok, info)
+            return ok, info
+        # 失敗 — 短暫 backoff 後重試 (except 永久性錯誤: chat_id 沒設 / token 錯)
+        if any(k in info for k in ("尚未設定", "chat not found", "Forbidden", "Unauthorized")):
+            break  # 永久錯不重試
+        if attempt < 2:
+            _time.sleep(2 ** attempt)  # 1s, 2s exponential backoff
+    _record_push_safe(text, False, last_info)
+    return False, last_info
 
 
 def _send_message_inner(text: str, disable_preview: bool = True,
@@ -1580,7 +1603,7 @@ def fmt_combined_intraday_alerts(
             header_extra = f"  {arrow_h}{abs(diff_open):,.0f} 點 ({sign_p}{pct_open:.2f}% vs 開)"
         lines.append(f"{country_tag}<b>{name_esc}</b> <code>{sym_esc}</code> {cur_str}{header_extra}")
 
-        # === 日內走勢 line (4 個 key 價位, 視覺一目了然) ===
+        # === 今日 K 線走勢 line (4 個 key 價位, 視覺一目了然) ===
         if today_open is not None and current is not None:
             path_parts = [f"開 {today_open:,.0f}"]
             if today_high is not None:
@@ -1588,7 +1611,7 @@ def fmt_combined_intraday_alerts(
             if today_low is not None:
                 path_parts.append(f"低 {today_low:,.0f}")
             path_parts.append(f"現 {current:,.0f}")
-            lines.append(f"  📊 日內: " + " / ".join(path_parts))
+            lines.append(f"  📊 今日 K 線: " + " / ".join(path_parts))
 
         # === Crash 觸發 (最高優先, 訊息最豐富) ===
         crash_t = info.get("crash")
@@ -1919,7 +1942,7 @@ def fmt_intraday_reversal_alerts(alerts: list) -> str:
         lines.append("<b>📉 從高點回吐</b>")
         for a in drawdowns:
             name = _esc(a.get("name", ""))
-            sym = _esc(a.get("symbol", ""))
+            sym = _esc(_strip_caret(a.get("symbol", "")))
             try:
                 dd_pct = float(a.get("drawdown_pct", 0) or 0)
                 vs_open = float(a.get("pct_vs_open", 0) or 0)
@@ -2040,7 +2063,7 @@ def fmt_intraday_reversal_alerts(alerts: list) -> str:
         lines.append("<b>📈 從低點反彈</b>")
         for a in rebounds:
             name = _esc(a.get("name", ""))
-            sym = _esc(a.get("symbol", ""))
+            sym = _esc(_strip_caret(a.get("symbol", "")))
             try:
                 rb_pct = float(a.get("rebound_pct", 0) or 0)
                 vs_open = float(a.get("pct_vs_open", 0) or 0)
@@ -3387,6 +3410,10 @@ def fmt_trump_policy_alerts(alerts: list, gemini_analysis="") -> str:
     lines.append("<i>※ Tier 1 政治影響, 留意盤前波動.</i>")
     return _truncate_tg_msg("\n".join(lines).rstrip())
 
+
+
+def fmt_speculation_picks(picks: list) -> str:
+    """投機股 (Story Stock) 推播 (Tier 2)."""
 
 
 def fmt_speculation_picks(picks: list) -> str:

@@ -207,6 +207,98 @@ def _fetch_option_pcr() -> Dict:
     return out
 
 
+def _fetch_futures_basis() -> Dict:
+    """台指期升貼水 (basis) — 期貨價 - 現貨價.
+
+    升水 (basis > 0): 期貨高於現貨 → 多頭強烈
+    貼水 (basis < 0): 期貨低於現貨 → 空頭強烈, 或避險需求高
+    台股近月一般在 -30 ~ +30 之間, 異常值有訊號意義.
+    """
+    out = {"basis": None, "basis_pct": None, "signal": ""}
+    try:
+        import data_sources as ds
+        # 台指期主力月 (yfinance: ^TWII 是現股, TX=F 可能不存在)
+        # FinMind: TaiwanFuturesDaily
+        rows = _safe_finmind_data("TaiwanFuturesDaily", days=3)
+        if not rows:
+            return out
+        # 篩 TX (台指近月)
+        tx_rows = [r for r in rows if r.get("futures_id") == "TX" or "TXF" in str(r.get("contract_date", ""))]
+        if not tx_rows:
+            return out
+        # 取最新日近月合約
+        latest_date = max(r.get("date", "") for r in tx_rows)
+        today = [r for r in tx_rows if r.get("date") == latest_date]
+        if not today:
+            return out
+        # 取「結算」近月 (Contract month earliest)
+        today.sort(key=lambda x: x.get("contract_date", ""))
+        near = today[0]
+        fut_close = float(near.get("close", 0) or 0)
+        if fut_close == 0:
+            return out
+        # 現股: TWII
+        twii_df = ds.fetch_yf_history("^TWII", period="3d", interval="1d")
+        if twii_df is None or twii_df.empty:
+            return out
+        spot = float(twii_df["Close"].iloc[-1])
+        basis = fut_close - spot
+        basis_pct = (basis / spot) * 100 if spot > 0 else 0
+        out["basis"] = round(basis, 2)
+        out["basis_pct"] = round(basis_pct, 3)
+        if basis >= 50:
+            out["signal"] = "🟢 升水 ≥50 點 — 多頭強烈"
+        elif basis >= 0:
+            out["signal"] = "🟡 微升水 — 多頭略佔上風"
+        elif basis >= -50:
+            out["signal"] = "🟡 微貼水 — 多空均衡偏空"
+        else:
+            out["signal"] = "🔴 貼水 ≥50 點 — 空頭強烈或避險需求高"
+    except Exception as e:
+        print(f"[positioning] futures_basis fail: {e}", flush=True)
+    return out
+
+
+def _fetch_retail_mtx() -> Dict:
+    """小台 (MTX) 散戶留倉 — 散戶反指標.
+
+    散戶大量留多 → 反向偏空; 大量留空 → 反向偏多
+    """
+    out = {"retail_net": None, "signal": ""}
+    rows = _safe_finmind_data("TaiwanFuturesInstitutionalInvestors", days=5)
+    if not rows:
+        return out
+    # MTX (小台) = 散戶代理 (法人很少操作小台)
+    mtx_rows = [r for r in rows if r.get("futures_id") == "MTX" or r.get("contract_type") == "MTX"]
+    if not mtx_rows:
+        return out
+    latest_date = max(r.get("date", "") for r in mtx_rows)
+    today = [r for r in mtx_rows if r.get("date") == latest_date]
+    if not today:
+        return out
+    # 法人留倉 = 法人對小台部位 (其餘是散戶 = 整市場 - 法人)
+    # 散戶 = 全市場未平倉 - 法人持倉
+    # 簡化: 用法人總淨額負值近似散戶淨
+    fi_net = 0
+    for r in today:
+        long_oi = float(r.get("open_interest_balance_long", 0) or 0)
+        short_oi = float(r.get("open_interest_balance_short", 0) or 0)
+        fi_net += long_oi - short_oi
+    retail_net = -fi_net  # 散戶反向
+    out["retail_net"] = int(retail_net)
+    if retail_net >= 8000:
+        out["signal"] = "🔴 散戶大量留多 (反指標) — 偏空訊號"
+    elif retail_net >= 3000:
+        out["signal"] = "🟡 散戶偏多 — 中性偏空"
+    elif retail_net <= -8000:
+        out["signal"] = "🟢 散戶大量留空 (反指標) — 偏多訊號"
+    elif retail_net <= -3000:
+        out["signal"] = "🟡 散戶偏空 — 中性偏多"
+    else:
+        out["signal"] = "⚪ 散戶部位中性"
+    return out
+
+
 def _fetch_major_traders() -> Dict:
     """大型交易人 (前 5 大特定法人, 含大摩/JPM/Goldman) 台指期淨多空."""
     out = {"net": 0, "summary": ""}
@@ -242,37 +334,29 @@ def fetch_institutional_snapshot() -> Dict:
         "futures": _fetch_inst_futures(),
         "pcr": _fetch_option_pcr(),
         "major_traders": _fetch_major_traders(),
+        "basis": _fetch_futures_basis(),
+        "retail_mtx": _fetch_retail_mtx(),
         "fetched_at": dt.datetime.utcnow().isoformat(),
     }
-    # 判斷整體偏向
+    # 綜合 bias
     bias_score = 0
-    spot = snap["spot"]
-    fut = snap["futures"]
-    pcr = snap["pcr"]
+    spot = snap["spot"]; fut = snap["futures"]; pcr = snap["pcr"]
     if spot.get("data"):
-        if spot["data"][-1]["foreign_yi"] > 50:
-            bias_score += 2  # 外資現貨大買
-        elif spot["data"][-1]["foreign_yi"] > 0:
-            bias_score += 1
-        elif spot["data"][-1]["foreign_yi"] < -50:
-            bias_score -= 2
-        elif spot["data"][-1]["foreign_yi"] < 0:
-            bias_score -= 1
+        latest_yi = spot["data"][-1]["foreign_yi"]
+        if latest_yi > 50: bias_score += 2
+        elif latest_yi > 0: bias_score += 1
+        elif latest_yi < -50: bias_score -= 2
+        elif latest_yi < 0: bias_score -= 1
     if fut.get("foreign_net_oi"):
-        if fut["foreign_net_oi"] >= 10000:
-            bias_score += 2
-        elif fut["foreign_net_oi"] >= 5000:
-            bias_score += 1
-        elif fut["foreign_net_oi"] <= -10000:
-            bias_score -= 2
-        elif fut["foreign_net_oi"] <= -5000:
-            bias_score -= 1
+        oi = fut["foreign_net_oi"]
+        if oi >= 10000: bias_score += 2
+        elif oi >= 5000: bias_score += 1
+        elif oi <= -10000: bias_score -= 2
+        elif oi <= -5000: bias_score -= 1
     if pcr.get("pcr") is not None:
         p = pcr["pcr"]
-        if p >= 1.3:
-            bias_score += 1  # 反向偏多
-        elif p < 0.8:
-            bias_score -= 1
+        if p >= 1.3: bias_score += 1
+        elif p < 0.8: bias_score -= 1
     snap["bias_score"] = bias_score
     if bias_score >= 3:
         snap["bias_label"] = "🟢 籌碼面強烈偏多"
@@ -288,7 +372,7 @@ def fetch_institutional_snapshot() -> Dict:
 
 
 def format_positioning_for_tg(snap: Dict) -> str:
-    """格式化籌碼面 TG 區塊 (含現貨/期貨/PCR)."""
+    """格式化籌碼面 TG 區塊 (含現貨/期貨/PCR/升貼水/小台)."""
     if not snap:
         return ""
     lines = ["📑 <b>外資籌碼面</b>", f"<i>{snap.get('bias_label', '')}</i>"]
@@ -311,27 +395,45 @@ def format_positioning_for_tg(snap: Dict) -> str:
         lines.append(f"• 選擇權 PCR: {pcr['pcr']:.2f}")
         if pcr.get("signal"):
             lines.append(f"  └ {pcr['signal']}")
-    if not (spot.get("summary") or fut.get("summary") or pcr.get("pcr")):
-        return ""  # 沒抓到資料就不顯示
+    basis = snap.get("basis", {})
+    if basis.get("basis") is not None:
+        b = basis["basis"]
+        sign = "+" if b >= 0 else ""
+        lines.append(f"• 期貨升貼水: {sign}{b:.2f} 點")
+        if basis.get("signal"):
+            lines.append(f"  └ {basis['signal']}")
+    rtm = snap.get("retail_mtx", {})
+    if rtm.get("retail_net") is not None:
+        rn = rtm["retail_net"]
+        sign = "+" if rn >= 0 else ""
+        lines.append(f"• 小台散戶淨倉: {sign}{rn:,} 口 (反指標)")
+        if rtm.get("signal"):
+            lines.append(f"  └ {rtm['signal']}")
+    if len(lines) <= 2:
+        return ""
     return "\n".join(lines)
 
 
 def summarize_for_gemini(snap: Dict) -> str:
-    """精簡版 (給 Gemini prompt 用)."""
+    """精簡版 (給 Gemini prompt)."""
     if not snap:
         return ""
     parts = []
     spot = snap.get("spot", {})
     if spot.get("summary"):
         parts.append(f"外資現貨 {spot['summary']}")
-        if abs(spot.get("foreign_streak", 0)) >= 3:
-            parts.append(f"外資連續{'買' if spot['foreign_streak']>0 else '賣'}超 {abs(spot['foreign_streak'])} 日")
     fut = snap.get("futures", {})
     if fut.get("foreign_net_oi"):
         parts.append(f"外資台指期淨{fut['foreign_net_oi']:+,}口")
     pcr = snap.get("pcr", {})
     if pcr.get("pcr") is not None:
-        parts.append(f"選擇權 PCR {pcr['pcr']:.2f}")
+        parts.append(f"PCR {pcr['pcr']:.2f}")
+    basis = snap.get("basis", {})
+    if basis.get("basis") is not None:
+        parts.append(f"期貨升貼水 {basis['basis']:+.2f} 點")
+    rtm = snap.get("retail_mtx", {})
+    if rtm.get("retail_net") is not None:
+        parts.append(f"小台散戶淨倉 {rtm['retail_net']:+,} 口")
     if snap.get("bias_label"):
         parts.append(snap["bias_label"].replace("🟢 ", "").replace("🔴 ", "").replace("⚪ ", ""))
-    return " | ".join(parts)
+    return " | "
