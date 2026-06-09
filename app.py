@@ -2119,28 +2119,27 @@ with tab_pulse:
             st.markdown("### 🔥 熱門題材熱度排行")
             st.dataframe(themes_df, use_container_width=True, hide_index=True)
 
-        st.markdown("### 🎯 題材龍頭強勢股 (跨題材去重, 一檔只顯示一次)")
-        seen_sids: set = set()
-        for theme in themes_df["題材"].head(8):
-            df = leaders_map.get(theme)
-            if df is None or df.empty:
-                continue
-            # 把已在其他題材出現的去掉
-            df_dedup = df[~df["stock_id"].astype(str).isin(seen_sids)].copy()
-            if df_dedup.empty:
-                continue  # 此題材的股票全都已在其他題材顯示過
-            seen_sids.update(df_dedup["stock_id"].astype(str).tolist())
-            with st.expander(f"{theme} ({len(df_dedup)} 檔)",
-                              expanded=(themes_df.iloc[0]["題材"] == theme)):
-                cols_want = ["stock_id", "stock_name", "現價", "今日%", "振幅%", "量比", "5日%"]
-                cols_have = [c for c in cols_want if c in df_dedup.columns]
-                show = df_dedup[cols_have].copy()
-                show = show.rename(columns={"stock_id": "代號", "stock_name": "名稱"})
-                # 數值欄位四捨五入到 2 位
-                for num_col in ["現價", "今日%", "振幅%", "量比", "5日%"]:
-                    if num_col in show.columns:
-                        show[num_col] = pd.to_numeric(show[num_col], errors="coerce").round(2)
-                _show_table(show, market="TW")
+            # Bug fix: 縮排錯, 原本在 else 外導致 themes_df 是 None 時 crash → 看起來「沒反應」
+            st.markdown("### 🎯 題材龍頭強勢股 (跨題材去重, 一檔只顯示一次)")
+            seen_sids: set = set()
+            for theme in themes_df["題材"].head(8):
+                df = leaders_map.get(theme)
+                if df is None or df.empty:
+                    continue
+                df_dedup = df[~df["stock_id"].astype(str).isin(seen_sids)].copy()
+                if df_dedup.empty:
+                    continue
+                seen_sids.update(df_dedup["stock_id"].astype(str).tolist())
+                with st.expander(f"{theme} ({len(df_dedup)} 檔)",
+                                  expanded=(themes_df.iloc[0]["題材"] == theme)):
+                    cols_want = ["stock_id", "stock_name", "現價", "今日%", "振幅%", "量比", "5日%"]
+                    cols_have = [c for c in cols_want if c in df_dedup.columns]
+                    show = df_dedup[cols_have].copy()
+                    show = show.rename(columns={"stock_id": "代號", "stock_name": "名稱"})
+                    for num_col in ["現價", "今日%", "振幅%", "量比", "5日%"]:
+                        if num_col in show.columns:
+                            show[num_col] = pd.to_numeric(show[num_col], errors="coerce").round(2)
+                    _show_table(show, market="TW")
 
     # === 證交所產業分類區塊 ===
     if "pulse" in st.session_state:
@@ -2151,66 +2150,65 @@ with tab_pulse:
             st.markdown("### 📊 產業分類")
             st.info("📭 **產業資料抓不到** — 可能 yfinance / FinMind 暫時失效. 稍後再試")
         else:
+            # Bug fix: 以下全段原本縮排錯 (跟 if 同層), 對空 sectors 會 crash → 看起來「按鈕沒反應」
             st.markdown("### 證交所產業分類 Top 5")
-        first_col = sectors.columns[0]
-        top5 = sectors.head(5).copy()
-        _show_table(
-            top5.rename(columns={first_col: "產業", "avg_change": "平均%", "median_change": "中位%",
-                                 "up_count": "上漲家數", "n": "樣本數", "up_ratio": "上漲比率"}),
-            market="TW",
-        )
-        if leaders is not None and not leaders.empty:
-            with st.expander("各產業龍頭 (前 5 名 + 盤中資訊)"):
-                # E: 標註該 leader 是否已在「今日可行動」 Top 內
-                _actionable = st.session_state.get("actionable_picks") or []
-                _actionable_sids = {str(p.get("stock_id", "")) for p in _actionable if p.get("stock_id")}
-                show_df = leaders.copy()
-                if _actionable_sids:
-                    show_df["在今日可行動"] = show_df["stock_id"].astype(str).map(
-                        lambda s: "✨" if s in _actionable_sids else ""
-                    )
-                show_cols = [c for c in ["industry_category", "stock_id", "stock_name",
-                                          "現價", "今日%", "振幅%", "量比", "5日%",
-                                          "入場標籤", "在今日可行動"]
-                             if c in show_df.columns]
-                _show_table(show_df[show_cols], market="TW")
-
-        # 異常觸發推播 (任何格式化錯誤都不能炸掉整個 app)
-        # 加假日/週末 guard: 避免在台股休市時推前一交易日的舊資料
-        if auto_send_on_alert and notifier.is_configured():
-            try:
-                # 假日 / 週末 → skip 自動推播 (但保留 dashboard 顯示)
-                _is_tw_closed = False
-                try:
-                    import holiday_check
-                    _is_tw_closed = holiday_check.is_market_closed_today("TW")
-                except Exception:
-                    pass
-                if dt.date.today().weekday() >= 5:  # 週末
-                    _is_tw_closed = True
-
-                top1 = sectors.iloc[0]
-                avg = float(top1.get("avg_change", 0) or 0)
-                if pd.isna(avg):
-                    avg = 0.0
-                if not _is_tw_closed and avg >= 1.5:
-                    today_key = dt.date.today().isoformat()
-                    pulse_fp = f"strong_sector_{today_key}_{top1[first_col]}"
-                    if _should_send_once(pulse_fp):
-                        msg = notifier.fmt_strong_sectors(
-                            sectors, leaders_map=leaders,
-                            themes_df=themes_df, theme_leaders=leaders_map,
+            first_col = sectors.columns[0]
+            top5 = sectors.head(5).copy()
+            _show_table(
+                top5.rename(columns={first_col: "產業", "avg_change": "平均%", "median_change": "中位%",
+                                     "up_count": "上漲家數", "n": "樣本數", "up_ratio": "上漲比率"}),
+                market="TW",
+            )
+            if leaders is not None and not leaders.empty:
+                with st.expander("各產業龍頭 (前 5 名 + 盤中資訊)"):
+                    _actionable = st.session_state.get("actionable_picks") or []
+                    _actionable_sids = {str(p.get("stock_id", "")) for p in _actionable if p.get("stock_id")}
+                    show_df = leaders.copy()
+                    if _actionable_sids:
+                        show_df["在今日可行動"] = show_df["stock_id"].astype(str).map(
+                            lambda s: "✨" if s in _actionable_sids else ""
                         )
-                        if msg:
-                            ok, info = notifier.send_message(msg)
-                            if ok:
-                                st.toast("已推送強勢族群通知", icon="🚀")
-                            else:
-                                # 失敗 → 回滾 send_once 紀錄, 下次 rerun 還可以重試
-                                _release_send_once(pulse_fp)
-                                st.warning(f"強勢族群推播失敗 (已回滾去重): {info}")
-            except Exception as _e:
-                st.warning(f"強勢族群自動推播失敗 (略過): {type(_e).__name__}: {_e}")
+                    show_cols = [c for c in ["industry_category", "stock_id", "stock_name",
+                                              "現價", "今日%", "振幅%", "量比", "5日%",
+                                              "入場標籤", "在今日可行動"]
+                                 if c in show_df.columns]
+                    _show_table(show_df[show_cols], market="TW")
+
+            # 異常觸發推播
+            if auto_send_on_alert and notifier.is_configured():
+                try:
+                    _is_tw_closed = False
+                    try:
+                        import holiday_check
+                        _is_tw_closed = holiday_check.is_market_closed_today("TW")
+                    except Exception:
+                        pass
+                    if dt.date.today().weekday() >= 5:
+                        _is_tw_closed = True
+
+                    top1 = sectors.iloc[0]
+                    avg = float(top1.get("avg_change", 0) or 0)
+                    if pd.isna(avg):
+                        avg = 0.0
+                    if not _is_tw_closed and avg >= 1.5:
+                        today_key = dt.date.today().isoformat()
+                        pulse_fp = f"strong_sector_{today_key}_{top1[first_col]}"
+                        if _should_send_once(pulse_fp):
+                            _themes_for_msg = st.session_state.get("themes", {}).get("themes")
+                            _leaders_map_for_msg = st.session_state.get("themes", {}).get("leaders") or {}
+                            msg = notifier.fmt_strong_sectors(
+                                sectors, leaders_map=leaders,
+                                themes_df=_themes_for_msg, theme_leaders=_leaders_map_for_msg,
+                            )
+                            if msg:
+                                ok, info = notifier.send_message(msg)
+                                if ok:
+                                    st.toast("已推送強勢族群通知", icon="🚀")
+                                else:
+                                    _release_send_once(pulse_fp)
+                                    st.warning(f"強勢族群推播失敗 (已回滾去重): {info}")
+                except Exception as _e:
+                    st.warning(f"強勢族群自動推播失敗 (略過): {type(_e).__name__}: {_e}")
 
     # Bug fix: 從 session_state 重新讀 (前面 if 區塊出了 scope, 變數需重抓避免 NameError)
     _sectors_check = st.session_state.get("pulse", {}).get("sectors")
