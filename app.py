@@ -2212,13 +2212,21 @@ with tab_pulse:
             except Exception as _e:
                 st.warning(f"強勢族群自動推播失敗 (略過): {type(_e).__name__}: {_e}")
 
-    if (sectors is None or sectors.empty) and (themes_df is None or themes_df.empty):
+    # Bug fix: 從 session_state 重新讀 (前面 if 區塊出了 scope, 變數需重抓避免 NameError)
+    _sectors_check = st.session_state.get("pulse", {}).get("sectors")
+    _themes_check = st.session_state.get("themes", {}).get("themes")
+    _leaders_check = st.session_state.get("pulse", {}).get("leaders")
+    _leaders_map_check = st.session_state.get("themes", {}).get("leaders") or {}
+
+    if (_sectors_check is None or (hasattr(_sectors_check, 'empty') and _sectors_check.empty)) \
+       and (_themes_check is None or (hasattr(_themes_check, 'empty') and _themes_check.empty)):
         st.info("按上方按鈕開始分析 (盤前/休市時 yfinance 資料可能尚未更新)。")
 
-    if send_pulse_tg and (sectors is not None and not sectors.empty):
+    if send_pulse_tg and (_sectors_check is not None and hasattr(_sectors_check, 'empty') and not _sectors_check.empty):
         try:
             msg = notifier.fmt_strong_sectors(
-                sectors, leaders_map=leaders, themes_df=themes_df, theme_leaders=leaders_map,
+                _sectors_check, leaders_map=_leaders_check,
+                themes_df=_themes_check, theme_leaders=_leaders_map_check,
             )
             _send_tg(msg, "強勢族群")
         except Exception as _e:
@@ -3539,67 +3547,16 @@ with tab_entry:
             cT2.metric("距 52w 高", _sf(snap.get("from_52w_high_pct")))
             cT3.metric("距 52w 低", _sf(snap.get("from_52w_low_pct")))
 
-            # === 同族群 ===
-            st.markdown(f"#### 🚀 同族群表現 ({peers.get('sector') or '—'})")
-            if peers.get("sector_avg_pct") is not None:
-                cP1, cP2 = st.columns(2)
-                cP1.metric("族群均漲", f"{peers['sector_avg_pct']:+.2f}%")
-                if peers.get("up_ratio") is not None:
-                    cP2.metric("上漲家數比", f"{peers['up_ratio'] * 100:.0f}%")
-            peer_list = peers.get("peers") or []
-            if peer_list:
-                import pandas as pd
-                peer_df = pd.DataFrame(peer_list)
-                st.dataframe(peer_df, use_container_width=True, hide_index=True)
-            else:
-                st.caption("(沒有抓到同族群股, 可能族群偏小)")
-
-            # === 相對大盤 RS ===
-            if rs is not None:
-                if rs >= 1.5:
-                    rs_emoji = "✅ 強跑贏"
-                elif rs >= 0.3:
-                    rs_emoji = "➕ 跑贏"
-                elif rs >= -0.3:
-                    rs_emoji = "➡️ 同步"
-                elif rs >= -1.5:
-                    rs_emoji = "➖ 跑輸"
-                else:
-                    rs_emoji = "❌ 大幅跑輸"
-                st.markdown(f"#### 🌐 相對大盤 RS = **{rs:+.2f}pp**  {rs_emoji}")
-
-            # === 基本面 ===
-            st.markdown("---")
-            st.markdown("### 📊 基本面")
-            fund_data = ev_result.get("fundamentals", {}) if "ev_result" in dir() else {}
-            if fund_data:
-                f1, f2, f3 = st.columns(3)
-                f1.metric("PE", fund_data.get("pe", "—"))
-                f2.metric("EPS", fund_data.get("eps", "—"))
-                f3.metric("市值", fund_data.get("market_cap_str", "—"))
-            else:
-                st.caption("(基本面資料未抓取)")
-
-            # === 持倉建議 ===
-            st.markdown("---")
-            st.markdown("### 💼 持倉建議")
-            pa = ev_result.get("position_action", "—") if "ev_result" in dir() else "—"
-            pa_detail = ev_result.get("position_action_detail", "") if "ev_result" in dir() else ""
-            st.markdown(f"**動作**: {pa}")
-            if pa_detail:
-                st.caption(pa_detail)
-
 
 # ===== 🩺 系統健康 =====
 with tab_health:
     st.subheader("🩺 系統健康度")
     import system_health
-    # ping 自動 (有 dashboard 開啟就 record)
     try:
         last_ping_ts = st.session_state.get("_health_last_ping_ts")
         import time as _time
         now_ts = _time.time()
-        if not last_ping_ts or (now_ts - last_ping_ts) > 300:  # 5 min throttle
+        if not last_ping_ts or (now_ts - last_ping_ts) > 300:
             system_health.record_dashboard_open()
             st.session_state["_health_last_ping_ts"] = now_ts
     except Exception:
