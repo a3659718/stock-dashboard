@@ -254,15 +254,50 @@ def record_dashboard_open() -> None:
     record_push("DASHBOARD_PING", True)
 
 
-def diagnose_cron_health(monitor_state: Dict) -> Dict:
-    """根據 push_history 計算 cron 健康度.
-    回 {status: 🟢/🟡/🔴, label: str, last_cron_ago: str, last_ping_ago: str, lag_sec: int}.
+def record_cron_run(mode: str) -> None:
+    """Cron 每次跑時記錄 (不管有沒推播). 給 cron entry point 呼叫.
+
+    Bug fix: 之前 diagnose_cron_health 用 push_history 判定, 但 monitor mode 沒新訊號就
+    不推播, 不代表 cron 故障. 改用 cron_runs 判定「最近 cron 嘗試跑的時間」.
     """
+    try:
+        import watchlist_store
+        state = watchlist_store.load_monitor_state()
+        runs = state.setdefault("cron_runs", [])
+        if not isinstance(runs, list):
+            runs = []
+        runs.append({
+            "ts": _now_utc().isoformat(),
+            "mode": str(mode or "unknown"),
+        })
+        # 留最近 200 筆
+        state["cron_runs"] = runs[-200:]
+        watchlist_store.save_monitor_state(state)
+    except Exception as e:
+        print(f"[system_health] record_cron_run fail (non-fatal): {e}", flush=True)
+
+
+def diagnose_cron_health(monitor_state: Dict) -> Dict:
+    """根據 cron_runs (心跳) 計算 cron 健康度.
+    Bug fix: 改用 cron_runs 而非 push_history (沒推 ≠ 故障).
+    """
+    runs = monitor_state.get("cron_runs") or []
     hist = monitor_state.get("push_history") or []
+    if not isinstance(runs, list):
+        runs = []
     if not isinstance(hist, list):
         hist = []
     last_cron_ts = None
+    last_push_ts = None
     last_ping_ts = None
+
+    # 心跳 (cron 跑過) — 優先
+    for r in runs:
+        ts = _parse_iso(r.get("ts"))
+        if ts is not None and (last_cron_ts is None or ts > last_cron_ts):
+            last_cron_ts = ts
+
+    # push_history 作 fallback (舊版相容) + 找 ping
     for h in hist:
         ts = _parse_iso(h.get("ts"))
         if ts is None:
@@ -272,16 +307,21 @@ def diagnose_cron_health(monitor_state: Dict) -> Dict:
             if last_ping_ts is None or ts > last_ping_ts:
                 last_ping_ts = ts
         else:
-            if last_cron_ts is None or ts > last_cron_ts:
-                last_cron_ts = ts
+            if last_push_ts is None or ts > last_push_ts:
+                last_push_ts = ts
+    # 若沒 cron_runs 資料, fallback 用 push_history
+    if last_cron_ts is None:
+        last_cron_ts = last_push_ts
 
     if last_cron_ts is None:
         return {
-            "status": "🔴 從未推播",
-            "label": "push_history 完全沒有 cron 推播紀錄 — cron 可能從未跑過或剛 reset state.",
+            "status": "🟡 尚無資料",
+            "label": "cron_runs / push_history 都沒紀錄 — 等下次 cron 跑或 dashboard 開啟",
             "last_cron_ago": "—",
             "last_ping_ago": _ago(last_ping_ts),
             "lag_sec": None,
+            "is_within_window": False,
+            "is_weekend": False,
         }
 
     now = _now_utc()
@@ -292,24 +332,23 @@ def diagnose_cron_health(monitor_state: Dict) -> Dict:
     is_weekend = weekday >= 5
     cur_hour = now.hour + now.minute / 60.0
     in_session = (1.0 <= cur_hour < 5.5) or (13.0 <= cur_hour < 21.5)
-    in_session = (1.0 <= cur_hour < 5.5) or (13.0 <= cur_hour < 21.5)
     # 寬鬆時段 (盤外 / 週末): cron 本來就少跑, 標準放寬
     if is_weekend or not in_session:
-        warn_threshold = 6 * 3600
-        fail_threshold = 24 * 3600
+        warn_threshold = 12 * 3600   # 放寬: 6→12 hr
+        fail_threshold = 48 * 3600   # 放寬: 24→48 hr
     else:
-        warn_threshold = 30 * 60
-        fail_threshold = 2 * 3600
+        warn_threshold = 2 * 3600    # 放寬: 30min→2hr (monitor 每 4hr 跑)
+        fail_threshold = 8 * 3600    # 放寬: 2hr→8hr
 
     if cron_lag_sec < warn_threshold:
         status = "🟢 Cron 健康"
-        label = f"最近推播 {_ago(last_cron_ts)} (在預期範圍內)"
+        label = f"最近 cron 跑過 {_ago(last_cron_ts)} (在預期範圍內)"
     elif cron_lag_sec < fail_threshold:
-        status = "🟡 Cron lag"
-        label = f"最近推播 {_ago(last_cron_ts)} (>{warn_threshold//60}min, 可能延遲)"
+        status = "🟡 Cron 延遲"
+        label = f"最近 cron 跑過 {_ago(last_cron_ts)} (>{warn_threshold//3600}hr, 可能延遲)"
     else:
         status = "🔴 Cron 故障"
-        label = f"最近推播 {_ago(last_cron_ts)} (>{fail_threshold//3600}hr, 立即檢查 GH Actions!)"
+        label = f"最近 cron 跑過 {_ago(last_cron_ts)} (>{fail_threshold//3600}hr, 立即檢查 GH Actions!)"
 
     return {
         "status": status,

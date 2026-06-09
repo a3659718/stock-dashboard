@@ -1833,17 +1833,30 @@ with tab_pulse:
         "盤中即時資料來自 yfinance。"
     )
 
-    cA, cB, cC, cD = st.columns([1, 1, 1, 1])
+    cA, cB, cC, cD, cE = st.columns([1, 1, 1, 1, 1])
     with cA:
-        pulse_btn = st.button("🔄 產業分類", use_container_width=True, type="primary")
+        pulse_btn = st.button("📊 產業分類", use_container_width=True, type="primary")
     with cB:
         theme_btn = st.button("🔥 熱門題材", use_container_width=True, type="primary")
     with cC:
         stealth_btn = st.button("🌱 潛伏題材股", use_container_width=True, type="primary")
     with cD:
+        smart_btn = st.button("🕵️ 大戶偷進場", use_container_width=True, type="primary",
+                               help="量比≥2x + 沒大漲 + 籌碼/族群配合, 含進出場價")
+    with cE:
         send_pulse_tg = st.button("✈️ Send to TG", use_container_width=True,
                                   disabled=not notifier.is_configured(),
                                   key="send_pulse_tg")
+
+    if smart_btn:
+        try:
+            with st.spinner("掃描大戶偷進場標的 (跑籌碼 + 價量, 約 30s)..."):
+                import smart_money_stealth as _sms
+                st.session_state["smart_stealth"] = _sms.scan_smart_money_stealth(top_n=5)
+                import hot_theme_v2 as _htv2
+                st.session_state["hot_patterns"] = _htv2.find_all_patterns(top_themes=3)
+        except Exception as e:
+            st.error(f"智慧潛伏股分析失敗: {e}")
 
     if pulse_btn:
         try:
@@ -2010,38 +2023,101 @@ with tab_pulse:
             ai_text = st.session_state.get("us_open_ai", "")
             _send_tg(notifier.fmt_us_open_picks(us_open, ai_text=ai_text), "美股開盤分析")
 
-    # === 潛伏題材股 ===
-    stealth_data = st.session_state.get("stealth", {})
-    stealth_df = stealth_data.get("stealth")
-    if stealth_df is not None and not stealth_df.empty:
-        st.markdown("### 🌱 潛伏題材股 (族群熱、本身還沒大漲、有量能跡象)")
-        st.dataframe(stealth_df, use_container_width=True, hide_index=True)
-        # 催化劑明細
-        if "催化劑" in stealth_df.columns and stealth_df["催化劑"].astype(str).str.len().sum() > 0:
-            with st.expander("💡 各檔上漲原因 / 催化劑", expanded=False):
-                for _, row in stealth_df.iterrows():
-                    sid = row.get("stock_id", "")
-                    nm = row.get("stock_name", "")
-                    cat = row.get("催化劑", "")
-                    if cat:
-                        st.markdown(f"- **{sid} {nm}** — {cat}")
-        send_stealth_tg = st.button(
-            "✈️ Send to TG", use_container_width=True, key="send_stealth_tg",
-            disabled=not notifier.is_configured()
-        )
-        if send_stealth_tg and notifier.is_configured():
-            _send_tg(
-                notifier.fmt_stealth_picks(stealth_df, stealth_data.get("hot_themes")),
-                "潛伏題材股",
+    # === 🕵️ 大戶偷進場 (smart_money_stealth) + 熱門題材 3 型態 ===
+    if "smart_stealth" in st.session_state:
+        st.markdown("### 🕵️ 大戶偷偷進場 (Smart Money Stealth)")
+        smart_picks = st.session_state.get("smart_stealth", [])
+        if not smart_picks:
+            st.info(
+                "📭 **目前無「大戶偷進場」訊號**\n\n"
+                "嚴條件: 量比≥2x + 今日≤+1.5% + 在 20MA±5% + 籌碼配合 + 族群熱.\n"
+                "可能原因: 主流股都已大漲 / 大盤偏弱無題材 / 籌碼資料不足.\n"
+                "建議改點「🔥 熱門題材」或「🌱 潛伏題材股」"
             )
+        else:
+            for p in smart_picks:
+                sid = p.get("stock_id", ""); name = p.get("name", "")
+                with st.expander(f"🕵️ {sid} {name} · {p.get('current', 0):.2f} ({p.get('today_pct', 0):+.2f}%) · 分數 {p.get('score', 0)}/16", expanded=True):
+                    for r in p.get("reasons", []):
+                        st.markdown(f"- {r}")
+                    st.markdown(
+                        f"**進場區** {p.get('entry_low'):.2f}-{p.get('entry_high'):.2f} | "
+                        f"**停損** {p.get('stop_loss'):.2f} | "
+                        f"**短目標** {p.get('target_short'):.2f} | "
+                        f"**中目標** {p.get('target_mid'):.2f} | "
+                        f"**R:R** {p.get('rr', 0):.2f}"
+                    )
+
+    if "hot_patterns" in st.session_state:
+        st.markdown("### 🔥 熱門題材 3 型態")
+        patterns = st.session_state.get("hot_patterns", {})
+        for pat_key, pat_name, emoji in [
+            ("breakout", "整理突破 (健康)", "📈"),
+            ("leader_follower", "龍頭帶 follower (連動)", "🚀"),
+            ("volume_absorb", "量增吸籌 (大戶接)", "🕵️"),
+        ]:
+            picks = patterns.get(pat_key, [])
+            st.markdown(f"**{emoji} {pat_name}**")
+            if not picks:
+                st.caption("(無符合)")
+            else:
+                for p in picks[:3]:
+                    sid = p.get("stock_id", ""); name = p.get("name", "")
+                    st.markdown(
+                        f"- `{sid}` {name} · {p.get('current', 0):.2f} "
+                        f"({p.get('today_pct', 0):+.2f}%) · 量比 {p.get('vol_ratio', 0):.2f}x · "
+                        f"進場 {p.get('entry', 0):.2f} · 停損 {p.get('stop_loss', 0):.2f} · "
+                        f"目標 {p.get('target_short', 0):.2f}"
+                    )
+                    st.caption(f"  💡 {p.get('reasoning', '')}")
+
+    # === 潛伏題材股 (舊版, 保留作對比) ===
+    if "stealth" in st.session_state:
+        stealth_data = st.session_state.get("stealth", {})
+        stealth_df = stealth_data.get("stealth")
+        st.markdown("### 🌱 潛伏題材股")
+        if stealth_df is None or stealth_df.empty:
+            st.info(
+                "📭 **今日無潛伏題材股**\n\n"
+                "篩選條件: 今日 ≤+2% + 量比 ≥1.5x + 5日 ≤+5% "
+                "(找「量先動、股還沒動」的標的)\n\n"
+                "**可能原因**:\n"
+                "- 大盤整體強勢, 主流股都已大漲\n"
+                "- 或大盤偏弱, 沒族群有量\n"
+                "- 建議改點「🔥 熱門題材」看已發動的龍頭"
+            )
+        else:
+            st.caption("族群熱、本身還沒大漲、有量能跡象")
+            st.dataframe(stealth_df, use_container_width=True, hide_index=True)
+            if "催化劑" in stealth_df.columns and stealth_df["催化劑"].astype(str).str.len().sum() > 0:
+                with st.expander("💡 各檔上漲原因 / 催化劑", expanded=False):
+                    for _, row in stealth_df.iterrows():
+                        sid = row.get("stock_id", "")
+                        nm = row.get("stock_name", "")
+                        cat = row.get("催化劑", "")
+                        if cat:
+                            st.markdown(f"- **{sid} {nm}** — {cat}")
+            send_stealth_tg = st.button(
+                "✈️ Send to TG", use_container_width=True, key="send_stealth_tg",
+                disabled=not notifier.is_configured()
+            )
+            if send_stealth_tg and notifier.is_configured():
+                _send_tg(
+                    notifier.fmt_stealth_picks(stealth_df, stealth_data.get("hot_themes")),
+                    "潛伏題材股",
+                )
 
     # === 熱門題材區塊 ===
-    themes_data = st.session_state.get("themes", {})
-    themes_df = themes_data.get("themes")
-    leaders_map = themes_data.get("leaders") or {}
-    if themes_df is not None and not themes_df.empty:
-        st.markdown("### 🔥 熱門題材熱度排行")
-        st.dataframe(themes_df, use_container_width=True, hide_index=True)
+    if "themes" in st.session_state:
+        themes_data = st.session_state.get("themes", {})
+        themes_df = themes_data.get("themes")
+        leaders_map = themes_data.get("leaders") or {}
+        if themes_df is None or themes_df.empty:
+            st.markdown("### 🔥 熱門題材")
+            st.info("📭 **今日熱門題材抓不到** — 可能是 yfinance 限流或所有題材都平淡. 稍後再試或改點「📊 產業分類」")
+        else:
+            st.markdown("### 🔥 熱門題材熱度排行")
+            st.dataframe(themes_df, use_container_width=True, hide_index=True)
 
         st.markdown("### 🎯 題材龍頭強勢股 (跨題材去重, 一檔只顯示一次)")
         seen_sids: set = set()
@@ -2067,11 +2143,15 @@ with tab_pulse:
                 _show_table(show, market="TW")
 
     # === 證交所產業分類區塊 ===
-    pulse = st.session_state.get("pulse", {})
-    sectors = pulse.get("sectors")
-    leaders = pulse.get("leaders")
-    if sectors is not None and not sectors.empty:
-        st.markdown("### 證交所產業分類 Top 5")
+    if "pulse" in st.session_state:
+        pulse = st.session_state.get("pulse", {})
+        sectors = pulse.get("sectors")
+        leaders = pulse.get("leaders")
+        if sectors is None or sectors.empty:
+            st.markdown("### 📊 產業分類")
+            st.info("📭 **產業資料抓不到** — 可能 yfinance / FinMind 暫時失效. 稍後再試")
+        else:
+            st.markdown("### 證交所產業分類 Top 5")
         first_col = sectors.columns[0]
         top5 = sectors.head(5).copy()
         _show_table(
@@ -3541,7 +3621,7 @@ with tab_health:
         st.markdown(f"### {cron.get('status', '—')}")
         st.caption(cron.get("label", ""))
         cC1, cC2, cC3 = st.columns(3)
-        cC1.metric("最近 cron 推播", cron.get("last_cron_ago", "—"))
+        cC1.metric("最近 cron 跑過", cron.get("last_cron_ago", "—"))
         cC2.metric("最近 dashboard 開啟", cron.get("last_ping_ago", "—"))
         cC3.metric("狀態", cron.get("status", "—"))
         if cron.get("is_within_window"):
