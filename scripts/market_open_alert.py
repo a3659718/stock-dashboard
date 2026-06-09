@@ -191,6 +191,13 @@ def main() -> int:
     if market == "us":
         market = "us_open"
 
+    # 心跳: cron 每次啟動都記 (給 system_health 判定 cron 是否健康)
+    try:
+        import system_health as _sh_hb
+        _sh_hb.record_cron_run(market)
+    except Exception as _hbe:
+        print(f"[heartbeat] record_cron_run fail (non-fatal): {_hbe}", flush=True)
+
     # === 假日檢查 ===
     try:
         import holiday_check
@@ -1195,4 +1202,5 @@ def main() -> int:
     return 0
 
 
-if __name__ == "__main__":    sys.exit(main())
+if __name__ == "__main__":
+    sys.exit(main())
