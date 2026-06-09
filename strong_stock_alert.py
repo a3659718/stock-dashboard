@@ -499,6 +499,15 @@ def check_and_push_intraday_strong() -> Optional[Dict]:
         return {"triggered": False, "reason": "no_picks"}
 
     msg = _fmt_intraday_strong_msg(picks)
+    # 推播末段加歷史績效
+    try:
+        import signal_tracker as _st
+        perf = _st.fmt_compact_perf("intraday_strong_stock", lookback_days=30)
+        if perf:
+            msg = msg + "\n\n" + perf
+    except Exception:
+        pass
+
     try:
         import notifier
         ok, info = notifier.send_message(msg, disable_preview=True)
@@ -510,6 +519,12 @@ def check_and_push_intraday_strong() -> Optional[Dict]:
                 watchlist_store.save_monitor_state(state)
             except Exception:
                 pass
+            try:
+                import signal_tracker as _st2
+                _st2.record_batch("intraday_strong_stock", picks,
+                                   evaluate_after_days=5, expected_direction="up")
+            except Exception as _re:
+                print(f"[intraday_strong] record_batch failed: {_re}", flush=True)
         return {"triggered": True, "n_picks": len(picks), "sent": ok}
     except Exception as e:
         print(f"[intraday_strong] notifier 失敗: {e}", flush=True)

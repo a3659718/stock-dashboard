@@ -213,6 +213,16 @@ def build_post_market_msg() -> str:
                 f"  {tag} <code>{sid}</code> {ld.get('current', 0):,.2f} <b>{pct:+.2f}%</b>"
             )
         lines.append("")
+    # === 新增: 今日決策摘要 (微台/台指期操作專用) ===
+    try:
+        decision = _build_decision_recap(twii, sectors, breadth, leaders)
+        if decision:
+            lines.append("━━━━━━━ 🎯 今日決策摘要 ━━━━━━━")
+            lines.append(decision)
+            lines.append("")
+    except Exception as _de:
+        print(f"[post_market] decision_recap fail: {_de}", flush=True)
+
     # Gemini advice
     gem = _gemini_next_day_advice(twii, sectors, breadth, leaders)
     if gem:
@@ -221,3 +231,66 @@ def build_post_market_msg() -> str:
         lines.append("")
     lines.append("<i>※ 盤後總結, 用於規劃隔日策略. 留意美股隔夜變化.</i>")
     return _truncate_tg_msg("\n".join(lines).rstrip())
+
+
+def _html_esc(s) -> str:
+    if s is None:
+        return ""
+    import html
+    return html.escape(str(s), quote=False)
+
+
+def _build_decision_recap(twii: Dict, sectors: Dict, breadth: Dict, leaders: List) -> str:
+    """產出「今日該做的 1-2 筆」+「明日方向」. 紀律專用."""
+    lines = []
+    pct = twii.get("pct_vs_prev", 0) if twii else 0
+    range_pct = twii.get("range_pct", 0) if twii else 0
+    if pct >= 1.0:
+        market_today = f"🟢 今日大漲 {pct:+.2f}% (振幅 {range_pct:.2f}%)"
+    elif pct >= 0.3:
+        market_today = f"🟢 今日偏多 {pct:+.2f}%"
+    elif pct <= -1.0:
+        market_today = f"🔴 今日大跌 {pct:+.2f}% (振幅 {range_pct:.2f}%)"
+    elif pct <= -0.3:
+        market_today = f"🔴 今日偏空 {pct:+.2f}%"
+    else:
+        market_today = f"⚪ 今日盤整 {pct:+.2f}% (振幅 {range_pct:.2f}%)"
+    lines.append(f"<b>大盤</b>: {market_today}")
+
+    actions = []
+    if sectors.get("top3"):
+        top_s = sectors["top3"][0]
+        if top_s["avg"] >= 1.5:
+            actions.append(
+                f"🟢 <b>多單機會</b>: 強勢族群「{_html_esc(top_s['sector'])}」"
+                f"均 {top_s['avg']:+.2f}% (上漲 {top_s['up_ratio']:.0f}%), "
+                f"等回測 5MA 接, 停損 -3%, 目標 +5%"
+            )
+    if sectors.get("bot3"):
+        bot_s = sectors["bot3"][0]
+        if bot_s["avg"] <= -1.5:
+            actions.append(
+                f"🔴 <b>空單機會</b>: 弱勢族群「{_html_esc(bot_s['sector'])}」"
+                f"均 {bot_s['avg']:+.2f}%, 反彈到 5MA 短空, 停損 +3%, 目標 -5%"
+            )
+    if not actions:
+        actions.append("⚪ 今日無明確機會, 觀望為佳")
+    lines.append("")
+    lines.append("<b>📌 今日該做的 1-2 筆</b> (微台/台指期參考)")
+    for a in actions[:2]:
+        lines.append(f"  {a}")
+
+    lines.append("")
+    lines.append("<b>🔮 明日方向</b>")
+    if pct >= 1.0 and range_pct <= 2.0:
+        lines.append("  續強機率高, 但留意美股隔夜是否拉回, 持倉可抱不動")
+    elif pct <= -1.0 and range_pct >= 2.0:
+        lines.append("  恐慌賣壓未止, 明日開盤觀察是否止穩, 不急著進場")
+    elif abs(pct) < 0.3:
+        lines.append("  盤整待變, 明日看美股 + 籌碼面 (08:30 推播) 再決定方向")
+    else:
+        lines.append("  順勢操作, 但勿全押, 留意明日盤前外資籌碼變化")
+
+    lines.append("")
+    lines.append("<i>⚠️ 紀律: 一天最多 1-2 筆, 嚴守停損, 不追高不殺低</i>")
+    return "\n".join(lines)

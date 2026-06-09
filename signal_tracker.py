@@ -356,6 +356,54 @@ def fmt_accuracy_block(signal_types: Optional[List[str]] = None,
     return "\n".join([f"<b>近 {lookback_days} 天訊號表現</b>"] + lines)
 
 
+
+def fmt_compact_perf(signal_type: str, lookback_days: int = 30,
+                       min_n: int = 5) -> str:
+    """單一 signal_type 的精簡績效一行 — 給推播末段塞.
+
+    格式: "📊 歷史 30d 勝率 65% (n=23)"
+    """
+    s = accuracy_summary(signal_type, lookback_days=lookback_days)
+    n = s.get("n") or 0
+    pct = s.get("pct")
+    if n == 0:
+        return ""
+    if n < min_n or pct is None:
+        return f"📊 歷史表現: 樣本累積中 ({n} 筆)"
+    mark = "🟢" if pct >= 60 else ("🟡" if pct >= 40 else "🔴")
+    return f"📊 {mark} 歷史 {lookback_days}d 勝率 {pct:.0f}% (n={n})"
+
+
+def record_batch(signal_type: str, items: List[Dict],
+                  evaluate_after_days: int = 5,
+                  expected_direction: str = "up") -> int:
+    """批次 record_signal — 給推播一次推 N 個個股時用."""
+    if not items:
+        return 0
+    added = 0
+    for it in items:
+        sid = str(it.get("stock_id") or it.get("symbol", "")).strip()
+        if not sid:
+            continue
+        name = it.get("name", "")
+        price = it.get("current") or it.get("predicted_price") or it.get("price")
+        try:
+            price_f = float(price) if price is not None else None
+        except (TypeError, ValueError):
+            price_f = None
+        rid = record_signal(
+            signal_type=signal_type,
+            stock_id=sid,
+            name=name,
+            predicted_price=price_f,
+            expected_direction=expected_direction,
+            evaluate_after_days=evaluate_after_days,
+        )
+        if rid:
+            added += 1
+    return added
+
+
 def reset_all() -> int:
     """清空所有訊號紀錄. 回原本筆數."""
     def _mutate(records):
