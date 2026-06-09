@@ -416,6 +416,18 @@ def main() -> int:
             traceback.print_exc()
 
 
+    # === 🎯 美股走勢預測 (us_open 前 30 min, daily_outlook_advisor) ===
+    if market == "us_open":
+        try:
+            import daily_outlook_advisor as _doa_us
+            us_outlook = _doa_us.predict_us_outlook()
+            us_ot_msg = _doa_us.format_outlook_for_tg(us_outlook)
+            if us_ot_msg:
+                ok_uo, _ = notifier.send_message(us_ot_msg, disable_preview=True)
+                print(f"[us outlook] sent ok={ok_uo}", flush=True)
+        except Exception as _ue:
+            print(f"[us outlook] fail: {_ue}", flush=True)
+
     # === 🎲 投機股精選 (週三 us_open 推 1 次/週, 避免 cluttering) ===
     if market == "us_open":
         try:
@@ -1003,6 +1015,18 @@ def main() -> int:
         if sc_result:
             print(f"[intraday weak] {sc_result}", flush=True)
 
+        # === 新增: 條件觸發 (watchlist_triggers) ===
+        try:
+            import watchlist_triggers as _wt
+            fired = _wt.check_triggers() or []
+            if fired:
+                wt_msg = _wt.fmt_trigger_alerts(fired)
+                if wt_msg:
+                    ok_wt, _ = notifier.send_message(wt_msg, disable_preview=True)
+                    print(f"[watchlist_triggers] {len(fired)} fired, sent ok={ok_wt}", flush=True)
+        except Exception as _wte:
+            print(f"[watchlist_triggers] check failed (non-fatal): {_wte}", flush=True)
+
         # === 4: 持倉 intraday 風險警報 (今日 ≤ -3% / 從早高回吐 ≥ 5% / 跌破停損) ===
         holdings_intraday_alerts = []
         try:
@@ -1152,7 +1176,6 @@ def main() -> int:
                     print(f"[super combined] TG #{i} result: ok={ok_c} info={info_c}", flush=True)
                     if not ok_c:
                         all_ok = False
-                # 只有「全部 send 成功」才 mark state
                 if all_ok:
                     if strong_sector_alerts:
                         try:
@@ -1172,5 +1195,4 @@ def main() -> int:
     return 0
 
 
-if __name__ == "__main__":
-    sys.exit(main())
+if __name__ == "__main__":    sys.exit(main())

@@ -421,7 +421,7 @@ def _build_from_upside(p: Dict) -> Optional[Dict]:
     if label_zh:
         reasons.insert(0, f"[{label_zh}] upside ~{p.get('upside_pct', '?')}%")
 
-    return {
+    result = {
         "stock_id": sid,
         "name": p.get("name", ""),
         "theme": label_zh,
@@ -434,8 +434,18 @@ def _build_from_upside(p: Dict) -> Optional[Dict]:
         "reasons": reasons,
         "warnings": warnings,
         "source": f"upside_{cat}",
-        "_upside_score": p.get("score", 0),  # 給 _score_pick 加權用
+        "_upside_score": p.get("score", 0),
     }
+    # 新增: entry_timing 3 種進場模式
+    try:
+        import entry_timing as _et
+        timing = _et.determine_entry_mode(sid, market="TW")
+        if timing and timing.get("mode") != "—":
+            result["entry_timing"] = timing
+            result["entry_timing_label"] = _et.fmt_entry_mode(timing)
+    except Exception:
+        pass
+    return result
 
 
 def _build_from_potential(p: Dict, parent_data: Dict) -> Optional[Dict]:
@@ -678,12 +688,12 @@ def fmt_actionable_picks_tg(picks: List[Dict]) -> str:
             lines.append(f"   目標 {_esc(p['target'])} · 停損 {_esc(p.get('stop','—'))}")
         if p.get("win_prob"):
             lines.append(f"   勝率 {_esc(p['win_prob'])} · 持有 {_esc(p.get('hold_period','—'))}")
+        if p.get("win_prob"):
+            lines.append(f"   勝率 {_esc(p['win_prob'])} · 持有 {_esc(p.get('hold_period','—'))}")
         if p.get("entry_label"):
-            lines.append(f"   {p.get('entry_emoji','')} 入場標籤: {p.get('entry_label')} (分數 {p.get('entry_score','—')})")
-        reasons = p.get("reasons") or []
-        for r in reasons[:3]:
-            lines.append(f"   • {_esc(r)}")
-        warnings = p.get("warnings") or []
-        for w in warnings[:2]:
-            lines.append(f"   ⚠️ {_esc(w)}")
-    return "\n".join(lines)
+            lines.append(f"   {p.get('entry_emoji','')} 入場: {_esc(p['entry_label'])}")
+        if p.get("entry_timing_label"):
+            lines.append(f"   {p['entry_timing_label']}")
+        for w in (p.get("warnings") or [])[:2]:
+            lines.append(f"   {_esc(w)}")
+    return "\n".join(lines).rstrip()

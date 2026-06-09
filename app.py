@@ -909,6 +909,40 @@ with tab_wl:
     import watchlist_store
     import watchlist_alerts
 
+    # 條件觸發 expander (整合 watchlist_triggers)
+    with st.expander("⚡ 條件觸發 (穿價/MA/KD/MACD)", expanded=False):
+        try:
+            import watchlist_triggers as _wt
+            st.caption("可設條件: 跌破 1000 / 站上 20MA / KD 黃金交叉")
+            ctr = st.columns([2, 2, 2, 1])
+            wt_sid = ctr[0].text_input("代號", key="wt_sid_in")
+            wt_type = ctr[1].selectbox("條件", [
+                "price_below", "price_above",
+                "ma_cross_up", "ma_cross_down",
+                "kd_golden_cross", "kd_death_cross",
+                "macd_golden_cross", "macd_death_cross",
+            ], key="wt_type_in")
+            wt_val = ctr[2].number_input("值", min_value=0.0, value=0.0, key="wt_val_in")
+            if ctr[3].button("加", key="wt_add_btn"):
+                if wt_sid.strip():
+                    _wt.add_trigger(wt_sid.strip().upper(), wt_type,
+                                     value=wt_val if wt_val > 0 else None)
+                    st.success(f"已加: {wt_sid} {wt_type}")
+                    st.rerun()
+            triggers = _wt.list_triggers() or []
+            if triggers:
+                for t in triggers:
+                    tid = t.get("id") or t.get("trigger_id")
+                    c1, c2 = st.columns([5, 1])
+                    c1.text(f"{t.get('stock_id')} · {t.get('type')} · 值 {t.get('value')}")
+                    if c2.button("✕", key=f"wt_del_{tid}"):
+                        _wt.remove_trigger(tid)
+                        st.rerun()
+            else:
+                st.info("尚未設任何條件觸發")
+        except Exception as _wte:
+            st.warning(f"watchlist_triggers 載入失敗: {_wte}")
+
     # 載入現有清單 + monitor state (用來顯示目前 base / 累計%)
     current_wl = watchlist_store.load_watchlist()
     _wl_state = watchlist_store.load_monitor_state().get("watchlist_alerts", {})
@@ -2374,9 +2408,19 @@ with tab_stock:
                     else:
                         st.write("⏭️ 步驟 3/4: 跳過 AI (未勾選或無 GEMINI key)")
 
-                    # 步驟 4/4
-                    _progress.progress(95, text=f"📋 步驟 4/4 {sid} - 渲染結果...")
-                    st.write("📋 步驟 4/4: 渲染結果...")
+                    # 步驟 4/4: Ensemble vote (6 策略投票)
+                    _progress.progress(90, text=f"🗳️ 步驟 4/4 {sid} - 6 策略投票...")
+                    st.write("🗳️ 步驟 4/4: 跑 6 策略 ensemble vote...")
+                    try:
+                        import ensemble_voter as _ev_deep
+                        vote = _ev_deep.vote_for_stock(sid)
+                        st.session_state[f"ensemble_{sid}"] = vote
+                        st.write(f"✅ Ensemble: {vote['verdict_emoji']} {vote['verdict']} "
+                                  f"({vote['buy_votes']}多 / {vote['hold_votes']}中 / {vote['avoid_votes']}空)")
+                    except Exception as _eve:
+                        st.warning(f"⚠️ Ensemble vote 失敗 (跳過): {_eve}")
+                    _progress.progress(95, text=f"📋 渲染結果...")
+                    st.write("📋 渲染結果...")
                     status.update(label=f"✅ {sid} 完整分析完成", state="complete", expanded=False)
             _progress.progress(100, text=f"✅ {sid} 完成")
             import time as _t
@@ -2392,6 +2436,22 @@ with tab_stock:
         full = last_stock["full"]; ind = last_stock["ind"]
         hits = last_stock["hits"]; score = last_stock["score"]; reasons = last_stock["reasons"]
         sid = last_stock["sid"]
+
+        # Ensemble vote 區塊 (深度分析跑完才有)
+        vote = st.session_state.get(f"ensemble_{sid}")
+        if vote:
+            st.markdown("### 🗳️ 6 策略 Ensemble Vote")
+            cV1, cV2, cV3 = st.columns(3)
+            cV1.metric("綜合", f"{vote.get('verdict_emoji','')} {vote.get('verdict','—')}")
+            cV2.metric("買/中/賣", f"{vote.get('buy_votes',0)} / {vote.get('hold_votes',0)} / {vote.get('avoid_votes',0)}")
+            cV3.metric("加權分", f"買 {vote.get('buy_weight',0)} / 賣 {vote.get('avoid_weight',0)}")
+            st.caption(vote.get("summary", ""))
+            with st.expander("策略細節 (6 條)", expanded=False):
+                for d in vote.get("details", []):
+                    v = d.get("vote", "—")
+                    mark = {"BUY": "✅", "HOLD": "🟡", "AVOID": "❌", "—": "·"}.get(v, "·")
+                    st.markdown(f"{mark} **{d.get('strategy','')}**: {d.get('reason','')}")
+            st.divider()
 
         # 標題列
         cN1, cN2, cN3, cN4 = st.columns(4)
@@ -3429,57 +3489,43 @@ with tab_entry:
                 st.markdown(f"#### 🌐 相對大盤 RS = **{rs:+.2f}pp**  {rs_emoji}")
 
             # === 基本面 ===
-            st.markdown("#### 💰 基本面")
-            cF1, cF2, cF3 = st.columns(3)
-            cF1.metric("PE", fund.get("pe_label") or "—")
-            if fund.get("forward_pe"):
-                cF2.metric("Forward PE", f"{fund['forward_pe']:.1f}")
-            if fund.get("peg"):
-                cF3.metric("PEG", f"{fund['peg']:.2f}")
-            cG1, cG2 = st.columns(2)
-            if fund.get("eps") is not None:
-                cG1.metric("EPS", fund["eps"])
-            if fund.get("eps_yoy_pct") is not None:
-                cG2.metric("EPS YoY", f"{fund['eps_yoy_pct']:+.1f}%")
-            if fund.get("revenue_yoy_pct") is not None:
-                st.caption(f"營收 YoY: {fund['revenue_yoy_pct']:+.1f}%")
-            if fund.get("earnings_date"):
-                st.caption(f"📅 下次財報: **{fund['earnings_date']}**")
-            if fund.get("marketcap") and fund["marketcap"] != "—":
-                st.caption(f"市值: {fund['marketcap']}")
-            if fund.get("industry"):
-                st.caption(f"產業: {fund['industry']}")
+            st.markdown("---")
+            st.markdown("### 📊 基本面")
+            fund_data = ev_result.get("fundamentals", {}) if "ev_result" in dir() else {}
+            if fund_data:
+                f1, f2, f3 = st.columns(3)
+                f1.metric("PE", fund_data.get("pe", "—"))
+                f2.metric("EPS", fund_data.get("eps", "—"))
+                f3.metric("市值", fund_data.get("market_cap_str", "—"))
+            else:
+                st.caption("(基本面資料未抓取)")
 
-            ai_summary = result.get("ai_summary")
-            if ai_summary:
-                st.divider()
-                st.markdown("#### 🤖 Gemini 結論")
-                st.info(ai_summary)
-
-    st.caption("⚠️ 評估僅供參考, 不構成投資建議. 請自行做研究與風控.")
+            # === 持倉建議 ===
+            st.markdown("---")
+            st.markdown("### 💼 持倉建議")
+            pa = ev_result.get("position_action", "—") if "ev_result" in dir() else "—"
+            pa_detail = ev_result.get("position_action_detail", "") if "ev_result" in dir() else ""
+            st.markdown(f"**動作**: {pa}")
+            if pa_detail:
+                st.caption(pa_detail)
 
 
-# =============================================================================
-# Tab — 🩺 系統健康度 (Admin Dashboard)
-# =============================================================================
+# ===== 🩺 系統健康 =====
 with tab_health:
+    st.subheader("🩺 系統健康度")
     import system_health
-    st.subheader("🩺 系統健康度 (Admin Dashboard)")
-    st.caption("一頁看各 alert 模組狀態 / FinMind+Gemini 額度 / 推播紀錄 / Cron 活著嗎。")
-
-    # 🆕 自動 ping (用戶開頁時 record 一筆 DASHBOARD_PING, 建立時間錨)
-    # 5 min TTL: 用戶長時間停留時 ping 仍會 refresh, last_ping_ago 才不會 stale
-    import time as _t_health
-    _last_ping = st.session_state.get("_health_last_ping_ts", 0)
-    if _t_health.time() - _last_ping > 300:  # 5 min
-        try:
+    # ping 自動 (有 dashboard 開啟就 record)
+    try:
+        last_ping_ts = st.session_state.get("_health_last_ping_ts")
+        import time as _time
+        now_ts = _time.time()
+        if not last_ping_ts or (now_ts - last_ping_ts) > 300:  # 5 min throttle
             system_health.record_dashboard_open()
-            st.session_state["_health_last_ping_ts"] = _t_health.time()
-        except Exception:
-            pass
+            st.session_state["_health_last_ping_ts"] = now_ts
+    except Exception:
+        pass
 
     if st.button("🔄 重新整理", key="health_refresh", use_container_width=False):
-        # 重新整理時也 ping (reset ts 讓 next rerun 立即 ping)
         st.session_state.pop("_health_last_ping_ts", None)
         st.rerun()
 

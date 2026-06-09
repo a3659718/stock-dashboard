@@ -436,4 +436,4 @@ def summarize_for_gemini(snap: Dict) -> str:
         parts.append(f"小台散戶淨倉 {rtm['retail_net']:+,} 口")
     if snap.get("bias_label"):
         parts.append(snap["bias_label"].replace("🟢 ", "").replace("🔴 ", "").replace("⚪ ", ""))
-    return " | "
+    return " | ".join(parts)

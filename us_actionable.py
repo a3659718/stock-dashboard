@@ -276,6 +276,16 @@ def _enrich_pick(row: Dict) -> Dict:
         elif pe > 50:
             pick["warnings"].append(f"⚠️ PE {pe:.1f} (估值偏高, 留意修正)")
 
+    # 新增: entry_timing 3 種進場模式
+    try:
+        import entry_timing as _et
+        timing = _et.determine_entry_mode(sym, market="US")
+        if timing and timing.get("mode") != "—":
+            pick["entry_timing"] = timing
+            pick["entry_timing_label"] = _et.fmt_entry_mode(timing)
+    except Exception:
+        pass
+
     return pick
 
 
@@ -314,6 +324,7 @@ def compute_us_actionable_picks(top_n: int = 10, min_score: int = 65,
             all_rows.append(r)
 
     enriched = []
+    enriched = []
     for r in all_rows:
         try:
             p = _enrich_pick(r)
@@ -322,6 +333,5 @@ def compute_us_actionable_picks(top_n: int = 10, min_score: int = 65,
         except Exception as _e:
             print(f"[us_actionable] enrich fail {r.get('symbol')}: {_e}", flush=True)
 
-    # 依 _adj_score (含動能) 排序
     enriched.sort(key=lambda x: -float(x.get("_adj_score") or 0))
     return enriched[:top_n]
