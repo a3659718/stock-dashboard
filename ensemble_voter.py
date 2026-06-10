@@ -63,7 +63,15 @@ def _vote_minervini(stock_id: str, market: str) -> Dict:
     out = {"strategy": "Minervini SEPA+VCP", "vote": "—", "reason": ""}
     try:
         import minervini_screener as mv
-        passed_n = mv.count_trend_conditions(stock_id, market=market)
+        # Bug fix: 原本呼叫 mv.count_trend_conditions 不存在, 改用 check_trend_template
+        sym = f"{stock_id}.TW" if market == "TW" else stock_id
+        result = mv.check_trend_template(sym)
+        passed_n = result.get("pass_n") if result else None
+        if passed_n is None or passed_n == 0:
+            # 嘗試 .TWO (上櫃)
+            if market == "TW":
+                result = mv.check_trend_template(f"{stock_id}.TWO")
+                passed_n = result.get("pass_n") if result else None
         if passed_n is None:
             return out
         if passed_n >= 7:
@@ -151,20 +159,21 @@ def _vote_buffett(stock_id: str, market: str) -> Dict:
         return out
     try:
         import buffett_quality_filter as bf
-        result = bf.evaluate_quality(stock_id)
+        # Bug fix: 原本呼叫 bf.evaluate_quality 不存在, 改用 check_quality
+        result = bf.check_quality(stock_id)
         if not result:
             return out
-        grade = result.get("grade")  # 🟢 / 🟡 / 🔴
-        score = result.get("score", 0)
-        if grade == "🟢" or score >= 70:
+        score = result.get("score", 0) or 0
+        # buffett score 0-20 範圍 (5 條件 × 4-5 分)
+        if score >= 12:
             out["vote"] = "BUY"
-            out["reason"] = f"Buffett 級 (score {score})"
-        elif grade == "🟡" or score >= 50:
+            out["reason"] = f"Buffett 級 (score {score}/20)"
+        elif score >= 6:
             out["vote"] = "HOLD"
-            out["reason"] = f"中品質 (score {score})"
+            out["reason"] = f"中品質 (score {score}/20)"
         else:
             out["vote"] = "AVOID"
-            out["reason"] = f"品質差 (score {score})"
+            out["reason"] = f"品質差 (score {score}/20)"
     except Exception as e:
         out["reason"] = f"err: {e}"[:60]
     return out

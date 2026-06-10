@@ -322,13 +322,14 @@ def _fundamentals(symbol: str, market: str) -> Dict:
                 out["pe"] = pe_data.get("stock_pe")
                 out["industry"] = pe_data.get("industry")
                 out["pe_label"] = pe_data.get("valuation_label", "—")
-            # EPS YoY 從 financial summary 抓
+            # EPS YoY 從 fundamental_metrics 抓
+            # Bug fix: compute_financial_summary 不存在, 改用 fetch_fundamental_metrics
             try:
-                fin = sda.compute_financial_summary(symbol)
+                fin = sda.fetch_fundamental_metrics(symbol)
                 if fin:
-                    out["eps"] = fin.get("latest_eps")
-                    out["eps_yoy_pct"] = fin.get("eps_yoy_pct")
-                    out["revenue_yoy_pct"] = fin.get("revenue_yoy_pct")
+                    out["eps"] = fin.get("eps_latest") or fin.get("latest_eps")
+                    out["eps_yoy_pct"] = fin.get("eps_yoy_pct") or fin.get("eps_yoy")
+                    out["revenue_yoy_pct"] = fin.get("revenue_yoy_pct") or fin.get("revenue_yoy")
             except Exception:
                 pass
         except Exception as e:

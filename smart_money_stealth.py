@@ -49,48 +49,49 @@ def _detect_consolidation(closes, lookback: int = 10) -> Optional[float]:
 
 
 def _chip_signal(stock_id: str) -> Dict:
-    """抓籌碼面: 外資/投信連續買超 + 主力券商 + 借券."""
+    """抓籌碼面: 外資/投信連續買超 + 借券回補.
+
+    Bug fix: 原本呼叫 chip_analyzer.get_institutional_summary / get_top_brokers
+    都不存在, 走 except 永遠空 → smart_money_stealth 籌碼維度 0 分.
+    改用 chip_analyzer.fetch_chip_data (真實 API), 解析 institutional dict.
+    """
     out = {
-        "foreign_streak_days": 0,    # 外資連續買超天數
-        "foreign_5d_lots": 0,        # 外資 5 日累計 (張)
+        "foreign_streak_days": 0,
+        "foreign_5d_lots": 0,
         "trust_streak_days": 0,
-        "main_broker_buy": False,    # 主力券商 (前 5 大) 是否買超
-        "lend_short_decrease": False,  # 借券賣出減少 (空單回補)
+        "trust_5d_lots": 0,
+        "main_broker_buy": False,
+        "lend_short_decrease": False,
     }
     try:
         import chip_analyzer as ca
-        # 外資+投信 5 日累計
-        ins = ca.get_institutional_summary(stock_id, days=5)
-        if ins:
-            f5 = ins.get("foreign_5d_net", 0) or 0
-            t5 = ins.get("trust_5d_net", 0) or 0
-            out["foreign_5d_lots"] = int(f5)
-            f_streak = ins.get("foreign_consecutive_days", 0) or 0
-            t_streak = ins.get("trust_consecutive_days", 0) or 0
-            out["foreign_streak_days"] = int(f_streak)
-            out["trust_streak_days"] = int(t_streak)
-    except Exception:
-        pass
+        chip_data = ca.fetch_chip_data(stock_id, days=10)
+        inst = chip_data.get("institutional", {}) if chip_data else {}
+        # FinMind name: "Foreign_Investor" / "Investment_Trust" / "Dealer"
+        # 也可能是中文 "外資" / "投信" / "自營商"
+        for fkey in ["Foreign_Investor", "外資", "Foreign_Dealer_Self"]:
+            if fkey in inst:
+                v = inst[fkey]
+                out["foreign_5d_lots"] = int(v.get("5d_total", 0) or 0)
+                out["foreign_streak_days"] = int(v.get("consecutive_days", 0) or 0)
+                break
+        for tkey in ["Investment_Trust", "投信"]:
+            if tkey in inst:
+                v = inst[tkey]
+                out["trust_5d_lots"] = int(v.get("5d_total", 0) or 0)
+                out["trust_streak_days"] = int(v.get("consecutive_days", 0) or 0)
+                break
+    except Exception as e:
+        print(f"[smart_stealth] chip_data fail {stock_id}: {e}", flush=True)
 
+    # 借券回補 (TaiwanStockSecuritiesLending) — 法人空單回補偏多訊號
     try:
-        import chip_analyzer as ca
-        # 主力券商買賣超
-        brokers = ca.get_top_brokers(stock_id, top_n=5, days=5) or {}
-        buy_top = brokers.get("buy_top") or []
-        if buy_top and len(buy_top) >= 1:
-            out["main_broker_buy"] = True
-    except Exception:
-        pass
-
-    try:
-        # 借券賣出趨勢 — 從 short_interest_alert 借用
         import institutional_positioning as _ip
         rows = _ip._safe_finmind_data("TaiwanStockSecuritiesLending", days=10)
         if rows:
             stock_rows = [r for r in rows if str(r.get("stock_id", "")) == str(stock_id)]
             if len(stock_rows) >= 3:
                 sorted_rows = sorted(stock_rows, key=lambda x: x.get("date", ""))
-                # 比較最近 2 日 vs 前 3 日, 若下降 = 回補
                 recent_sum = sum(float(r.get("short_sale_balance", 0) or 0) for r in sorted_rows[-2:])
                 prev_sum = sum(float(r.get("short_sale_balance", 0) or 0) for r in sorted_rows[-5:-2])
                 if prev_sum > 0 and recent_sum < prev_sum * 0.85:
@@ -314,6 +315,8 @@ def fmt_smart_stealth_msg(picks: List[Dict]) -> str:
             lines.append(f"   ✓ {_esc(r)}")
         # 進出場價
         lines.append(
+            f"   📍 進場 {p.get('entry_low', '—'):.2f}-{p.get('entry_high', '—'):.2f} · "
+            f"停損 {p.get('stop_loss', '—'):.2f} · "
             f"   📍 進場 {p.get('entry_low', '—'):.2f}-{p.get('entry_high', '—'):.2f} · "
             f"停損 {p.get('stop_loss', '—'):.2f} · "
             f"目標 {p.get('target_short', '—'):.2f}/{p.get('target_mid', '—'):.2f} · "
