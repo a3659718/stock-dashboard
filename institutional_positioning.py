@@ -336,7 +336,7 @@ def fetch_institutional_snapshot() -> Dict:
         "major_traders": _fetch_major_traders(),
         "basis": _fetch_futures_basis(),
         "retail_mtx": _fetch_retail_mtx(),
-        "fetched_at": dt.datetime.utcnow().isoformat(),
+        "fetched_at": dt.datetime.now(timezone.utc).isoformat(),
     }
     # 綜合 bias
     bias_score = 0

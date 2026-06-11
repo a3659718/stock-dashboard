@@ -159,6 +159,14 @@ def _gemini_next_day_advice(twii: Dict, sectors: Dict, breadth: Dict, leaders: L
 
 def build_post_market_msg() -> str:
     """TPE 16:00 盤後總結 TG 訊息."""
+    # Bug fix: 台股假日不該推 (內容會是前一交易日資料但講「今日」)
+    try:
+        import holiday_check
+        if holiday_check.is_market_closed_today("TW"):
+            return ""  # 空字串 = caller 不會 send
+    except Exception:
+        pass
+
     try:
         from notifier import _esc, _truncate_tg_msg
     except Exception:
@@ -223,6 +231,56 @@ def build_post_market_msg() -> str:
     except Exception as _de:
         print(f"[post_market] decision_recap fail: {_de}", flush=True)
 
+    # === 新增 (#8): 持倉 RSI 背離 → 只給「動作建議」, 不顯示指標細節 ===
+    try:
+        import rsi_divergence as _rd
+        divs = _rd.scan_holdings_for_divergence()
+        if divs:
+            bear = [d for d in divs if d.get("type") == "bearish"]
+            bull = [d for d in divs if d.get("type") == "bullish"]
+            if bear or bull:
+                lines.append("━━━━━━━ 🚨 持倉動作建議 ━━━━━━━")
+                for d in bear:
+                    sid = _esc(d.get("symbol", ""))
+                    nm = _esc(d.get("stock_name", ""))
+                    strength = d.get("strength", 1)
+                    if strength >= 2:
+                        lines.append(f"  ⚠️ <code>{sid}</code> {nm} <b>建議減碼</b> (動能衰竭)")
+                    else:
+                        lines.append(f"  🟡 <code>{sid}</code> {nm} <b>留意減碼</b> (動能轉弱)")
+                for d in bull:
+                    sid = _esc(d.get("symbol", ""))
+                    nm = _esc(d.get("stock_name", ""))
+                    strength = d.get("strength", 1)
+                    if strength >= 2:
+                        lines.append(f"  ✅ <code>{sid}</code> {nm} <b>反彈在即</b> (可加碼)")
+                    else:
+                        lines.append(f"  🔺 <code>{sid}</code> {nm} <b>可留意反彈</b>")
+                lines.append("")
+    except Exception as _re:
+        print(f"[post_market] rsi_divergence fail: {_re}", flush=True)
+
+    # === 新增 (#7): 組合風險檢查 — 若有持倉, 警示集中度 ===
+    try:
+        import portfolio_risk as _pr
+        risk = _pr.analyze_portfolio_risk()
+        if risk and risk.get("holdings_n", 0) > 0:
+            warns = risk.get("warnings", [])
+            # 過濾掉「分散度良好」(綠燈) — 只顯示有問題的
+            real_warns = [w for w in warns if "🔴" in w or "🟡" in w]
+            if real_warns:
+                lines.append("━━━━━━━ ⚠️ 組合風險檢查 ━━━━━━━")
+                for w in real_warns[:3]:
+                    lines.append(f"  {w}")
+                # 列前 2 大 sector
+                top_sectors = risk.get("sectors", [])[:2]
+                if top_sectors:
+                    parts = [f"{s['sector']} {s['weight_pct']:.0f}% ({s['n']}檔)" for s in top_sectors]
+                    lines.append(f"  📊 主要持倉: {' · '.join(parts)}")
+                lines.append("")
+    except Exception as _pe:
+        print(f"[post_market] portfolio_risk fail: {_pe}", flush=True)
+
     # Gemini advice
     gem = _gemini_next_day_advice(twii, sectors, breadth, leaders)
     if gem:
@@ -257,40 +315,41 @@ def _build_decision_recap(twii: Dict, sectors: Dict, breadth: Dict, leaders: Lis
         market_today = f"⚪ 今日盤整 {pct:+.2f}% (振幅 {range_pct:.2f}%)"
     lines.append(f"<b>大盤</b>: {market_today}")
 
-    actions = []
-    if sectors.get("top3"):
-        top_s = sectors["top3"][0]
-        if top_s["avg"] >= 1.5:
-            actions.append(
-                f"🟢 <b>多單機會</b>: 強勢族群「{_html_esc(top_s['sector'])}」"
-                f"均 {top_s['avg']:+.2f}% (上漲 {top_s['up_ratio']:.0f}%), "
-                f"等回測 5MA 接, 停損 -3%, 目標 +5%"
-            )
-    if sectors.get("bot3"):
-        bot_s = sectors["bot3"][0]
-        if bot_s["avg"] <= -1.5:
-            actions.append(
-                f"🔴 <b>空單機會</b>: 弱勢族群「{_html_esc(bot_s['sector'])}」"
-                f"均 {bot_s['avg']:+.2f}%, 反彈到 5MA 短空, 停損 +3%, 目標 -5%"
-            )
-    if not actions:
-        actions.append("⚪ 今日無明確機會, 觀望為佳")
-    lines.append("")
-    lines.append("<b>📌 今日該做的 1-2 筆</b> (微台/台指期參考)")
-    for a in actions[:2]:
-        lines.append(f"  {a}")
+    # 強弱族群
+    if sectors:
+        top3 = sectors.get("top3") or []
+        bot3 = sectors.get("bot3") or []
+        if top3:
+            tops = ", ".join(f"{s['sector']} {s['avg']:+.2f}%" for s in top3[:3])
+            lines.append(f"<b>強族</b>: {tops}")
+        if bot3:
+            bots = ", ".join(f"{s['sector']} {s['avg']:+.2f}%" for s in bot3[:3])
+            lines.append(f"<b>弱族</b>: {bots}")
 
+    # 行動
+    lines.append("")
+    lines.append("<b>🎬 今日該做的</b>")
+    up_ratio = breadth.get("up_ratio_pct", 0) if breadth else 0
+    if pct >= 1.0 and up_ratio >= 60:
+        lines.append("  ✅ 順勢多單 (微台 / 強族龍頭), 上漲家數多, 多方有效")
+    elif pct <= -1.0 and up_ratio <= 40:
+        lines.append("  ✅ 順勢空單 (微台空 / 弱族領跌), 下跌家數多, 空方有效")
+    elif abs(pct) < 0.3 and range_pct < 1.0:
+        lines.append("  ⚪ 今日無明確機會, 觀望為佳")
+    else:
+        lines.append("  🟡 震盪日, 不追高不殺低, 等隔日方向明確再進場")
+
+    # 明日方向
     lines.append("")
     lines.append("<b>🔮 明日方向</b>")
-    if pct >= 1.0 and range_pct <= 2.0:
-        lines.append("  續強機率高, 但留意美股隔夜是否拉回, 持倉可抱不動")
-    elif pct <= -1.0 and range_pct >= 2.0:
-        lines.append("  恐慌賣壓未止, 明日開盤觀察是否止穩, 不急著進場")
-    elif abs(pct) < 0.3:
-        lines.append("  盤整待變, 明日看美股 + 籌碼面 (08:30 推播) 再決定方向")
+    if pct >= 1.0:
+        lines.append("  續勢機率高, 但留意美股是否同步漲")
+    elif pct <= -1.0:
+        lines.append("  接續弱勢, 留意美股是否轉強")
     else:
-        lines.append("  順勢操作, 但勿全押, 留意明日盤前外資籌碼變化")
+        lines.append("  盤整待變, 看美股 + 籌碼面再決定方向")
 
     lines.append("")
-    lines.append("<i>⚠️ 紀律: 一天最多 1-2 筆, 嚴守停損, 不追高不殺低</i>")
+    lines.append("<i>* 紀律: 一天最多 1-2 筆, 嚴守停損, 不追高不殺低</i>")
+
     return "\n".join(lines)

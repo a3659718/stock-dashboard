@@ -35,7 +35,7 @@ def check_market_surge() -> Optional[Dict]:
     surge_info = {trigger, twii_pct, sox_overnight_pct, message}
     """
     # 必須在台股 session 內 (09:00-13:30 TPE = UTC 01:00-05:30)
-    now_utc = dt.datetime.utcnow()
+    now_utc = dt.datetime.now(timezone.utc)
     h = now_utc.hour
     if h < 1 or h > 5:
         return None
@@ -216,6 +216,12 @@ def fmt_strong_alert_tg(surge_info: Dict, picks: List[Dict]) -> str:
             name_map = info.set_index("stock_id")["stock_name"].to_dict()
     except Exception:
         pass
+    # #6: 加入假反彈偵測
+    try:
+        import fake_rally_detector as _frd
+        picks = _frd.flag_fake_rally(picks)
+    except Exception:
+        pass
     for i, p in enumerate(picks, 1):
         sid = str(p.get("stock_id", ""))
         name = _esc(name_map.get(sid, ""))
@@ -223,10 +229,16 @@ def fmt_strong_alert_tg(surge_info: Dict, picks: List[Dict]) -> str:
         tp = p.get("today_pct", 0)
         vr = p.get("vol_ratio", 0)
         score = p.get("score", 0)
-        lines.append(
+        line = (
             f"{i}. <code>{_esc(sid)}</code> {name} · "
             f"{cur} <b>+{tp:.2f}%</b> · 強度 {score:.0f}"
         )
+        # 結論導向: 不顯示量比, 直接給「不追/觀望」
+        if p.get("rally_quality") == "fake_rally":
+            line += "  ⚠️ <i>不追 (弱反彈)</i>"
+        elif p.get("rally_quality") == "weak":
+            line += "  🟡 <i>觀望</i>"
+        lines.append(line)
     lines.append("")
     lines.append("<i>※ 為當下動能掃描, 非中長線推薦. 請自行控管風險.</i>")
     return "\n".join(lines)
@@ -397,8 +409,14 @@ def _fmt_intraday_strong_msg(picks: List[Dict]) -> str:
         return ""
     # Enrich with entry_label + 進出場價
     picks = _enrich_picks_with_entry_label(picks)
+    # Bug fix: 加假反彈標記
+    try:
+        import fake_rally_detector as _frd
+        picks = _frd.flag_fake_rally(picks)
+    except Exception:
+        pass
 
-    now_tpe = (dt.datetime.utcnow() + dt.timedelta(hours=8)).strftime("%H:%M")
+    now_tpe = (dt.datetime.now(timezone.utc) + dt.timedelta(hours=8)).strftime("%H:%M")
     lines = [
         f"💪 <b>盤中強勢股 Top {len(picks)}</b> · {now_tpe} TPE",
         "<i>(個股 ≥3% + 量比 ≥1.5x)</i>",
@@ -428,6 +446,9 @@ def _fmt_intraday_strong_msg(picks: List[Dict]) -> str:
         ea = p.get("entry_action", "—")
         # 主行
         el_tag = f" {em}{_esc(el)}" if el and el != "—" else ""
+        # 結論導向: 假反彈直接改 entry_label 為 "不追"
+        if p.get("rally_quality") == "fake_rally":
+            el_tag = " ⚠️不追(弱反彈)"
         lines.append(
             f"{i}. <code>{_esc(sid)}</code> {name} · "
             f"{cur:.2f} <b>+{tp:.2f}%</b> · 量比 {vr:.2f}x{el_tag}"
@@ -458,7 +479,7 @@ def check_and_push_intraday_strong() -> Optional[Dict]:
     回 {triggered, n_picks, sent, reason}
     """
     # 必須在台股 session 內 (09:00-13:30 TPE = UTC 01:00-05:30)
-    now_utc = dt.datetime.utcnow()
+    now_utc = dt.datetime.now(timezone.utc)
     if now_utc.hour < 1 or now_utc.hour > 5:
         return None
     # 假日 skip
@@ -498,6 +519,17 @@ def check_and_push_intraday_strong() -> Optional[Dict]:
     if not picks:
         return {"triggered": False, "reason": "no_picks"}
 
+    # B: 跨類去重 — 30 min 內已推同股不再推
+    try:
+        import alert_priority as _ap
+        original_n = len(picks)
+        picks = _ap.filter_dedup_picks(picks, "intraday_strong_stock", "up")
+        if not picks:
+            return {"triggered": False, "reason": "all_recently_pushed",
+                    "filtered_n": original_n}
+    except Exception:
+        pass
+
     msg = _fmt_intraday_strong_msg(picks)
     # 推播末段加歷史績效
     try:
@@ -525,7 +557,12 @@ def check_and_push_intraday_strong() -> Optional[Dict]:
                                    evaluate_after_days=5, expected_direction="up")
             except Exception as _re:
                 print(f"[intraday_strong] record_batch failed: {_re}", flush=True)
+            # B: mark 已推 (去重用)
+            try:
+                import alert_priority as _ap
+                _ap.mark_picks_pushed(picks, "intraday_strong_stock", "up")
+            except Exception:
+                pass
         return {"triggered": True, "n_picks": len(picks), "sent": ok}
     except Exception as e:
-        print(f"[intraday_strong] notifier 失敗: {e}", flush=True)
-        return {"triggered": True, "n_picks": len(picks), "sent": False}
+        return {"triggered": False, "err": str(e)}

@@ -47,7 +47,7 @@ STRONG_UP_RATIO_THRESHOLD = 0.75
 
 def _is_tw_session() -> bool:
     """台股交易時段 09:00-13:30 TPE = 01:00-05:30 UTC, 平日."""
-    now_utc = dt.datetime.utcnow()
+    now_utc = dt.datetime.now(timezone.utc)
     if now_utc.weekday() >= 5:
         return False
     cur = now_utc.hour + now_utc.minute / 60.0
@@ -109,7 +109,7 @@ def check_strong_sectors_intraday() -> List[Dict]:
     state = watchlist_store.load_monitor_state()
     ssa_state = state.setdefault("strong_sector_alert", {})
     today_str = dt.date.today().strftime("%Y-%m-%d")
-    now_utc = dt.datetime.utcnow()
+    now_utc = dt.datetime.now(timezone.utc)
 
     # 跨日 reset
     if ssa_state.get("date") != today_str:
@@ -271,7 +271,7 @@ def mark_sectors_sent(alerts: List[Dict]) -> None:
         for a in alerts:
             sectors_alerted.add(_dedup_key(a))
         ssa_state["sectors_alerted"] = sorted(sectors_alerted)
-        ssa_state["last_batch_at"] = dt.datetime.utcnow().isoformat()
+        ssa_state["last_batch_at"] = dt.datetime.now(timezone.utc).isoformat()
         state["strong_sector_alert"] = ssa_state
         watchlist_store.save_monitor_state(state)
     except Exception as e:

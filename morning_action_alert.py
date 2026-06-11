@@ -107,6 +107,14 @@ def _get_us_strong_sectors(top_n: int = 3) -> List[Dict]:
 
 def build_morning_action_msg(market: str = "TW") -> str:
     """建立早盤情境 TG 訊息 (HTML). 失敗回空字串."""
+    # Bug fix: 假日不該推
+    try:
+        import holiday_check
+        if holiday_check.is_market_closed_today(market):
+            return ""
+    except Exception:
+        pass
+
     try:
         from notifier import _esc
     except Exception:
@@ -219,9 +227,5 @@ def build_morning_action_msg(market: str = "TW") -> str:
             lines.append("")
             lines.append("💡 大盤弱開 → 觀望或佈局防禦類 (XLP/XLU)")
         msg = "\n".join(lines)
-        try:
-            from notifier import _truncate_tg_msg
-            return _truncate_tg_msg(msg)
-        except Exception:
-            return msg
+        return msg
     return ""

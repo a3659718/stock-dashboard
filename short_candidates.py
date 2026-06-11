@@ -166,7 +166,7 @@ def _fmt_intraday_weak_msg(picks: List[Dict]) -> str:
     if not picks:
         return ""
 
-    now_tpe = (dt.datetime.utcnow() + dt.timedelta(hours=8)).strftime("%H:%M")
+    now_tpe = (dt.datetime.now(timezone.utc) + dt.timedelta(hours=8)).strftime("%H:%M")
     lines = [
         f"📉 <b>盤中弱勢股 Top {len(picks)} (短空候選)</b> · {now_tpe} TPE",
         "<i>(跌幅 ≤ -3% + 量比 ≥ 1.5x, 放量下殺)</i>",
@@ -219,7 +219,7 @@ def check_and_push_intraday_weak() -> Optional[Dict]:
 
     Cooldown 90min, 一天最多 3 次, 台股 session 內.
     """
-    now_utc = dt.datetime.utcnow()
+    now_utc = dt.datetime.now(timezone.utc)
     if now_utc.hour < 1 or now_utc.hour > 5:
         return None
     try:

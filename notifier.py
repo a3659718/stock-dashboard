@@ -1302,6 +1302,49 @@ def fmt_us_close_analysis(data: dict) -> str:
             else:
                 lines.append(_esc(ln))
 
+    # === C: 美股持倉動作建議 (RSI 背離 + 組合風險) ===
+    try:
+        import rsi_divergence as _rd
+        divs = _rd.scan_holdings_for_divergence()
+        us_divs = [d for d in divs if d.get("market") == "US"]
+        if us_divs:
+            bear = [d for d in us_divs if d.get("type") == "bearish"]
+            bull = [d for d in us_divs if d.get("type") == "bullish"]
+            if bear or bull:
+                lines.append("")
+                lines.append("━━━━━━━ 🚨 美股持倉動作建議 ━━━━━━━")
+                for d in bear:
+                    sid = _esc(d.get("symbol", ""))
+                    strength = d.get("strength", 1)
+                    if strength >= 2:
+                        lines.append(f"  ⚠️ <code>{sid}</code> <b>建議減碼</b> (動能衰竭)")
+                    else:
+                        lines.append(f"  🟡 <code>{sid}</code> <b>留意減碼</b>")
+                for d in bull:
+                    sid = _esc(d.get("symbol", ""))
+                    strength = d.get("strength", 1)
+                    if strength >= 2:
+                        lines.append(f"  ✅ <code>{sid}</code> <b>反彈在即</b> (可加碼)")
+                    else:
+                        lines.append(f"  🔺 <code>{sid}</code> <b>留意反彈</b>")
+    except Exception as _ce:
+        print(f"[us_close] rsi_div fail: {_ce}", flush=True)
+
+    # === C: 組合風險 (只看 US 持倉) ===
+    try:
+        import portfolio_risk as _pr
+        risk = _pr.analyze_portfolio_risk()
+        if risk and risk.get("holdings_n", 0) > 0:
+            warns = risk.get("warnings", [])
+            real_warns = [w for w in warns if "🔴" in w or "🟡" in w]
+            if real_warns:
+                lines.append("")
+                lines.append("━━━━━━━ ⚠️ 組合風險 ━━━━━━━")
+                for w in real_warns[:3]:
+                    lines.append(f"  {w}")
+    except Exception as _pe:
+        print(f"[us_close] portfolio_risk fail: {_pe}", flush=True)
+
     # G7 fix: byte-length truncation (取代舊的 char-based len() 檢查)
     return _truncate_tg_msg("\n".join(lines))
 

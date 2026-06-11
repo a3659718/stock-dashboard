@@ -291,7 +291,7 @@ def fmt_smart_stealth_msg(picks: List[Dict]) -> str:
 
     if not picks:
         return ""
-    now_tpe = (dt.datetime.utcnow() + dt.timedelta(hours=8)).strftime("%H:%M")
+    now_tpe = (dt.datetime.now(timezone.utc) + dt.timedelta(hours=8)).strftime("%H:%M")
     lines = [
         f"🕵️ <b>大戶偷偷進場 Top {len(picks)}</b> · {now_tpe} TPE",
         "<i>(量比≥2x + 沒大漲 + 籌碼/族群配合)</i>",

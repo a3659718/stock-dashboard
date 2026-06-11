@@ -252,6 +252,14 @@ def _gemini_summary(us_snaps: Dict, asia_snaps: Dict, slot: str) -> str:
 
 def build_pre_market_msg(slot: str = "08:15") -> str:
     """建立盤前推播訊息. slot = '08:15' 或 '08:30'."""
+    # Bug fix: 台股假日 (元旦/春節/清明/端午等) 不該推, 資料會是錯的
+    try:
+        import holiday_check
+        if holiday_check.is_market_closed_today("TW"):
+            return ""
+    except Exception:
+        pass
+
     try:
         from notifier import _esc, _truncate_tg_msg
     except Exception:
@@ -396,10 +404,9 @@ def build_pre_market_msg(slot: str = "08:15") -> str:
             elif combined <= -0.5:
                 lines.append(f"💡 美股+亞股平均 {combined:+.2f}% → 台股偏空開盤機率高")
             else:
-                lines.append(f"💡 美股+亞股平均 {combined:+.2f}% → 台股可能平盤震盪")
-            lines.append("")
+                lines.append(f"💡 美股+亞股平均 {combined:+.2f}% → 台股無明顯方向, 看開盤反應")
+                lines.append(f"💡 美股+亞股平均 {combined:+.2f}% → 台股無明顯方向, 看開盤反應")
         except Exception:
             pass
 
-    lines.append("<i>※ 09:00 開盤前最後參考, 不構成投資建議.</i>")
-    return _truncate_tg_msg("\n".join(lines).rstrip())
+    return "\n".join(lines)

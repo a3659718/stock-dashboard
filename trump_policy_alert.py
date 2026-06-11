@@ -418,7 +418,7 @@ def mark_alerts_sent(alerts: List[Dict]) -> None:
             if h not in sent:
                 sent.append(h)
         tpa["sent_hashes"] = sent[-200:]
-        tpa["last_sent_ts"] = dt.datetime.utcnow().isoformat()
+        tpa["last_sent_ts"] = dt.datetime.now(timezone.utc).isoformat()
         today = dt.date.today().strftime("%Y-%m-%d")
         daily = tpa.setdefault("daily_count", {})
         if not isinstance(daily, dict):
