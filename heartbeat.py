@@ -175,7 +175,7 @@ def build_heartbeat_message() -> str:
 
     回 string. caller 自己 send_message.
     """
-    now = dt.datetime.now(timezone.utc) + dt.timedelta(hours=8)  # 顯示 TPE 時間
+    now = dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=8)  # 顯示 TPE 時間
     timestamp = now.strftime("%Y-%m-%d %H:%M TPE")
 
     # 跑全部 probe

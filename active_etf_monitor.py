@@ -210,7 +210,7 @@ def save_holdings(etf_code: str, parsed: Dict) -> None:
     s[etf_code] = {
         "last_data_date": parsed["data_date"],
         "stocks": parsed["stocks"],
-        "checked_at": dt.datetime.now(timezone.utc).isoformat(),
+        "checked_at": dt.datetime.now(dt.timezone.utc).isoformat(),
     }
     _save_etf_state(s)
 

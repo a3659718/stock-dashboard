@@ -39,12 +39,53 @@ TRUMP_KEYWORDS_EN = [
 TRUMP_COOLDOWN_MIN = 360  # 60→180→240→360 (6 小時 / batch)
 TRUMP_MAX_PER_BATCH = 1  # 2→1 (每批最多 1 則, 取最重要)
 TRUMP_DAILY_CAP = 4  # 6→4 (一天絕對上限 4 則)
+TRUMP_MAX_AGE_HR = 12  # 48→12 (新聞超過 12 小時就視為舊聞, 不推)
+
+# 白名單來源 — 只信高品質媒體 + 官方
+TRUMP_PUBLISHER_WHITELIST = [
+    # 主流通訊社
+    "reuters", "bloomberg", "associated press", "ap news",
+    # 美國主流財經/政治媒體
+    "wall street journal", "wsj", "new york times", "nytimes",
+    "washington post", "cnbc", "cnn", "bbc",
+    # 財經專業
+    "financial times", "ft", "marketwatch", "barron's", "barrons",
+    "yahoo finance",  # Yahoo 自家編輯內容 (非 SeekingAlpha 轉貼)
+    "investor's business daily", "investing.com",
+    # 官方
+    "white house", "whitehouse", "treasury", "federal reserve",
+    "department of state",
+    # 推文/聲明直連
+    "truth social", "twitter", "x.com",
+]
+
+# 黑名單來源 — 明確拒絕 (分析文/部落格/低品質轉貼)
+TRUMP_PUBLISHER_BLACKLIST = [
+    "seeking alpha", "seekingalpha", "zacks", "motley fool",
+    "thestreet", "benzinga", "simply wall st", "insider monkey",
+    "247wallst", "247 wall st", "tipranks",
+]
 
 # 關鍵 universe (川普推文常影響的股) — 已移除加密相關 (MSTR/COIN/DJT)
 TRUMP_SENSITIVE_UNIVERSE = [
     "DELL", "TSLA", "NVDA", "LMT", "RTX", "XOM", "CVX",
     "X",
 ]
+
+
+def _is_publisher_allowed(publisher: str) -> bool:
+    """白名單通過 + 黑名單未命中 = 允許.
+
+    Bug fix: 過去任何來源都收 → "Dell 在 Zacks 的分析" 也會被推 → 假陽性.
+    """
+    if not publisher:
+        return False  # 沒 publisher 訊息, 偏保守 reject (避免不明來源)
+    p = publisher.lower()
+    # 黑名單先擋
+    if any(b in p for b in TRUMP_PUBLISHER_BLACKLIST):
+        return False
+    # 白名單通過
+    return any(w in p for w in TRUMP_PUBLISHER_WHITELIST)
 
 
 def _hash_title(title: str) -> str:
@@ -108,17 +149,29 @@ def check_trump_policy_news() -> List[Dict]:
             url = n.get("url") or n.get("link") or ""
             src = n.get("source") or "Finnhub"
             ts = n.get("datetime")
+            pub_ts = None
+            pub_date = ""
             if ts and isinstance(ts, (int, float)):
-                pub_date = dt.datetime.fromtimestamp(int(ts)).strftime("%Y-%m-%d")
-            else:
-                pub_date = ""
+                try:
+                    pub_ts = dt.datetime.fromtimestamp(int(ts))
+                    pub_date = pub_ts.strftime("%Y-%m-%d")
+                except Exception:
+                    pass
             hits = _match_trump_keywords(head)
             # 提高門檻: 至少 3 個關鍵字才推 (避免泛 trump 新聞淹沒)
             if len(hits) < 3:
                 continue
+            # Bug fix (白名單): 來源不在白名單就跳過
+            if not _is_publisher_allowed(src):
+                continue
             h_hash = _hash_title(head)
             if h_hash in alerted:
                 continue
+            # Bug fix (時效): 過濾 > TRUMP_MAX_AGE_HR 舊新聞
+            if pub_ts is not None:
+                hrs = (now_utc - pub_ts).total_seconds() / 3600
+                if hrs > TRUMP_MAX_AGE_HR:
+                    continue
             all_news.append({
                 "symbol": "GENERAL",
                 "title": head,
@@ -127,6 +180,8 @@ def check_trump_policy_news() -> List[Dict]:
                 "date": pub_date,
                 "keywords": hits,
                 "h_hash": h_hash,
+                "pub_ts": pub_ts.isoformat() if pub_ts else None,
+                "_sort_ts": pub_ts.timestamp() if pub_ts else 0,
             })
     except Exception as e:
         print(f"[trump_policy] finnhub fail: {e}", flush=True)
@@ -144,11 +199,39 @@ def check_trump_policy_news() -> List[Dict]:
                     continue
                 head = n.get("title") or ""
                 hits = _match_trump_keywords(head)
-                if not hits:
+                # Bug fix (準確性): Yahoo News 也要 ≥3 keywords (跟 Finnhub 一致)
+                # 不然 "Dell wins contract" 只要含 "trump" 字就推, 假陽性高
+                if len(hits) < 3:
+                    continue
+                # Bug fix (白名單): publisher 不在白名單就跳過
+                # → SeekingAlpha / Zacks 等分析文不會再推
+                publisher = n.get("publisher") or ""
+                if not _is_publisher_allowed(publisher):
                     continue
                 h_hash = _hash_title(head)
                 if h_hash in alerted:
                     continue
+                # Bug fix (時效): 只收近 TRUMP_MAX_AGE_HR 小時內的新聞
+                # 解析 publish date — yfinance 回 "2025-12-01" or 'M d, YYYY' 或 int
+                pub_ts = None
+                raw_date = n.get("date") or n.get("publish_date") or n.get("providerPublishTime")
+                if isinstance(raw_date, (int, float)):
+                    try:
+                        pub_ts = dt.datetime.fromtimestamp(int(raw_date))
+                    except Exception:
+                        pass
+                elif isinstance(raw_date, str) and raw_date:
+                    for fmt in ("%Y-%m-%d", "%Y-%m-%dT%H:%M:%S", "%b %d, %Y"):
+                        try:
+                            pub_ts = dt.datetime.strptime(raw_date[:19], fmt)
+                            break
+                        except Exception:
+                            continue
+                # 過濾舊新聞 (> TRUMP_MAX_AGE_HR 小時)
+                if pub_ts is not None:
+                    hrs = (now_utc - pub_ts).total_seconds() / 3600
+                    if hrs > TRUMP_MAX_AGE_HR:
+                        continue
                 all_news.append({
                     "symbol": sym,
                     "title": head,
@@ -157,12 +240,17 @@ def check_trump_policy_news() -> List[Dict]:
                     "date": n.get("date") or "",
                     "keywords": hits,
                     "h_hash": h_hash,
+                    "pub_ts": pub_ts.isoformat() if pub_ts else None,
+                    "_sort_ts": pub_ts.timestamp() if pub_ts else 0,
                 })
     except Exception as e:
         print(f"[trump_policy] yahoo fail: {e}", flush=True)
 
     if not all_news:
         return []
+    # Bug fix (排序): 按發布時間排序 (newest first), 不是按 universe 順序
+    # → DELL 不會再永遠排第一
+    all_news.sort(key=lambda x: x.get("_sort_ts", 0), reverse=True)
     # daily cap 已在 cooldown 前檢查 (使用 daily_count[today]), remaining 已算好
     max_this_batch = min(TRUMP_MAX_PER_BATCH, remaining)
     return all_news[:max_this_batch]
@@ -340,17 +428,97 @@ def _rule_based_action(alerts: List[Dict]) -> Dict:
     }
 
 
+def _extract_direction(text: str) -> str:
+    """從文字提取「利多/利空/中性」方向.
+
+    用於 cross-validation: 從 Gemini 或 rule 的字串 (含 emoji) 抓出方向.
+    """
+    if not text:
+        return "unknown"
+    t = str(text)
+    # emoji 優先 (rule_based 用 emoji)
+    if "🟢" in t: return "bullish"
+    if "🔴" in t: return "bearish"
+    if "🟡" in t: return "neutral"
+    # 文字判斷 (Gemini 用文字)
+    t_low = t.lower()
+    if any(k in t_low for k in ["利多", "偏多", "看多", "bullish", "positive"]):
+        return "bullish"
+    if any(k in t_low for k in ["利空", "偏空", "看空", "bearish", "negative"]):
+        return "bearish"
+    if any(k in t_low for k in ["中性", "neutral", "震盪"]):
+        return "neutral"
+    return "unknown"
+
+
+def _cross_validate(gemini_result: Dict, rule_result: Dict) -> Dict:
+    """比對 Gemini vs Rule 對 gold/oil/usd/bonds 方向是否一致.
+
+    回:
+      {agreement_rate: 0.0-1.0, disagreements: [field, ...], note: str}
+
+    一致率 ≥ 75% → confidence_tag = "✓ 規則確認"
+    一致率 < 50% → confidence_tag = "⚠️ Gemini vs 規則分歧, 操作保守"
+    """
+    if not gemini_result or not rule_result:
+        return {"agreement_rate": 0.0, "disagreements": [], "note": "", "confidence_tag": ""}
+    fields = ["gold", "oil", "usd", "us_bonds"]
+    agreements = 0
+    total = 0
+    disagreements = []
+    g_global = gemini_result.get("global_impact") or {}
+    for f in fields:
+        # Gemini field 在 global_impact 內
+        g_text = g_global.get(f) or g_global.get(f.replace("us_", ""))
+        # Rule field 在 top level
+        rule_f = "bonds" if f == "us_bonds" else f
+        r_text = rule_result.get(rule_f)
+        if not g_text or not r_text:
+            continue
+        g_dir = _extract_direction(g_text)
+        r_dir = _extract_direction(r_text)
+        if g_dir == "unknown" or r_dir == "unknown":
+            continue
+        total += 1
+        if g_dir == r_dir:
+            agreements += 1
+        else:
+            disagreements.append(f"{f} (Gemini={g_dir}, Rule={r_dir})")
+    rate = agreements / total if total > 0 else 0.0
+    if rate >= 0.75:
+        tag = "✓ 規則確認 (一致率 {:.0%})".format(rate)
+    elif rate < 0.5 and total >= 2:
+        tag = "⚠️ Gemini vs 規則分歧 ({:.0%}), 操作保守".format(rate)
+    else:
+        tag = ""
+    return {
+        "agreement_rate": rate,
+        "disagreements": disagreements,
+        "total_checked": total,
+        "confidence_tag": tag,
+    }
+
+
 def analyze_with_gemini(alerts: List[Dict]) -> Dict:
     """用 Gemini 結構化分析: 對美股 / 台股 / 全球商品 影響 + 操作建議.
+
+    Hybrid 3 層:
+      1. Filter: rule-based 已 filter alerts (白名單/時效/keyword)
+      2. Consensus: Gemini + rule 同時跑, cross-validate 一致性
+      3. Fallback: Gemini 失敗 → rule-based
+
     若 Gemini 不可用或失敗, fallback 到 _rule_based_action.
     """
     if not alerts:
         return {}
+    # 先跑 rule (永遠有, 當基準)
+    rule_result = _rule_based_action(alerts)
+
     try:
         import ai_analyzer
         if not ai_analyzer.gemini_available():
             print("[trump_policy] gemini unavailable, using rule-based fallback", flush=True)
-            return _rule_based_action(alerts)
+            return rule_result
         news_lines = []
         for a in alerts[:3]:
             sym = a.get("symbol", "GENERAL")
@@ -364,45 +532,49 @@ def analyze_with_gemini(alerts: List[Dict]) -> Dict:
             "請以 JSON 格式回答 (繁體中文, 只輸出 JSON 不要其他字, 每欄聚焦核心結論, 1-2 句):\n"
             "{\n"
             '  "headline": "用一句話總結這些政策的核心方向 + 是利多還是利空 (15 字內)",\n'
-            '  "us_impact": "對美股影響 (1 句, 點名: 科技/金融/能源/原物料/Defense 哪些族群受惠或受損)",\n'
-            '  "tw_impact": "對台股影響 (1 句, 點名台股族群)",\n'
+            '  "headline": "用一句話總結這些政策的核心方向 + 是利多還是利空 (15 字內)",\n'
+            '  "us_impact": "對美股影響 (1 句)",\n'
+            '  "tw_impact": "對台股影響 (1 句)",\n'
             '  "global_impact": {\n'
-            '    "gold": "對黃金影響 (1 句, 利多/利空/中性 + 原因)",\n'
-            '    "oil": "對原油影響 (1 句 + 原因)",\n'
-            '    "usd": "對美元影響 (1 句 + 原因)",\n'
-            '    "us_bonds": "對美債殖利率影響 (1 句 + 原因)"\n'
+            '    "gold": "對黃金影響 (利多/利空/中性 + 原因)",\n'
+            '    "oil": "對原油影響",\n'
+            '    "usd": "對美元影響",\n'
+            '    "us_bonds": "對美債殖利率影響"\n'
             "  },\n"
-            '  "long_play": "多單怎麼操作: 哪個族群/個股, 進場時機, 停損 -3%, 目標 +5-8% (1 句)",\n'
-            '  "short_play": "空單怎麼操作: 哪個族群/個股, 進場時機, 停損 +3%, 目標 -5% (1 句)",\n'
-            '  "position_advice": "對現有持倉的處置 (1 句)",\n'
-            '  "risk_alert": "本次最大風險點 + 何時失效 (1 句)"\n'
-            "}\n\n"
-            "注意: 黃金/原油/美元/美債每個都要明確判方向, 不要全部回「中性」, 至少給「中性偏多」或「中性偏空」.\n"
-            "判斷準則:\n"
-            "- 關稅 / 貿易戰 → 黃金 ↑, 美元 ↑, 半導體/出口股壓力\n"
-            "- 減稅 / 鬆綁 → 美股 ↑, 金融/能源/小型股受惠\n"
-            "- 制裁/戰爭 → 原油 ↑, 國防股 ↑, 黃金 ↑\n"
-            "- 外交/和平 → 風險資產 ↑, 黃金 ↓\n"
+            '  "long_play": "多單怎麼操作",\n'
+            '  "short_play": "空單怎麼操作",\n'
+            '  "position_advice": "對現有持倉的處置",\n'
+            '  "risk_alert": "本次最大風險點 + 何時失效"\n'
+            "}\n"
         )
         from ai_analyzer import _get_model
         model = _get_model()
         if model is None:
-            return _rule_based_action(alerts)
+            return rule_result
         resp = model.generate_content(prompt)
-        raw = (resp.text or "").strip() if resp else ""
-        if raw.startswith("```"):
-            raw = raw.split("```")[1]
-            if raw.startswith("json"):
-                raw = raw[4:].strip()
-        import json as _json
-        data = _json.loads(raw)
-        if not isinstance(data, dict) or not data:
-            return _rule_based_action(alerts)
-        data["_source"] = "gemini"
-        return data
+        text = (resp.text or "").strip() if resp else ""
+        if not text:
+            return rule_result
+        # 解析 JSON
+        import re as _re, json as _json
+        m = _re.search(r"\{[\s\S]*\}", text)
+        gemini_result = {}
+        if m:
+            try:
+                gemini_result = _json.loads(m.group(0))
+            except Exception:
+                gemini_result = {"raw_text": text}
+        if not gemini_result:
+            return rule_result
+
+        # === Cross-validate: Gemini vs Rule 對方向一致性 ===
+        cross = _cross_validate(gemini_result, rule_result)
+        gemini_result["_cross_validation"] = cross
+        gemini_result["_rule_baseline"] = rule_result  # 留底
+        return gemini_result
     except Exception as e:
-        print(f"[trump_policy] gemini fail: {e}, fallback to rule-based", flush=True)
-        return _rule_based_action(alerts)
+        print(f"[trump_policy] gemini fail: {e}", flush=True)
+        return rule_result
 
 
 def mark_alerts_sent(alerts: List[Dict]) -> None:
@@ -418,14 +590,13 @@ def mark_alerts_sent(alerts: List[Dict]) -> None:
             if h not in sent:
                 sent.append(h)
         tpa["sent_hashes"] = sent[-200:]
-        tpa["last_sent_ts"] = dt.datetime.now(timezone.utc).isoformat()
+        tpa["last_sent_ts"] = dt.datetime.now(dt.timezone.utc).isoformat()
         today = dt.date.today().strftime("%Y-%m-%d")
         daily = tpa.setdefault("daily_count", {})
         if not isinstance(daily, dict):
             daily = {}
             tpa["daily_count"] = daily
         daily[today] = int(daily.get(today, 0)) + len(alerts)
-        cutoff = (dt.date.today() - dt.timedelta(days=7)).strftime("%Y-%m-%d")
         watchlist_store.save_monitor_state(state)
     except Exception as e:
         print(f"[trump_policy] mark_alerts_sent fail: {e}", flush=True)

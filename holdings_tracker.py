@@ -59,7 +59,7 @@ def save_predictions(holdings_results: List[Dict]) -> int:
             "stop_loss": adv.get("stop_loss"),
             "confidence": adv.get("confidence"),
             "current_when_predicted": tech.get("current"),
-            "predicted_at": dt.datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
+            "predicted_at": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
             "validated": False,
         }
         saved += 1

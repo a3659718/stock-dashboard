@@ -35,7 +35,7 @@ def check_market_surge() -> Optional[Dict]:
     surge_info = {trigger, twii_pct, sox_overnight_pct, message}
     """
     # 必須在台股 session 內 (09:00-13:30 TPE = UTC 01:00-05:30)
-    now_utc = dt.datetime.now(timezone.utc)
+    now_utc = dt.datetime.now(dt.timezone.utc)
     h = now_utc.hour
     if h < 1 or h > 5:
         return None
@@ -416,7 +416,7 @@ def _fmt_intraday_strong_msg(picks: List[Dict]) -> str:
     except Exception:
         pass
 
-    now_tpe = (dt.datetime.now(timezone.utc) + dt.timedelta(hours=8)).strftime("%H:%M")
+    now_tpe = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=8)).strftime("%H:%M")
     lines = [
         f"💪 <b>盤中強勢股 Top {len(picks)}</b> · {now_tpe} TPE",
         "<i>(個股 ≥3% + 量比 ≥1.5x)</i>",
@@ -479,7 +479,7 @@ def check_and_push_intraday_strong() -> Optional[Dict]:
     回 {triggered, n_picks, sent, reason}
     """
     # 必須在台股 session 內 (09:00-13:30 TPE = UTC 01:00-05:30)
-    now_utc = dt.datetime.now(timezone.utc)
+    now_utc = dt.datetime.now(dt.timezone.utc)
     if now_utc.hour < 1 or now_utc.hour > 5:
         return None
     # 假日 skip

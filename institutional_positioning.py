@@ -336,7 +336,7 @@ def fetch_institutional_snapshot() -> Dict:
         "major_traders": _fetch_major_traders(),
         "basis": _fetch_futures_basis(),
         "retail_mtx": _fetch_retail_mtx(),
-        "fetched_at": dt.datetime.now(timezone.utc).isoformat(),
+        "fetched_at": dt.datetime.now(dt.timezone.utc).isoformat(),
     }
     # 綜合 bias
     bias_score = 0
@@ -432,8 +432,9 @@ def summarize_for_gemini(snap: Dict) -> str:
     if basis.get("basis") is not None:
         parts.append(f"期貨升貼水 {basis['basis']:+.2f} 點")
     rtm = snap.get("retail_mtx", {})
+    rtm = snap.get("retail_mtx", {})
     if rtm.get("retail_net") is not None:
         parts.append(f"小台散戶淨倉 {rtm['retail_net']:+,} 口")
     if snap.get("bias_label"):
-        parts.append(snap["bias_label"].replace("🟢 ", "").replace("🔴 ", "").replace("⚪ ", ""))
+        parts.append(snap["bias_label"])
     return " | ".join(parts)

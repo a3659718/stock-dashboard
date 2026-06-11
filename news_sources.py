@@ -87,7 +87,7 @@ def fetch_world_news() -> List[Dict]:
             seen_titles.add(t)
             out.append(item)
     # 過濾近 36 小時
-    cutoff = dt.datetime.now(timezone.utc) - dt.timedelta(hours=36)
+    cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=36)
     fresh = []
     for it in out:
         ts = it.get("time")
@@ -190,7 +190,7 @@ def fetch_finance_news(max_items: int = 15) -> List[Dict]:
             out.append(item)
 
     # 過濾近 36 小時
-    cutoff = dt.datetime.now(timezone.utc) - dt.timedelta(hours=36)
+    cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=36)
     fresh = []
     for it in out:
         ts = it.get("time")
@@ -440,7 +440,7 @@ def time_ago(iso_str: str) -> str:
         return ""
     try:
         d = dt.datetime.fromisoformat(iso_str.replace("Z", ""))
-        delta = dt.datetime.now(timezone.utc) - d
+        delta = dt.datetime.now(dt.timezone.utc) - d
         sec = int(delta.total_seconds())
         if sec < 60:
             return f"{sec} 秒前"
@@ -459,7 +459,7 @@ def _humanize_iso_time(iso_str: str) -> str:
         return ""
     try:
         d = dt.datetime.fromisoformat(iso_str.replace("Z", ""))
-        delta = dt.datetime.now(timezone.utc) - d
+        delta = dt.datetime.now(dt.timezone.utc) - d
         sec = int(delta.total_seconds())
         if sec < 60:
             return f"{sec} 秒前"

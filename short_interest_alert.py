@@ -144,7 +144,7 @@ def fetch_short_interest_snapshot() -> Dict:
     snap = {
         "lending": _fetch_securities_lending(),
         "margin_short": _fetch_margin_short(),
-        "fetched_at": dt.datetime.now(timezone.utc).isoformat(),
+        "fetched_at": dt.datetime.now(dt.timezone.utc).isoformat(),
     }
     # 綜合 verdict
     verdict_score = 0  # 正 = 偏多 (反指標), 負 = 偏空 (大戶準備倒貨)

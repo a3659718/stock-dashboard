@@ -89,7 +89,7 @@ def _is_market_in_session(country: str) -> bool:
     US: 09:30-16:00 ET   = 13:30-20:00 UTC (EDT) / 14:30-21:00 UTC (EST)
     週末一律不在 session.
     """
-    now_utc = dt.datetime.now(timezone.utc)
+    now_utc = dt.datetime.now(dt.timezone.utc)
     cur = now_utc.hour + now_utc.minute / 60.0
     c = country.upper()
     if c == "US":
@@ -483,7 +483,7 @@ def _scan_companion_weak_stocks_tw_cached(top_n: int = 5, state: Optional[Dict] 
     否則 (standalone) 自己 load/save. 這樣避免 caller 結尾 save 把 companion
     cache 覆蓋掉 (caller load 在前, companion 寫在後, caller save 又用舊 snapshot).
     """
-    now = dt.datetime.now(timezone.utc)
+    now = dt.datetime.now(dt.timezone.utc)
     own_state = state is None
     try:
         if state is None:
@@ -582,7 +582,7 @@ def _scan_companion_strong_stocks_tw(top_n: int = 5, max_workers: int = 8) -> Li
 
 def _scan_companion_strong_stocks_tw_cached(top_n: int = 5, state: Optional[Dict] = None) -> List[Dict]:
     """cache 版 (與 weak 版同 TTL, 不同 key)."""
-    now = dt.datetime.now(timezone.utc)
+    now = dt.datetime.now(dt.timezone.utc)
     own_state = state is None
     try:
         if state is None:
@@ -629,7 +629,7 @@ def _get_top_strong_sectors_tw(top_n: int = 3, state: Optional[Dict] = None) -> 
         ts_str = cache.get("ts")
         if ts_str:
             ts = dt.datetime.fromisoformat(ts_str)
-            if (dt.datetime.now(timezone.utc) - ts).total_seconds() < _SECTOR_LEADERS_CACHE_TTL_SEC:
+            if (dt.datetime.now(dt.timezone.utc) - ts).total_seconds() < _SECTOR_LEADERS_CACHE_TTL_SEC:
                 cached = cache.get("data") or []
                 return cached[:top_n]
     except Exception:
@@ -659,7 +659,7 @@ def _get_top_strong_sectors_tw(top_n: int = 3, state: Optional[Dict] = None) -> 
     # cache 寫回 (跟 caller state 共用避免覆蓋)
     try:
         state["_sector_leaders_cache"] = {
-            "ts": dt.datetime.now(timezone.utc).isoformat(), "data": out,
+            "ts": dt.datetime.now(dt.timezone.utc).isoformat(), "data": out,
         }
         if own_state:
             watchlist_store.save_monitor_state(state)
@@ -695,7 +695,7 @@ def check_intraday_reversal() -> List[Dict]:
     state = watchlist_store.load_monitor_state()
     rev_state = state.setdefault("intraday_reversal", {})
     today_str = dt.date.today().strftime("%Y-%m-%d")
-    now_utc = dt.datetime.now(timezone.utc)
+    now_utc = dt.datetime.now(dt.timezone.utc)
 
     # 假日檢查
     closed_markets: set = set()
@@ -1350,7 +1350,7 @@ def check_systemic_crash() -> Optional[Dict]:
     state = watchlist_store.load_monitor_state()
     crash_state = state.setdefault("systemic_crash_alerts", {})
     today_str = dt.date.today().strftime("%Y-%m-%d")
-    now_utc = dt.datetime.now(timezone.utc)
+    now_utc = dt.datetime.now(dt.timezone.utc)
 
     # 跨日重置: 全部 symbol 都把舊日的 state 清掉
     for sym in list(crash_state.keys()):
@@ -1636,7 +1636,7 @@ def check_index_alerts() -> List[Dict]:
             if last_at:
                 try:
                     last_dt = dt.datetime.fromisoformat(last_at)
-                    elapsed = (dt.datetime.now(timezone.utc) - last_dt).total_seconds()
+                    elapsed = (dt.datetime.now(dt.timezone.utc) - last_dt).total_seconds()
                     if elapsed < 30 * 60:
                         continue
                 except Exception:
@@ -1674,7 +1674,7 @@ def check_index_alerts() -> List[Dict]:
             sym_state["last_bucket"] = bucket
             sym_state["last_alert_diff"] = round(diff, 2)
             sym_state["last_alert_price"] = round(current, 2)
-            sym_state["last_alert_at"] = dt.datetime.now(timezone.utc).isoformat()
+            sym_state["last_alert_at"] = dt.datetime.now(dt.timezone.utc).isoformat()
             sym_state["alerts_today_count"] = alerts_count + 1
 
     state["index_alerts"] = idx_state
@@ -1692,7 +1692,7 @@ CRYPTO_SCHEDULE_UTC_HOURS = {
 
 def check_crypto_alerts() -> List[Dict]:
     """加密貨幣排程警報. 每 slot 最多 2 次 (first push 固定發, second push 變動 >= 2.5% 才發)."""
-    now_utc = dt.datetime.now(timezone.utc)
+    now_utc = dt.datetime.now(dt.timezone.utc)
     cur_hour = now_utc.hour
     cur_minute = now_utc.minute
 

@@ -40,7 +40,7 @@ HI_COOLDOWN_MIN = 30           # 兩批推播間最少間隔
 
 def _is_tw_session() -> bool:
     """台股交易時段 09:00-13:30 TPE = 01:00-05:30 UTC, 平日."""
-    now_utc = dt.datetime.now(timezone.utc)
+    now_utc = dt.datetime.now(dt.timezone.utc)
     if now_utc.weekday() >= 5:
         return False
     cur = now_utc.hour + now_utc.minute / 60.0
@@ -49,7 +49,7 @@ def _is_tw_session() -> bool:
 
 def _is_us_session() -> bool:
     """美股交易時段 (簡化, 不處理 DST 邊界)."""
-    now_utc = dt.datetime.now(timezone.utc)
+    now_utc = dt.datetime.now(dt.timezone.utc)
     if now_utc.weekday() >= 5:
         return False
     cur = now_utc.hour + now_utc.minute / 60.0
@@ -175,7 +175,7 @@ def check_holdings_intraday_risk() -> List[Dict]:
     state = watchlist_store.load_monitor_state()
     hi_state = state.setdefault("holdings_intraday_alert", {})
     today_str = dt.date.today().strftime("%Y-%m-%d")
-    now_utc = dt.datetime.now(timezone.utc)
+    now_utc = dt.datetime.now(dt.timezone.utc)
 
     # 跨日 reset
     if hi_state.get("date") != today_str:
@@ -245,7 +245,7 @@ def mark_alerts_sent(alerts: List[Dict]) -> None:
         for a in alerts:
             stocks_alerted.add(a["stock_id"])
         hi_state["stocks_alerted"] = sorted(stocks_alerted)
-        hi_state["last_batch_at"] = dt.datetime.now(timezone.utc).isoformat()
+        hi_state["last_batch_at"] = dt.datetime.now(dt.timezone.utc).isoformat()
         state["holdings_intraday_alert"] = hi_state
         watchlist_store.save_monitor_state(state)
     except Exception as e:

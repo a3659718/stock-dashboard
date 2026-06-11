@@ -125,7 +125,7 @@ def remove_trigger(trigger_id: str) -> bool:
 
 def _is_market_closed_now(market: str = "TW") -> bool:
     """該市場是否已收盤 (盤中 daily K 是 partial-bar, 不該拿來算 KD/MACD cross)."""
-    now_utc = dt.datetime.now(timezone.utc)
+    now_utc = dt.datetime.now(dt.timezone.utc)
     if market == "US":
         try:
             import index_alerts

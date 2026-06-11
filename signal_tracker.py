@@ -209,7 +209,7 @@ def _is_market_closed_now(market: str = "TW") -> bool:
     TW: UTC ≥ 06:00 (= 14:00 TPE 之後, 13:30 收盤後加 30 min buffer)
     US: UTC ≥ 21:00 EDT 期 / ≥ 22:00 EST (16:00 ET 收盤後加 1 hr buffer)
     """
-    now_utc = dt.datetime.now(timezone.utc)
+    now_utc = dt.datetime.now(dt.timezone.utc)
     if market == "US":
         # 用 index_alerts 的 DST 偵測
         try:
