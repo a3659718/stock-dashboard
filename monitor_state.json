@@ -76,6 +76,22 @@
       "type": "DASHBOARD_PING",
       "ok": true,
       "err": null
+    },
+    {
+      "ts": "2026-06-12T00:57:54.882112",
+      "type": "🌅 <b>台股盤前 (08:15)</b>",
+      "ok": false,
+      "err": "ProxyError: HTTPSConnectionPool(host='api.telegram.org', port=443): Max retries exceeded with url: /botfake/sendMessage (Caused by ProxyError('Unable to connect to proxy', OSError('Tunnel connection f"
+    }
+  ],
+  "cron_runs": [
+    {
+      "ts": "2026-06-12T00:57:43.942761",
+      "mode": "monitor"
+    },
+    {
+      "ts": "2026-06-12T00:57:54.458506",
+      "mode": "pre_market_815"
     }
   ]
 }
