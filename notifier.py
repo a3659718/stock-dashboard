@@ -2066,13 +2066,25 @@ def fmt_intraday_reversal_alerts(alerts: list) -> str:
             )
             up_stocks = a.get("companion_stocks_up") or []
             if up_stocks:
-                # 加 entry_label emoji (🟢BUY / 🟡WAIT / 🔴AVOID)
-                st_line = " · ".join(
-                    f"{_esc(cs.get('stock_id',''))} "
-                    f"{cs.get('entry_emoji','')}"
-                    f"{float(cs.get('today_pct',0) or 0):+.2f}%"
-                    for cs in up_stocks[:3]
-                )
+                # H: 假反彈過濾 — 漲 ≥3% 但量比 < 0.8x 加警示
+                try:
+                    import fake_rally_detector as _frd
+                    up_stocks = _frd.flag_fake_rally(up_stocks)
+                except Exception:
+                    pass
+                # 加 entry_label emoji (🟢BUY / 🟡WAIT / 🔴AVOID) + 假反彈警示
+                def _stock_render(cs):
+                    sid = _esc(cs.get('stock_id',''))
+                    emoji = cs.get('entry_emoji','')
+                    pct = float(cs.get('today_pct',0) or 0)
+                    # 假反彈 → 加 ⚠
+                    warn = ""
+                    if cs.get("rally_quality") == "fake_rally":
+                        warn = "⚠"
+                    elif cs.get("rally_quality") == "weak":
+                        warn = "🟡"
+                    return f"{sid} {emoji}{pct:+.2f}%{warn}"
+                st_line = " · ".join(_stock_render(cs) for cs in up_stocks[:3])
                 lines.append(f"  同步強: {st_line}")
                 # B: 明確「現在能買」區塊
                 # 主路徑: entry_label="BUY"; fallback (Gemini fail 時): entry_score >= 70
@@ -3359,6 +3371,9 @@ def fmt_trump_policy_alerts(alerts: list, gemini_analysis="") -> str:
     if not alerts:
         return ""
 
+    # I: 從 alerts[0] 拔出 filter_stats (川普推播在 check_trump_policy_news 附上的)
+    filter_stats = (alerts[0] or {}).get("_filter_stats") if alerts else None
+
     lines = ["🇺🇸 <b>川普政策動向</b>"]
 
     if isinstance(gemini_analysis, dict) and gemini_analysis:
@@ -3450,36 +3465,31 @@ def fmt_trump_policy_alerts(alerts: list, gemini_analysis="") -> str:
             lines.append(_esc(gemini_analysis))
             lines.append("")
 
+    # I: 顯示過濾統計 (給用戶知道過濾品質)
+    if filter_stats and filter_stats.get("scanned", 0) > 0:
+        s = filter_stats
+        lines.append("")
+        lines.append(
+            f"<i>📊 過濾: 掃描 {s['scanned']} 則 → 推 {s['passed']} 則 "
+            f"(關鍵字擋 {s['filtered_keyword']} / "
+            f"<i>📊 過濾: 掃描 {s['scanned']} 則 → 推 {s['passed']} 則 "
+            f"(關鍵字擋 {s['filtered_keyword']} / "
+            f"來源不在白名單 {s['filtered_publisher']} / "
+            f"舊聞 {s['filtered_age']} / 已推過 {s['filtered_dedup']})</i>"
+        )
+
     lines.append("<i>※ Tier 1 政治影響, 留意盤前波動.</i>")
     return _truncate_tg_msg("\n".join(lines).rstrip())
-
-
-
-def fmt_speculation_picks(picks: list) -> str:
-    """投機股 (Story Stock) 推播 (Tier 2)."""
 
 
 def fmt_speculation_picks(picks: list) -> str:
     """投機股 (Story Stock) 推播 (Tier 2)."""
     if not picks:
         return ""
-    lines = [f"🎲 <b>投機股精選 ({len(picks)} 支)</b>",
-             "<i>盤整 + 強勢 + 有前景 (放寬條件)</i>", ""]
-    by_theme: dict = {}
-    for p in picks:
-        t = p.get("theme", "其他")
-        by_theme.setdefault(t, []).append(p)
-    for theme, items in by_theme.items():
-        lines.append(f"<b>🔥 {_esc(theme)}</b>")
-        for p in items[:5]:
-            sym = _esc(p.get("symbol", p.get("stock_id", "")))
-            nm = _esc(p.get("name", ""))
-            tp = float(p.get("today_pct", 0) or 0)
-            lines.append(f"  • <code>{sym}</code> {nm} {tp:+.2f}%")
-        lines.append("")
-    lines.append("<i>※ 高風險, 部位控制 ≤5%</i>")
-    return _truncate_tg_msg("\n".join(lines).rstrip())
-
-
-# 相容別名 (app.py 舊版本可能呼叫)
-fmt_fear_greed_alert = fmt_us_fg_alert
+    lines = ["🎲 <b>投機股精選 (Story Stock)</b>"]
+    for p in picks[:5]:
+        sid = _esc(p.get("symbol", ""))
+        name = _esc(p.get("name", ""))
+        score = p.get("score", 0)
+        lines.append(f"  <code>{sid}</code> {name} · score {score}")
+    return "\n".join(lines)

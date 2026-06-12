@@ -3471,3 +3471,44 @@ with tab_health:
             st.caption("週末: cron 預期較少, 健康度可放寬")
     else:
         st.warning("health 資料抓取失敗")
+
+    # ===== 台指期訊號 =====
+    st.divider()
+    st.subheader("📐 台指期 / 微台訊號")
+    try:
+        import tx_futures_alert as _tx
+        if st.button("🔄 掃描台指期訊號", key="btn_tx_futures"):
+            with st.spinner("分析升貼水/法人/散戶..."):
+                tx_alerts = _tx.check_tx_futures_alerts()
+                st.session_state["tx_alerts_cache"] = tx_alerts
+        tx_alerts = st.session_state.get("tx_alerts_cache") or []
+        if tx_alerts:
+            for a in tx_alerts:
+                tier_emoji = {1: "🔴", 2: "🟡", 3: "⚪"}.get(a.get("tier", 3), "⚪")
+                with st.container():
+                    st.markdown(f"### {tier_emoji} {a.get('title','—')} → **{a.get('action','—')}**")
+                    st.caption(a.get("reason", ""))
+                    if "entry" in a:
+                        c1, c2, c3, c4 = st.columns(4)
+                        c1.metric("進場", f"{a.get('entry', 0):.0f}")
+                        c2.metric("停損", f"{a.get('stop', 0):.0f}")
+                        c3.metric("目標", f"{a.get('target', 0):.0f}")
+                        c4.metric("R:R", f"{a.get('rr', 0):.2f}")
+        else:
+            st.info("(無訊號 — 升貼水正常, 法人/散戶倉位平衡)")
+    except Exception as e:
+        st.warning(f"tx_futures 載入失敗: {e}")
+
+    # ===== signal_tracker 績效排行 =====
+    st.divider()
+    st.subheader("🎯 訊號績效排行 (最近 30 日)")
+    try:
+        import signal_tracker as _st_perf
+        perf = _st_perf.fmt_compact_perf("all", lookback_days=30, include_pending=False)
+        if perf:
+            st.markdown(f"```\n{perf}\n```")
+        else:
+            st.info("(尚未累積足夠訊號 — 建議等 30 日後再看)")
+        st.caption("勝率 = 訊號評估後達預期方向的比例; 樣本 < 10 不顯示")
+    except Exception as e:
+        st.warning(f"signal_tracker 載入失敗: {e}")

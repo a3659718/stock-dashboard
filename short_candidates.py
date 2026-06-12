@@ -254,6 +254,17 @@ def check_and_push_intraday_weak() -> Optional[Dict]:
     if not picks:
         return {"triggered": False, "reason": "no_picks"}
 
+    # 跨類去重 — 同股 30 min 內已推同方向 (空) 不再推
+    try:
+        import alert_priority as _ap
+        original_n = len(picks)
+        picks = _ap.filter_dedup_picks(picks, "intraday_short_candidate", "down")
+        if not picks:
+            return {"triggered": False, "reason": "all_recently_pushed",
+                    "filtered_n": original_n}
+    except Exception:
+        pass
+
     msg = _fmt_intraday_weak_msg(picks)
     # 末段加歷史績效 (空單訊號)
     try:
@@ -281,6 +292,11 @@ def check_and_push_intraday_weak() -> Optional[Dict]:
                                    evaluate_after_days=5, expected_direction="down")
             except Exception as _re:
                 print(f"[intraday_weak] record_batch failed: {_re}", flush=True)
+            try:
+                import alert_priority as _ap
+                _ap.mark_picks_pushed(picks, "intraday_short_candidate", "down")
+            except Exception:
+                pass
         return {"triggered": True, "n_picks": len(picks), "sent": ok}
     except Exception as e:
         print(f"[intraday_weak] notifier 失敗: {e}", flush=True)

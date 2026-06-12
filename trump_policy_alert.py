@@ -138,10 +138,20 @@ def check_trump_policy_news() -> List[Dict]:
     alerted: set = set(tp_state.get("sent_hashes") or tp_state.get("alerted") or [])
 
     all_news = []
+    # I: 過濾統計 (給推播末段顯示, 讓用戶知道過濾效果)
+    filter_stats = {
+        "scanned": 0,        # 掃描總數
+        "filtered_keyword": 0,  # 因 keyword 不足擋掉
+        "filtered_publisher": 0,  # 因不在白名單擋掉
+        "filtered_age": 0,    # 因超過 12 小時擋掉
+        "filtered_dedup": 0,  # 因已推過擋掉
+        "passed": 0,
+    }
     # 1. Finnhub general news
     try:
         import data_sources as ds
         news = ds.fetch_finnhub_news(category="general", max_n=30) or []
+        filter_stats["scanned"] += len(news)
         for n in news:
             if not isinstance(n, dict):
                 continue
@@ -160,18 +170,23 @@ def check_trump_policy_news() -> List[Dict]:
             hits = _match_trump_keywords(head)
             # 提高門檻: 至少 3 個關鍵字才推 (避免泛 trump 新聞淹沒)
             if len(hits) < 3:
+                filter_stats["filtered_keyword"] += 1
                 continue
             # Bug fix (白名單): 來源不在白名單就跳過
             if not _is_publisher_allowed(src):
+                filter_stats["filtered_publisher"] += 1
                 continue
             h_hash = _hash_title(head)
             if h_hash in alerted:
+                filter_stats["filtered_dedup"] += 1
                 continue
             # Bug fix (時效): 過濾 > TRUMP_MAX_AGE_HR 舊新聞
             if pub_ts is not None:
                 hrs = (now_utc - pub_ts).total_seconds() / 3600
                 if hrs > TRUMP_MAX_AGE_HR:
+                    filter_stats["filtered_age"] += 1
                     continue
+            filter_stats["passed"] += 1
             all_news.append({
                 "symbol": "GENERAL",
                 "title": head,
@@ -194,22 +209,24 @@ def check_trump_policy_news() -> List[Dict]:
                 yh = data_sources.fetch_yahoo_news(sym, max_n=5) or []
             except Exception:
                 yh = []
+            filter_stats["scanned"] += len(yh)
             for n in yh:
                 if not isinstance(n, dict):
                     continue
                 head = n.get("title") or ""
                 hits = _match_trump_keywords(head)
                 # Bug fix (準確性): Yahoo News 也要 ≥3 keywords (跟 Finnhub 一致)
-                # 不然 "Dell wins contract" 只要含 "trump" 字就推, 假陽性高
                 if len(hits) < 3:
+                    filter_stats["filtered_keyword"] += 1
                     continue
                 # Bug fix (白名單): publisher 不在白名單就跳過
-                # → SeekingAlpha / Zacks 等分析文不會再推
                 publisher = n.get("publisher") or ""
                 if not _is_publisher_allowed(publisher):
+                    filter_stats["filtered_publisher"] += 1
                     continue
                 h_hash = _hash_title(head)
                 if h_hash in alerted:
+                    filter_stats["filtered_dedup"] += 1
                     continue
                 # Bug fix (時效): 只收近 TRUMP_MAX_AGE_HR 小時內的新聞
                 # 解析 publish date — yfinance 回 "2025-12-01" or 'M d, YYYY' 或 int
@@ -231,7 +248,9 @@ def check_trump_policy_news() -> List[Dict]:
                 if pub_ts is not None:
                     hrs = (now_utc - pub_ts).total_seconds() / 3600
                     if hrs > TRUMP_MAX_AGE_HR:
+                        filter_stats["filtered_age"] += 1
                         continue
+                filter_stats["passed"] += 1
                 all_news.append({
                     "symbol": sym,
                     "title": head,
@@ -246,10 +265,20 @@ def check_trump_policy_news() -> List[Dict]:
     except Exception as e:
         print(f"[trump_policy] yahoo fail: {e}", flush=True)
 
+    # I: 記錄過濾統計 (給 fmt_trump_policy_alerts 顯示)
+    if all_news:
+        # 把 stats 附加到第一筆 (作為 batch-level meta)
+        all_news[0]["_filter_stats"] = filter_stats
+    # 印 log (給 GH Actions log 看)
+    print(f"[trump_policy] filter stats: scanned={filter_stats['scanned']} "
+          f"keyword={filter_stats['filtered_keyword']} "
+          f"publisher={filter_stats['filtered_publisher']} "
+          f"age={filter_stats['filtered_age']} "
+          f"dedup={filter_stats['filtered_dedup']} "
+          f"passed={filter_stats['passed']}", flush=True)
     if not all_news:
         return []
     # Bug fix (排序): 按發布時間排序 (newest first), 不是按 universe 順序
-    # → DELL 不會再永遠排第一
     all_news.sort(key=lambda x: x.get("_sort_ts", 0), reverse=True)
     # daily cap 已在 cooldown 前檢查 (使用 daily_count[today]), remaining 已算好
     max_this_batch = min(TRUMP_MAX_PER_BATCH, remaining)
@@ -570,7 +599,7 @@ def analyze_with_gemini(alerts: List[Dict]) -> Dict:
         # === Cross-validate: Gemini vs Rule 對方向一致性 ===
         cross = _cross_validate(gemini_result, rule_result)
         gemini_result["_cross_validation"] = cross
-        gemini_result["_rule_baseline"] = rule_result  # 留底
+        gemini_result["_rule_baseline"] = rule_result
         return gemini_result
     except Exception as e:
         print(f"[trump_policy] gemini fail: {e}", flush=True)
