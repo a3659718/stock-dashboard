@@ -2429,11 +2429,21 @@ def fmt_strong_sector_alerts(alerts: list) -> str:
                 f"均漲 <b>+{avg:.2f}%</b>  "
                 f"上漲 {up_ratio * 100:.0f}% ({int(up_ratio * n)}/{n})"
             )
-            # 龍頭 3 檔
+            # 龍頭 3 檔 — #3 升級: 加龍頭/跟風/候補分類
             leaders = a.get("leaders") or []
             if leaders:
-                parts = []
-                for ld in leaders[:3]:
+                # 分類
+                try:
+                    import sector_role_classifier as _src
+                    leaders = _src.classify_stocks_in_sector(leaders, avg)
+                except Exception:
+                    pass
+                # 分組顯示
+                leader_list = [ld for ld in leaders if ld.get("sector_role") == "leader"][:2]
+                laggard_list = [ld for ld in leaders if ld.get("sector_role") == "laggard"][:2]
+                other_list = [ld for ld in leaders if ld.get("sector_role") not in ("leader", "laggard")][:2]
+
+                def _fmt_one(ld):
                     sid = _esc(ld.get("stock_id", ""))
                     lname = _esc(ld.get("name", ""))
                     try:
@@ -2441,15 +2451,19 @@ def fmt_strong_sector_alerts(alerts: list) -> str:
                         vr = float(ld.get("vol_ratio", 0) or 0)
                     except (TypeError, ValueError):
                         tp = vr = 0.0
-                    vol_tag = " 量增" if vr >= 1.3 else ""
-                    # 入場標籤 (該檔當下能不能進)
                     el_emoji = ld.get("entry_emoji", "")
                     el_label = ld.get("entry_label", "")
                     el_tag = f" {el_emoji}{_esc(el_label)}" if el_label and el_label != "—" else ""
-                    parts.append(
-                        f"<code>{sid}</code> {lname} <b>{tp:+.2f}%</b>{vol_tag}{el_tag}"
-                    )
-                lines.append("  龍頭: " + " / ".join(parts))
+                    return f"<code>{sid}</code> {lname} <b>{tp:+.2f}%</b>{el_tag}"
+
+                if leader_list:
+                    lines.append("  🏆 龍頭 (該追): " + " / ".join(_fmt_one(ld) for ld in leader_list))
+                if laggard_list:
+                    lines.append("  🕵️ 候補 (吸籌中, 明日可能補漲): " + " / ".join(_fmt_one(ld) for ld in laggard_list))
+                if other_list and not leader_list and not laggard_list:
+                    # 沒分類出龍頭 / 候補時, 顯示一般股
+                    parts = [_fmt_one(ld) for ld in other_list]
+                    lines.append("  族群股: " + " / ".join(parts))
             # 操作建議
             if a.get("severity") == "strong":
                 lines.append("  💡 持倉建議: 多檔齊漲且量增, 留意龍頭股拉回買點")
@@ -3469,9 +3483,8 @@ def fmt_trump_policy_alerts(alerts: list, gemini_analysis="") -> str:
     if filter_stats and filter_stats.get("scanned", 0) > 0:
         s = filter_stats
         lines.append("")
+        lines.append("")
         lines.append(
-            f"<i>📊 過濾: 掃描 {s['scanned']} 則 → 推 {s['passed']} 則 "
-            f"(關鍵字擋 {s['filtered_keyword']} / "
             f"<i>📊 過濾: 掃描 {s['scanned']} 則 → 推 {s['passed']} 則 "
             f"(關鍵字擋 {s['filtered_keyword']} / "
             f"來源不在白名單 {s['filtered_publisher']} / "

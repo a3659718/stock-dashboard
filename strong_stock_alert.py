@@ -449,9 +449,17 @@ def _fmt_intraday_strong_msg(picks: List[Dict]) -> str:
         # 結論導向: 假反彈直接改 entry_label 為 "不追"
         if p.get("rally_quality") == "fake_rally":
             el_tag = " ⚠️不追(弱反彈)"
+        # #1 強勢股升級: 加品質 action 標籤
+        q_action = p.get("quality_action", "")
+        q_score = p.get("quality_score")
+        q_tag = ""
+        if q_action and "短線拉抬" in q_action:
+            q_tag = f" {q_action}"  # ⚠️ 警示
+        elif q_score is not None and q_score >= 75:
+            q_tag = f" {q_action}"  # 🔥 / 💎 高品質
         lines.append(
             f"{i}. <code>{_esc(sid)}</code> {name} · "
-            f"{cur:.2f} <b>+{tp:.2f}%</b> · 量比 {vr:.2f}x{el_tag}"
+            f"{cur:.2f} <b>+{tp:.2f}%</b> · 量比 {vr:.2f}x{el_tag}{q_tag}"
         )
         # 進出場建議 (只給 BUY/HOLD 標的, AVOID 改顯警告)
         if el in ("BUY", "STRONG_BUY", "HOLD"):
@@ -519,6 +527,35 @@ def check_and_push_intraday_strong() -> Optional[Dict]:
     if not picks:
         return {"triggered": False, "reason": "no_picks"}
 
+    # #1 強勢股升級: 加品質分數 + action 標籤 (RS / 連續 / 籌碼 / 距高 / 拉回)
+    try:
+        import stock_quality_filter as _sqf
+        original_n = len(picks)
+        # 不過濾, 留所有 picks (按 quality_score 排序), 給訊息分類
+        for p in picks:
+            sid = str(p.get("stock_id") or p.get("symbol", ""))
+            tp = float(p.get("today_pct", 0) or 0)
+            vr = float(p.get("vol_ratio", 0) or 0)
+            if sid:
+                q = _sqf.compute_quality_score(sid, tp, vr, "TW")
+                p["quality_score"] = q.get("quality_score", 0)
+                p["quality_action"] = _sqf.classify_action(q, tp)
+                p["rs"] = q.get("rs")
+        # 按 quality_score 排序, 高品質先
+        picks.sort(key=lambda p: p.get("quality_score", 0) or 0, reverse=True)
+        # 過濾掉「短線拉抬」(品質 < 40 + today_pct > 5%)
+        picks = [
+            p for p in picks
+            if not (p.get("quality_score", 100) < 40 and p.get("today_pct", 0) > 5)
+        ]
+        if not picks:
+            return {"triggered": False, "reason": "all_low_quality"}
+        print(f"[intraday_strong] 品質過濾 {original_n}→{len(picks)}", flush=True)
+    except Exception as _qe:
+        print(f"[intraday_strong] quality filter fail: {_qe}", flush=True)
+
+    # B: 跨類去重 — 30 min 內已推同股不再推
+
     # B: 跨類去重 — 30 min 內已推同股不再推
     try:
         import alert_priority as _ap
@@ -557,7 +594,6 @@ def check_and_push_intraday_strong() -> Optional[Dict]:
                                    evaluate_after_days=5, expected_direction="up")
             except Exception as _re:
                 print(f"[intraday_strong] record_batch failed: {_re}", flush=True)
-            # B: mark 已推 (去重用)
             try:
                 import alert_priority as _ap
                 _ap.mark_picks_pushed(picks, "intraday_strong_stock", "up")
