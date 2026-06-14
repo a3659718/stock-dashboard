@@ -405,8 +405,54 @@ def build_pre_market_msg(slot: str = "08:15") -> str:
                 lines.append(f"💡 美股+亞股平均 {combined:+.2f}% → 台股偏空開盤機率高")
             else:
                 lines.append(f"💡 美股+亞股平均 {combined:+.2f}% → 台股無明顯方向, 看開盤反應")
-                lines.append(f"💡 美股+亞股平均 {combined:+.2f}% → 台股無明顯方向, 看開盤反應")
         except Exception:
             pass
+
+
+    # 今日台股可買 Top 5 (08:30 才推) — 過濾 entry_label=BUY 且 entry_score>=70
+    if slot == "08:30":
+        try:
+            import actionable_picks as _ap
+            picks = _ap.compute_actionable_picks(top_n=10) or []
+            # BUG #1 fix: 空頭 regime 時 picks=[{"_no_picks_reason": "空頭 regime 暫停進場推薦"}]
+            # (沒 stock_id), 若不特別處理會被 filter 掉 → 顯示「無高品質 BUY」誤導用戶
+            if picks and picks[0].get("_no_picks_reason") and not picks[0].get("stock_id"):
+                lines.append("")
+                lines.append(f"🎯 <i>⚠ {_esc(picks[0]['_no_picks_reason'])} (保護資金優先)</i>")
+                return "\n".join(lines)
+            buy_picks = [
+                p for p in picks
+                if p.get("stock_id")
+                and p.get("entry_label") == "BUY"
+                and (p.get("entry_score") is None or float(p.get("entry_score") or 0) >= 70)
+            ][:5]
+            if buy_picks:
+                lines.append("")
+                lines.append("━━━━━━━ 🎯 今日台股可買 Top 5 ━━━━━━━")
+                for i, p in enumerate(buy_picks, 1):
+                    sid = _esc(p.get("stock_id", ""))
+                    name = _esc(p.get("name", ""))
+                    theme = _esc(p.get("theme", "—"))
+                    cur = p.get("current")
+                    el = p.get("entry_low")
+                    eh = p.get("entry_high")
+                    tgt = p.get("target")
+                    stop = p.get("stop")
+                    score = p.get("entry_score")
+                    head = f"<b>{i}. {sid} {name}</b> [{theme}]"
+                    if score is not None:
+                        head += f" · 入場分 {float(score):.0f}"
+                    lines.append(head)
+                    if cur is not None and el and eh:
+                        lines.append(f"   現價 {cur} · 進場 {el}~{eh}")
+                    if tgt:
+                        lines.append(f"   目標 {tgt} · 停損 {_esc(stop or '—')}")
+                    if p.get("win_prob"):
+                        lines.append(f"   勝率 {_esc(p['win_prob'])} · 持有 {_esc(p.get('hold_period','—'))}")
+            else:
+                lines.append("")
+                lines.append("🎯 <i>今日無高品質 BUY (entry_label=BUY + 分數 >=70), 觀望為主</i>")
+        except Exception as _bpe:
+            print(f"[pre_market] tw buy picks fail: {_bpe}", flush=True)
 
     return "\n".join(lines)

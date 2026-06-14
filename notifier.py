@@ -984,6 +984,19 @@ def fmt_weekend_recap(data: dict) -> str:
         extras.append("------ 🔭 下週展望 (Gemini) ------")
         extras.append(_md_to_tg_html(outlook))
 
+    # === 整合: 下週美股 IPO 預告 (週末用) ===
+    # 週末給美股 IPO 列表 (台股 IPO 週五晚已單獨推)
+    try:
+        import ipo_calendar_alert as _ipo
+        ipo_msg = _ipo.build_us_ipo_preview_msg()
+        if ipo_msg:
+            extras.append("")
+            extras.append("------ 🇺🇸 下週美股 IPO ------")
+            ipo_clean = "\n".join(ipo_msg.split("\n")[1:])
+            extras.append(ipo_clean)
+    except Exception as _ie:
+        print(f"[weekend_recap] us ipo preview fail: {_ie}", flush=True)
+
     return _truncate_tg_msg(base + "\n" + "\n".join(extras))
 
 
@@ -3511,4 +3524,5 @@ def fmt_speculation_picks(picks: list) -> str:
         sid = _esc(p.get("symbol", ""))
         name = _esc(p.get("name", ""))
         score = p.get("score", 0)
-    
+        lines.append(f"  <code>{sid}</code> {name} · score {score}")
+    return "\n".join(lines)

@@ -82,6 +82,18 @@
       "type": "🌅 <b>台股盤前 (08:15)</b>",
       "ok": false,
       "err": "ProxyError: HTTPSConnectionPool(host='api.telegram.org', port=443): Max retries exceeded with url: /botfake/sendMessage (Caused by ProxyError('Unable to connect to proxy', OSError('Tunnel connection f"
+    },
+    {
+      "ts": "2026-06-14T09:31:36.924948",
+      "type": "🇺🇸 <b>下週美股 IPO 預告</b>",
+      "ok": false,
+      "err": "尚未設定 TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID"
+    },
+    {
+      "ts": "2026-06-14T09:31:36.989451",
+      "type": "📅 <b>下週台股新股上市預告</b>",
+      "ok": false,
+      "err": "尚未設定 TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID"
     }
   ],
   "cron_runs": [
@@ -92,6 +104,14 @@
     {
       "ts": "2026-06-12T00:57:54.458506",
       "mode": "pre_market_815"
+    },
+    {
+      "ts": "2026-06-14T10:58:20.472249",
+      "mode": "us_buy_picks"
+    },
+    {
+      "ts": "2026-06-14T10:58:39.813401",
+      "mode": "us_buy_picks"
     }
   ]
 }
