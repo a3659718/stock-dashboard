@@ -260,6 +260,29 @@ def build_post_market_msg() -> str:
     except Exception as _re:
         print(f"[post_market] rsi_divergence fail: {_re}", flush=True)
 
+    # === 整合: watchlist 觸發摘要 (整合 watchlist_triggers, 不再盤中推) ===
+    try:
+        import watchlist_store as _ws
+        state = _ws.load_monitor_state()
+        wt_today = state.get("watchlist_triggers_today") or []
+        # 過濾今天
+        import datetime as _dt
+        today_str = _dt.date.today().strftime("%Y-%m-%d")
+        wt_today = [t for t in wt_today if t.get("date") == today_str]
+        if wt_today:
+            lines.append("━━━━━━━ ⭐ Watchlist 觸發 ━━━━━━━")
+            for t in wt_today[:5]:
+                sid = _esc(t.get("stock_id", ""))
+                tt = _esc(t.get("trigger_type", ""))
+                cur = t.get("current", "—")
+                val = t.get("value", "—")
+                lines.append(f"  <code>{sid}</code> {tt} (現價 {cur} / 條件 {val})")
+            if len(wt_today) > 5:
+                lines.append(f"  ... 還有 {len(wt_today) - 5} 個")
+            lines.append("")
+    except Exception as _wte:
+        print(f"[post_market] watchlist_today fail: {_wte}", flush=True)
+
     # === 新增 (#7): 組合風險檢查 — 若有持倉, 警示集中度 ===
     try:
         import portfolio_risk as _pr
@@ -339,7 +362,6 @@ def _build_decision_recap(twii: Dict, sectors: Dict, breadth: Dict, leaders: Lis
     else:
         lines.append("  🟡 震盪日, 不追高不殺低, 等隔日方向明確再進場")
 
-    # 明日方向
     lines.append("")
     lines.append("<b>🔮 明日方向</b>")
     if pct >= 1.0:

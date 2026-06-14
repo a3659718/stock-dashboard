@@ -3116,7 +3116,10 @@ def fmt_watchlist_alert(stock_id: str, name: str, hits: list, latest_date: str,
 
 
 def fmt_us_fg_alert(fg: dict, threshold_low: int = 25, threshold_high: int = 75) -> Optional[str]:
-    """美股 F&G 極值警報."""
+    """美股 F&G 極值警報.
+
+    Bug fix: 加 fmt_fear_greed_alert alias 給 app.py 用 (line 3111 之前的呼叫).
+    """
     if not fg or fg.get("score") is None:
         return None
     try:
@@ -3134,6 +3137,10 @@ def fmt_us_fg_alert(fg: dict, threshold_low: int = 25, threshold_high: int = 75)
                 "歷史經驗為短期回檔風險偏高訊號，建議分批減碼或停利。")
     return None
 
+
+
+# Alias: app.py 用 fmt_fear_greed_alert
+fmt_fear_greed_alert = fmt_us_fg_alert
 
 def fmt_tw_pulse_alert(pulse: dict, threshold_low: int = 25, threshold_high: int = 75):
     """台股市場情緒指數極值警報."""
@@ -3504,5 +3511,4 @@ def fmt_speculation_picks(picks: list) -> str:
         sid = _esc(p.get("symbol", ""))
         name = _esc(p.get("name", ""))
         score = p.get("score", 0)
-        lines.append(f"  <code>{sid}</code> {name} · score {score}")
-    return "\n".join(lines)
+    
