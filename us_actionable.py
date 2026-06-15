@@ -303,27 +303,29 @@ def compute_us_actionable_picks(top_n: int = 10, min_score: int = 65,
     import us_screener as _us
     if us_pool is None:
         try:
-            us_pool = _us.run_us_recommendation()
+            # BUG FIX: 預設抓 20 檔池子, 再經 _enrich 算入場分後取 top_n=10
+            #         若用 default top_n=5 → 池子太小, top_n=10 也只能拿到 5 檔
+            us_pool = _us.run_us_recommendation(top_n=20)
         except Exception as e:
             print(f"[us_actionable] fetch us_pool fail: {e}", flush=True)
             return []
-    sector_picks = (us_pool or {}).get("sector_picks") or []
-    if not sector_picks:
-        return []
+
+    # BUG FIX (CRITICAL): us_screener 回的 key 是 top_picks (DataFrame), 不是 sector_picks!
+    # 之前讀 sector_picks → 永遠 None → 永遠 return [] → 美股可進場精選永遠空
+    top_picks = (us_pool or {}).get("top_picks")
+    if top_picks is None or (hasattr(top_picks, "empty") and top_picks.empty):
+        # Fallback: 嘗試 all_scored (廣一點的池子)
+        top_picks = (us_pool or {}).get("all_scored")
+        if top_picks is None or (hasattr(top_picks, "empty") and top_picks.empty):
+            print("[us_actionable] us_pool 無 top_picks / all_scored, 回空", flush=True)
+            return []
 
     all_rows = []
-    for sp in sector_picks:
-        stocks = sp.get("stocks")
-        if stocks is None:
-            continue
-        if hasattr(stocks, "to_dict"):
-            rows = stocks.to_dict("records")
-        else:
-            rows = list(stocks)
-        for r in rows:
-            all_rows.append(r)
+    if hasattr(top_picks, "to_dict"):
+        all_rows = top_picks.to_dict("records")
+    else:
+        all_rows = list(top_picks)
 
-    enriched = []
     enriched = []
     for r in all_rows:
         try:

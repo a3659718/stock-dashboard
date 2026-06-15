@@ -1870,9 +1870,10 @@ with tab_pulse:
             _show_table(sectors_df, market="US")
         catalysts_us = us_open.get("catalysts", {})
         for sp in us_open.get("sector_picks", []):
-            sec = sp["sector"]
-            stocks = sp["stocks"]
-            if stocks is None or stocks.empty:
+            # 防呆: 用 .get() 避免 schema 變動時 KeyError
+            sec = sp.get("sector", "Unknown")
+            stocks = sp.get("stocks")
+            if stocks is None or (hasattr(stocks, "empty") and stocks.empty):
                 continue
             with st.expander(f"[{sec}] 動能潛在股 (3 檔)", expanded=False):
                 _show_table(stocks, market="US")
@@ -2047,7 +2048,9 @@ with tab_pulse:
             )
             if leaders is not None and not leaders.empty:
                 with st.expander("各產業龍頭 (前 5 名 + 盤中資訊)"):
-                    _actionable = st.session_state.get("actionable_picks") or []
+                    # BUG FIX: session_state key 是 actionable_picks_cache (line 624 寫入),
+                    # 不是 actionable_picks → 之前永遠看不到 ✨ "在今日可行動" 標記
+                    _actionable = st.session_state.get("actionable_picks_cache") or []
                     _actionable_sids = {str(p.get("stock_id", "")) for p in _actionable if p.get("stock_id")}
                     show_df = leaders.copy()
                     if _actionable_sids:
