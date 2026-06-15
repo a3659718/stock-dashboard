@@ -187,7 +187,9 @@ def _record_push_safe(text: str, ok: bool, info: str) -> None:
 
 def send_message(text: str, disable_preview: bool = True,
                   reply_markup: Optional[dict] = None,
-                  disable_notification: bool = False) -> tuple[bool, str]:
+                  disable_notification: bool = False,
+                  category: Optional[str] = None,
+                  **_kwargs) -> tuple[bool, str]:
     """直接呼叫 Bot API。回傳 (成功, 訊息).
 
     強化點:
@@ -198,7 +200,19 @@ def send_message(text: str, disable_preview: bool = True,
       5. 對 None / 空 text early return, 避免 text[:80] 在診斷字串炸 TypeError
       6. 自動寫入 system_health.push_history (供 admin dashboard 顯示)
       7. disable_notification=True → silent push (不響鈴, 用於普通新聞分流)
+      8. category: 若有傳 (e.g. "volume_breakout"), 算 daily cap; 沒傳 = 主推不算 cap
     """
+    # === 次要 alert daily cap (用戶要求: cap 6 封/日) ===
+    # 只有傳 category 的 caller 算 cap; 主推 (us_open / 反轉 / pre_market 等) 不傳 → 不算
+    if category:
+        try:
+            import push_cap as _pc
+            if not _pc.check_and_consume(category):
+                print(f"[notifier] daily cap reached, skip {category}", flush=True)
+                return False, f"daily_cap_skip:{category}"
+        except Exception as _ce:
+            print(f"[notifier] push_cap check fail (continue anyway): {_ce}", flush=True)
+
     # Bug fix: 加 3 次 retry — 網路抖動 / TG API 暫時 503 不會漏推
     import time as _time
     last_info = ""
@@ -2964,29 +2978,25 @@ def fmt_us_open_picks(data: dict, ai_text: str = "") -> str:
             lines.append(f"<b>{_esc(sym)} {_esc(sname)}</b>  1d {_safe_pct(row.get('1d_%'))}")
 
     sector_picks = data.get("sector_picks", [])
-    catalysts = data.get("catalysts", {})
     events = data.get("events", {})
     if sector_picks:
         lines.append("")
         lines.append("<b>各板塊動能潛在股 (3 檔)</b>")
         for sp in sector_picks:
-            sec = sp["sector"]
-            stocks = sp["stocks"]
-            if stocks is None or stocks.empty:
+            # 防呆: 用 .get() 避免 schema 變動 KeyError
+            sec = sp.get("sector", "Unknown")
+            stocks = sp.get("stocks")
+            if stocks is None or (hasattr(stocks, "empty") and stocks.empty):
                 continue
             lines.append(f"\n<b>[{_esc(sec)}]</b>")
             for _, s in stocks.iterrows():
                 sym = s.get("symbol", "")
                 today = s.get("今日%")
-                ratio = s.get("量比")
                 twenty = s.get("20日%")
                 lines.append(
                     f"  • <b><code>{_esc(sym)}</code></b>  "
                     f"今日 {_esc(today)}% · 20d {_esc(twenty)}%"
                 )
-                cat = catalysts.get(str(sym))
-                if cat:
-                    pass  # 催化劑已移除
                 ev = events.get(str(sym))
                 if ev and ev.get("summary") and ev["summary"] != "—":
                     lines.append(f"    財報: {_esc(ev['summary'])}")
@@ -2999,15 +3009,11 @@ def fmt_us_open_picks(data: dict, ai_text: str = "") -> str:
             sym = s.get("symbol", "")
             today = s.get("今日%")
             twenty = s.get("20日%")
-            ratio = s.get("量比")
             score = s.get("growth_score")
             lines.append(
                 f"  • <b><code>{_esc(sym)}</code></b>  "
                 f"今日 {_esc(today)}% · 20d {_esc(twenty)}% · {_esc(score)}/10"
             )
-            cat = catalysts.get(str(sym))
-            if cat:
-                pass  # 催化劑已移除
             ev = events.get(str(sym))
             if ev and ev.get("summary") and ev["summary"] != "—":
                 lines.append(f"    財報: {_esc(ev['summary'])}")
@@ -3511,18 +3517,5 @@ def fmt_trump_policy_alerts(alerts: list, gemini_analysis="") -> str:
             f"舊聞 {s['filtered_age']} / 已推過 {s['filtered_dedup']})</i>"
         )
 
-    lines.append("<i>※ Tier 1 政治影響, 留意盤前波動.</i>")
-    return _truncate_tg_msg("\n".join(lines).rstrip())
-
-
-def fmt_speculation_picks(picks: list) -> str:
-    """投機股 (Story Stock) 推播 (Tier 2)."""
-    if not picks:
-        return ""
-    lines = ["🎲 <b>投機股精選 (Story Stock)</b>"]
-    for p in picks[:5]:
-        sid = _esc(p.get("symbol", ""))
-        name = _esc(p.get("name", ""))
-        score = p.get("score", 0)
-        lines.append(f"  <code>{sid}</code> {name} · score {score}")
+    lines.append("<i>※ 川普政策推播會抓 Reuters/Bloomberg/WhiteHouse 白名單來源</i>")
     return "\n".join(lines)
