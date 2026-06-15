@@ -3423,7 +3423,7 @@ def fmt_trump_policy_alerts(alerts: list, gemini_analysis="") -> str:
             lines.append(f"<i>{headline}</i>")
         lines.append("")
 
-        # 主新聞 1 條 (帶連結)
+        # 主新聞 1 條 (帶連結) — 用戶要求: 不再列額外新聞題目
         if alerts:
             a0 = alerts[0]
             sym = _esc(a0.get("symbol", ""))
@@ -3434,10 +3434,6 @@ def fmt_trump_policy_alerts(alerts: list, gemini_analysis="") -> str:
                 lines.append(f"📰 {sym_tag}<a href=\"{link}\">{title}</a>")
             else:
                 lines.append(f"📰 {sym_tag}{title}")
-            # 其他新聞只列題目, 不放連結
-            for a2 in alerts[1:3]:
-                t2 = _esc((a2.get("title") or "")[:80])
-                lines.append(f"  · {t2}")
             lines.append("")
 
         # 影響分析
@@ -3449,24 +3445,8 @@ def fmt_trump_policy_alerts(alerts: list, gemini_analysis="") -> str:
             lines.append(f"🇹🇼 <b>台股影響</b>: {tw_imp}")
         if us_imp or tw_imp:
             lines.append("")
-
-        # 全球商品
-        gi = g.get("global_impact") or {}
-        if isinstance(gi, dict):
-            gi_lines = []
-            for key, label, emoji in [
-                ("gold", "黃金", "🟡"),
-                ("oil", "原油", "🛢️"),
-                ("usd", "美元", "💵"),
-                ("us_bonds", "美債", "📊"),
-            ]:
-                v = gi.get(key, "")
-                if v:
-                    gi_lines.append(f"  {emoji} {label}: {_esc(v)}")
-            if gi_lines:
-                lines.append("🌐 <b>全球商品影響</b>")
-                lines.extend(gi_lines)
-                lines.append("")
+        # 用戶要求: 刪掉「全球商品影響」block (黃金/原油/美元/美債 4 項)
+        # — 訊息瘦身, 只留美股/台股影響 + 操作建議
 
         # 操作建議 — 三段式
         long_play = _esc(g.get("long_play", ""))

@@ -38,7 +38,7 @@ TRUMP_KEYWORDS_EN = [
 
 TRUMP_COOLDOWN_MIN = 360  # 60→180→240→360 (6 小時 / batch)
 TRUMP_MAX_PER_BATCH = 1  # 2→1 (每批最多 1 則, 取最重要)
-TRUMP_DAILY_CAP = 4  # 6→4 (一天絕對上限 4 則)
+TRUMP_DAILY_CAP = 3  # 6→4→3 (用戶要求再降, 一天絕對上限 3 則)
 TRUMP_MAX_AGE_HR = 12  # 48→12 (新聞超過 12 小時就視為舊聞, 不推)
 
 # 白名單來源 — 只信高品質媒體 + 官方
@@ -628,4 +628,4 @@ def mark_alerts_sent(alerts: List[Dict]) -> None:
         daily[today] = int(daily.get(today, 0)) + len(alerts)
         watchlist_store.save_monitor_state(state)
     except Exception as e:
-        print(f"[trump_policy] mark_alerts_sent fail: {e}", flush=True)
+        print(f"[trump_policy] mark_alerts_sent fail (non-fatal): {e}", flush=True)
