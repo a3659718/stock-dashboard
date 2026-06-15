@@ -358,7 +358,7 @@ def fmt_accuracy_block(signal_types: Optional[List[str]] = None,
 
 
 def fmt_compact_perf(signal_type: str, lookback_days: int = 30,
-                       min_n: int = 5) -> str:
+                       min_n: int = 5, **_kwargs) -> str:
     """單一 signal_type 的精簡績效一行 — 給推播末段塞.
 
     格式: "📊 歷史 30d 勝率 65% (n=23)"

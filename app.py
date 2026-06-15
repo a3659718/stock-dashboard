@@ -3504,11 +3504,24 @@ with tab_health:
     st.subheader("🎯 訊號績效排行 (最近 30 日)")
     try:
         import signal_tracker as _st_perf
-        perf = _st_perf.fmt_compact_perf("all", lookback_days=30, include_pending=False)
-        if perf:
-            st.markdown(f"```\n{perf}\n```")
-        else:
+        # Bug fix: fmt_compact_perf 不接 "all" 也不接 include_pending kwarg
+        # 改用 accuracy_summary(None) (None = 全訊號彙總) + 自行 format
+        s = _st_perf.accuracy_summary(None, lookback_days=30)
+        n = s.get("n") or 0
+        pct = s.get("pct")
+        if n == 0:
             st.info("(尚未累積足夠訊號 — 建議等 30 日後再看)")
+        elif n < 10 or pct is None:
+            st.markdown(f"```\n📊 全訊號 30d: 樣本累積中 ({n} 筆評估完, 樣本 >=10 才顯示勝率)\n```")
+        else:
+            mark = "🟢" if pct >= 60 else ("🟡" if pct >= 40 else "🔴")
+            st.markdown(f"```\n📊 {mark} 全訊號 30d 勝率 {pct:.1f}% (n={n}, hit={s.get('hit')})\n```")
+            try:
+                block = _st_perf.fmt_accuracy_block(lookback_days=30)
+                if block:
+                    st.markdown(f"```\n{block}\n```")
+            except Exception:
+                pass
         st.caption("勝率 = 訊號評估後達預期方向的比例; 樣本 < 10 不顯示")
     except Exception as e:
         st.warning(f"signal_tracker 載入失敗: {e}")
