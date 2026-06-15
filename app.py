@@ -2844,30 +2844,58 @@ with tab_us:
         "候選池可在 Streamlit secrets 加入 `US_WATCHLIST=AAPL,MSFT,...` 自訂。"
     )
 
-    cA, cB = st.columns([1, 1])
+    cA, cB, cC = st.columns([1, 1, 1])
     with cA:
-        us_btn = st.button("🔄 更新美股 Top 10", use_container_width=True, type="primary")
+        # Bug fix: 加 key 避免 widget collision; 加 type/help 讓 button 明顯
+        us_btn = st.button("🔄 更新美股 Top 10", use_container_width=True,
+                           type="primary", key="us_top10_refresh",
+                           help="重新跑 us_screener (60-90 秒, 燒 Gemini quota)")
     with cB:
         send_us_tg = st.button("✈️ Send to TG", use_container_width=True,
                                disabled=not notifier.is_configured(),
                                key="send_us_tg")
+    with cC:
+        clear_us_cache = st.button("🗑️ 清 cache + 重抓", use_container_width=True,
+                                   key="us_clear_cache",
+                                   help="強制清 streamlit cache 後重抓 (上次抓到空時用)")
+    if clear_us_cache:
+        st.cache_data.clear()
+        st.session_state.pop("us_result", None)
+        st.session_state.pop("us_actionable", None)
+        st.toast("已清 cache, 自動觸發重抓", icon="🗑️")
+        us_btn = True   # 觸發下方 if us_btn
 
     if us_btn:
+        # 立刻給用戶看到 button 有反應
+        st.toast("開始掃描美股, 請等 60-90 秒…", icon="🚀")
         try:
-            with st.spinner("掃描美股可進場精選中…(約 60-90 秒)"):
-                # F fix: us_pool 抓一次, 傳給 us_actionable 避免重複抓 (省 60-90s)
+            with st.spinner("掃描美股可進場精選中…(約 60-90 秒, 不要重複點)"):
                 _us_pool = us_screener.run_us_recommendation(top_n=20)
                 st.session_state["us_result"] = _us_pool
+                # 即時告知池子大小
+                _tp = (_us_pool or {}).get("top_picks")
+                if _tp is None or (hasattr(_tp, "empty") and _tp.empty):
+                    st.warning("⚠️ us_screener 回空 — 可能是 yfinance / Gemini API 失敗. 試試「清 cache + 重抓」")
+                else:
+                    st.success(f"✅ 候選池抓到 {len(_tp)} 檔, 計算入場分中…")
                 try:
                     import us_actionable as _ua
                     st.session_state["us_actionable"] = _ua.compute_us_actionable_picks(
                         top_n=10, min_score=65, us_pool=_us_pool,
                     )
+                    _n_act = len(st.session_state["us_actionable"])
+                    if _n_act > 0:
+                        st.toast(f"✅ 完成! Top {_n_act} 可進場", icon="🎯")
+                    else:
+                        st.info("ℹ️ 候選池有資料, 但沒檔通過入場篩選 (entry_score < 55)")
                 except Exception as _ae:
                     st.warning(f"actionable 精選失敗 (fallback table): {_ae}")
                     st.session_state["us_actionable"] = []
         except Exception as e:
-            st.error(f"美股掃描失敗：{e}")
+            import traceback
+            st.error(f"美股掃描失敗：{type(e).__name__}: {e}")
+            with st.expander("錯誤詳情 (給 debug 用)", expanded=False):
+                st.code(traceback.format_exc())
 
     us = st.session_state.get("us_result", {})
     top_picks = us.get("top_picks")
@@ -3493,12 +3521,13 @@ with tab_health:
                     st.caption(a.get("reason", ""))
                     if "entry" in a:
                         c1, c2, c3, c4 = st.columns(4)
-                        c1.metric("進場", f"{a.get('entry', 0):.0f}")
-                        c2.metric("停損", f"{a.get('stop', 0):.0f}")
-                        c3.metric("目標", f"{a.get('target', 0):.0f}")
-                        c4.metric("R:R", f"{a.get('rr', 0):.2f}")
+                        c1.metric("進場", f"{a.get('entry', '—')}")
+                        c2.metric("停損", f"{a.get('stop', '—')}")
+                        c3.metric("目標", f"{a.get('target', '—')}")
+                        c4.metric("Tier", str(a.get("tier", "—")))
+                    st.markdown("---")
         else:
-            st.info("(無訊號 — 升貼水正常, 法人/散戶倉位平衡)")
+            st.info("(目前無台指期 alert)")
     except Exception as e:
         st.warning(f"tx_futures 載入失敗: {e}")
 
@@ -3507,8 +3536,6 @@ with tab_health:
     st.subheader("🎯 訊號績效排行 (最近 30 日)")
     try:
         import signal_tracker as _st_perf
-        # Bug fix: fmt_compact_perf 不接 "all" 也不接 include_pending kwarg
-        # 改用 accuracy_summary(None) (None = 全訊號彙總) + 自行 format
         s = _st_perf.accuracy_summary(None, lookback_days=30)
         n = s.get("n") or 0
         pct = s.get("pct")
