@@ -2018,14 +2018,24 @@ def fmt_intraday_reversal_alerts(alerts: list) -> str:
                 vs_open = float(a.get("pct_vs_open", 0) or 0)
             except (TypeError, ValueError):
                 dd_pct = vs_open = 0.0
+            # 新增: vs 昨收 (讓「今日總漲跌」一目了然)
+            vs_prior = a.get("pct_vs_prior")
             sev = a.get("severity", "mild")
             badge = _rev_severity_badge(sev)
             badge_p = f" {badge}" if badge else ""
             sign_o = "+" if vs_open > 0 else ""
             advice = _rev_action_drawdown(sev, a.get("market_state", "")) or "💡 觀望"
-            # 精簡: 標題 1 行 + 建議 1 行 + 弱股 top 3 1 行
+            # 精簡: 標題 1 行 (含回吐 + vs 開盤 + vs 昨收) + 建議 + 弱股 top 3
+            vs_prior_str = ""
+            if vs_prior is not None:
+                try:
+                    vp = float(vs_prior)
+                    sign_p = "+" if vp > 0 else ""
+                    vs_prior_str = f" · vs 昨收 {sign_p}{vp:.2f}%"
+                except (TypeError, ValueError):
+                    pass
             lines.append(f"{name} <code>{sym}</code> 回吐 <b>{dd_pct:+.2f}%</b> "
-                          f"(vs 開盤 {sign_o}{vs_open:.2f}%){badge_p}")
+                          f"(vs 開盤 {sign_o}{vs_open:.2f}%{vs_prior_str}){badge_p}")
             lines.append(f"  {advice}")
             comp = a.get("companion_stocks") or []
             if comp:
@@ -3488,14 +3498,11 @@ def fmt_trump_policy_alerts(alerts: list, gemini_analysis="") -> str:
     # I: 顯示過濾統計 (給用戶知道過濾品質)
     if filter_stats and filter_stats.get("scanned", 0) > 0:
         s = filter_stats
-        lines.append("")
-        lines.append("")
         lines.append(
-            f"<i>📊 過濾: 掃描 {s['scanned']} 則 → 推 {s['passed']} 則 "
+            f"<i>📊 過濾: 掃 {s['scanned']} 則 → 推 {s['passed']} 則 "
             f"(關鍵字擋 {s['filtered_keyword']} / "
             f"來源不在白名單 {s['filtered_publisher']} / "
             f"舊聞 {s['filtered_age']} / 已推過 {s['filtered_dedup']})</i>"
         )
-
     lines.append("<i>※ 川普政策推播會抓 Reuters/Bloomberg/WhiteHouse 白名單來源</i>")
     return "\n".join(lines)

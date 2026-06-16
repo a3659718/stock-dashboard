@@ -256,11 +256,22 @@ def _fetch_intraday_anchor_data(symbol: str) -> Optional[Dict]:
                 )
                 return None
 
+        # 新增 prior_close — 給 alert 顯示「vs 昨收」用
+        # 從 df 拿昨日最後一根 5m bar 的 Close. 若昨日無資料 (週一 / 假日後) 取最近一個 trading day.
+        prior_close = None
+        try:
+            prev_df = df[df["_d"] < today].sort_values("_dt")
+            if not prev_df.empty:
+                prior_close = float(prev_df.iloc[-1]["Close"])
+        except Exception:
+            pass
+
         return {
             "today_open": today_open,
             "current": current,
             "today_high": today_high,
             "today_low": today_low,
+            "prior_close": prior_close,
             "mins_since_high": mins_since_high,
             "mins_since_low": mins_since_low,
             "mins_since_open": mins_since_open,
@@ -923,6 +934,11 @@ def check_intraday_reversal() -> List[Dict]:
                         )
                     except Exception as e:
                         print(f"[reversal] companion scan failed: {e}", flush=True)
+                # 新增: vs 昨收 — 讓用戶看到「今日總漲跌」而非只是「from 高點回吐」
+                _prior = snap.get("prior_close")
+                _pct_vs_prior = None
+                if _prior and _prior > 0:
+                    _pct_vs_prior = round((current / _prior - 1) * 100, 2)
                 alerts.append({
                     "symbol": sym,
                     "name": cfg["name"],
@@ -932,6 +948,8 @@ def check_intraday_reversal() -> List[Dict]:
                     "today_open": round(today_open, 2),
                     "today_high": round(today_high, 2),
                     "today_low": round(today_low, 2),
+                    "prior_close": round(_prior, 2) if _prior else None,
+                    "pct_vs_prior": _pct_vs_prior,   # ← 新增
                     "drawdown_pct": round(drawdown_pct, 2),
                     "rebound_pct": round(rebound_pct, 2),
                     "pct_vs_open": round(pct_vs_open, 2),
