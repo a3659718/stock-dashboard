@@ -202,6 +202,16 @@ def send_message(text: str, disable_preview: bool = True,
       7. disable_notification=True → silent push (不響鈴, 用於普通新聞分流)
       8. category: 若有傳 (e.g. "volume_breakout"), 算 daily cap; 沒傳 = 主推不算 cap
     """
+    # === 深夜靜音 (TPE 02:00-06:00) — 用戶要求: 推但不響鈴, 不中斷睡眠 ===
+    try:
+        import datetime as _dt_q
+        _hr_tpe = (_dt_q.datetime.utcnow() + _dt_q.timedelta(hours=8)).hour
+        if 2 <= _hr_tpe < 6 and not disable_notification:
+            disable_notification = True
+            print(f"[notifier] quiet hours (TPE {_hr_tpe}:xx), force silent push", flush=True)
+    except Exception:
+        pass
+
     # === 次要 alert daily cap (用戶要求: cap 6 封/日) ===
     # 只有傳 category 的 caller 算 cap; 主推 (us_open / 反轉 / pre_market 等) 不傳 → 不算
     if category:
@@ -2069,8 +2079,18 @@ def fmt_intraday_reversal_alerts(alerts: list) -> str:
             except (TypeError, ValueError):
                 max_pct = vs_open = shrink_pp = 0.0
             sign_o = "+" if vs_open > 0 else ""
+            vs_prior_s = a.get("pct_vs_prior")
+            vs_prior_str_s = ""
+            if vs_prior_s is not None:
+                try:
+                    vp = float(vs_prior_s)
+                    sign_p = "+" if vp > 0 else ""
+                    vs_prior_str_s = f" · vs 昨收 {sign_p}{vp:.2f}%"
+                except (TypeError, ValueError):
+                    pass
             lines.append(
-                f"{name} <code>{sym}</code> 高 +{max_pct:.2f}% → {sign_o}{vs_open:.2f}% "
+                f"{name} <code>{sym}</code> 高 +{max_pct:.2f}% → {sign_o}{vs_open:.2f}%"
+                f"{vs_prior_str_s} "
                 f"(<b>-{shrink_pp:.2f}pp</b>) 💡 分批停利"
             )
             companion = a.get("companion_stocks") or []
@@ -2097,8 +2117,18 @@ def fmt_intraday_reversal_alerts(alerts: list) -> str:
             except (TypeError, ValueError):
                 min_pct = vs_open = recovery_pp = 0.0
             sign_o = "+" if vs_open > 0 else ""
+            vs_prior_rv = a.get("pct_vs_prior")
+            vs_prior_str_rv = ""
+            if vs_prior_rv is not None:
+                try:
+                    vp = float(vs_prior_rv)
+                    sign_p = "+" if vp > 0 else ""
+                    vs_prior_str_rv = f" · vs 昨收 {sign_p}{vp:.2f}%"
+                except (TypeError, ValueError):
+                    pass
             lines.append(
-                f"{name} <code>{sym}</code> 低 {min_pct:.2f}% → {sign_o}{vs_open:.2f}% "
+                f"{name} <code>{sym}</code> 低 {min_pct:.2f}% → {sign_o}{vs_open:.2f}%"
+                f"{vs_prior_str_rv} "
                 f"(<b>+{recovery_pp:.2f}pp</b>) 💡 留意轉強跟進"
             )
             up_stocks = a.get("companion_stocks_up") or []
@@ -2161,13 +2191,22 @@ def fmt_intraday_reversal_alerts(alerts: list) -> str:
                 vs_open = float(a.get("pct_vs_open", 0) or 0)
             except (TypeError, ValueError):
                 rb_pct = vs_open = 0.0
+            vs_prior_r = a.get("pct_vs_prior")
             sev = a.get("severity", "mild")
             badge = _rev_severity_badge(sev)
             badge_p = f" {badge}" if badge else ""
             sign_o = "+" if vs_open > 0 else ""
             advice = _rev_action_rebound(sev, a.get("market_state", "")) or "💡 觀察跟進"
+            vs_prior_str_r = ""
+            if vs_prior_r is not None:
+                try:
+                    vp = float(vs_prior_r)
+                    sign_p = "+" if vp > 0 else ""
+                    vs_prior_str_r = f" · vs 昨收 {sign_p}{vp:.2f}%"
+                except (TypeError, ValueError):
+                    pass
             lines.append(f"{name} <code>{sym}</code> 反彈 <b>+{rb_pct:.2f}%</b> "
-                          f"(vs 開盤 {sign_o}{vs_open:.2f}%){badge_p}")
+                          f"(vs 開盤 {sign_o}{vs_open:.2f}%{vs_prior_str_r}){badge_p}")
             lines.append(f"  {advice}")
             lines.append("")
 
@@ -3482,20 +3521,19 @@ def fmt_trump_policy_alerts(alerts: list, gemini_analysis="") -> str:
         # 舊版 fallback: Gemini 不可用 → 只顯示新聞 + 純文字分析
         for i, a in enumerate(alerts[:3]):
             sym = _esc(a.get("symbol", ""))
-            title = _esc((a.get("title") or "")[:100])
+            title = _esc((a.get("title") or "")[:80])
             link = a.get("link", "")
             sym_tag = f"[{sym}] " if sym and sym != "GENERAL" else ""
-            if link and i == 0:
-                lines.append(f"⚡ {sym_tag}<a href=\"{link}\">{title}</a>")
+            if link:
+                lines.append(f"📰 {sym_tag}<a href=\"{link}\">{title}</a>")
             else:
-                lines.append(f"⚡ {sym_tag}{title}")
-        lines.append("")
+                lines.append(f"📰 {sym_tag}{title}")
         if isinstance(gemini_analysis, str) and gemini_analysis:
-            lines.append("🤖 <b>Gemini 影響分析</b>")
+            lines.append("")
+            lines.append("<b>分析</b>")
             lines.append(_esc(gemini_analysis))
             lines.append("")
-
-    # I: 顯示過濾統計 (給用戶知道過濾品質)
+    # I: 顯示過濾統計
     if filter_stats and filter_stats.get("scanned", 0) > 0:
         s = filter_stats
         lines.append(

@@ -57,7 +57,7 @@ INDEX_CONFIG = {
                "disable_atr_boost": True, "reversal_pct": 1.0},  # 中等: 0.7→1.0 TWII
     # 美股
     "^SOX":   {"name": "費城半導體", "threshold": 100.0, "country": "US",
-               "reversal_pct": 0.8},  # 中等: 0.6→0.8 SOX
+               "reversal_pct": 0.8},  # 中等: 0.6→0.8 (用戶最終選 0.8 為穩)
     "^IXIC":  {"name": "那斯達克",   "threshold": 200.0, "country": "US",
                "reversal_pct": 1.2},  # 中等: 0.8→1.2 IXIC
 }
@@ -832,6 +832,10 @@ def check_intraday_reversal() -> List[Dict]:
                 except Exception as e:
                     print(f"[reversal-shrink] companion scan failed: {e}", flush=True)
             shrink_pp = max_pct_vs_open - pct_vs_open
+            _prior_s = snap.get("prior_close")
+            _pct_vs_prior_s = None
+            if _prior_s and _prior_s > 0:
+                _pct_vs_prior_s = round((current / _prior_s - 1) * 100, 2)
             alerts.append({
                 "symbol": sym,
                 "name": cfg["name"],
@@ -841,6 +845,8 @@ def check_intraday_reversal() -> List[Dict]:
                 "today_open": round(today_open, 2),
                 "today_high": round(today_high, 2),
                 "today_low": round(today_low, 2),
+                "prior_close": round(_prior_s, 2) if _prior_s else None,
+                "pct_vs_prior": _pct_vs_prior_s,
                 "max_pct_vs_open": round(max_pct_vs_open, 2),
                 "pct_vs_open": round(pct_vs_open, 2),
                 "shrink_pp": round(shrink_pp, 2),
@@ -872,6 +878,10 @@ def check_intraday_reversal() -> List[Dict]:
                 except Exception as e:
                     print(f"[reversal-recover] sector leaders failed: {e}", flush=True)
             recovery_pp = pct_vs_open - min_pct_vs_open
+            _prior_rv = snap.get("prior_close")
+            _pct_vs_prior_rv = None
+            if _prior_rv and _prior_rv > 0:
+                _pct_vs_prior_rv = round((current / _prior_rv - 1) * 100, 2)
             alerts.append({
                 "symbol": sym,
                 "name": cfg["name"],
@@ -881,6 +891,8 @@ def check_intraday_reversal() -> List[Dict]:
                 "today_open": round(today_open, 2),
                 "today_high": round(today_high, 2),
                 "today_low": round(today_low, 2),
+                "prior_close": round(_prior_rv, 2) if _prior_rv else None,
+                "pct_vs_prior": _pct_vs_prior_rv,
                 "min_pct_vs_open": round(min_pct_vs_open, 2),
                 "pct_vs_open": round(pct_vs_open, 2),
                 "recovery_pp": round(recovery_pp, 2),
@@ -1001,6 +1013,11 @@ def check_intraday_reversal() -> List[Dict]:
                         should_fire = True
 
             if should_fire:
+                # vs 昨收 (跟 drawdown 一致)
+                _prior_r = snap.get("prior_close")
+                _pct_vs_prior_r = None
+                if _prior_r and _prior_r > 0:
+                    _pct_vs_prior_r = round((current / _prior_r - 1) * 100, 2)
                 alerts.append({
                     "symbol": sym,
                     "name": cfg["name"],
@@ -1010,6 +1027,8 @@ def check_intraday_reversal() -> List[Dict]:
                     "today_open": round(today_open, 2),
                     "today_high": round(today_high, 2),
                     "today_low": round(today_low, 2),
+                    "prior_close": round(_prior_r, 2) if _prior_r else None,
+                    "pct_vs_prior": _pct_vs_prior_r,
                     "drawdown_pct": round(drawdown_pct, 2),
                     "rebound_pct": round(rebound_pct, 2),
                     "pct_vs_open": round(pct_vs_open, 2),
@@ -1687,63 +1706,12 @@ def check_index_alerts() -> List[Dict]:
                 "threshold_used": threshold,
                 "consecutive": consecutive,
                 "warning": consecutive >= 2,
-                "alerts_today": alerts_count + 1,
+                "alerts_today": alerts_today + 1,
             })
-            sym_state["last_bucket"] = bucket
-            sym_state["last_alert_diff"] = round(diff, 2)
-            sym_state["last_alert_price"] = round(current, 2)
-            sym_state["last_alert_at"] = dt.datetime.now(dt.timezone.utc).isoformat()
-            sym_state["alerts_today_count"] = alerts_count + 1
+            sym_state["last_alert_diff"] = diff
+            sym_state["last_alert_price"] = current
+            sym_state["alerts_today"] = alerts_today + 1
 
     state["index_alerts"] = idx_state
-    watchlist_store.save_monitor_state(state)
-    return alerts
-
-
-# ---------------------------------------------------------------------------
-# 加密貨幣警報 (排程制)
-# ---------------------------------------------------------------------------
-CRYPTO_SCHEDULE_UTC_HOURS = {
-    15: "night",  # 台北 23:00
-}
-
-
-def check_crypto_alerts() -> List[Dict]:
-    """加密貨幣排程警報. 每 slot 最多 2 次 (first push 固定發, second push 變動 >= 2.5% 才發)."""
-    now_utc = dt.datetime.now(dt.timezone.utc)
-    cur_hour = now_utc.hour
-    cur_minute = now_utc.minute
-
-    if cur_hour not in CRYPTO_SCHEDULE_UTC_HOURS:
-        return []
-
-    is_first_tick = cur_minute < 30
-
-    slot_label = CRYPTO_SCHEDULE_UTC_HOURS[cur_hour]
-    today_str = now_utc.strftime("%Y-%m-%d")
-    slot_key = f"{today_str}_{slot_label}"
-
-    state = watchlist_store.load_monitor_state()
-    crypto_state = state.setdefault("crypto_alerts", {})
-
-    print(
-        f"[crypto] slot={slot_key} tick={'first' if is_first_tick else 'second'} "
-        f"min={cur_minute}, state has {len(crypto_state)} symbols",
-        flush=True,
-    )
-
-    alerts: List[Dict] = []
-    now_str = now_utc.strftime("%Y-%m-%d %H:%M UTC")
-
-    for sym, cfg in CRYPTO_CONFIG.items():
-        df = ds.fetch_yf_history(sym, period="2d", interval="1h")
-        if df.empty:
-            print(f"[crypto] {sym} no data, skip", flush=True)
-            continue
-        try:
-            current = float(df["Close"].iloc[-1])
-        except Exception:
-            continue
-    state["crypto_alerts"] = ca_state
     watchlist_store.save_monitor_state(state)
     return alerts
