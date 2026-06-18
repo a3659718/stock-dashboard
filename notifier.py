@@ -31,6 +31,20 @@ def _esc(s) -> str:
         return ""
 
 
+def _esc_attr(s) -> str:
+    """escape 給 HTML 屬性值用 (e.g. <a href="...">) — 連 " ' & < > 都 escape.
+
+    新聞網址常含 `&` (?a=x&b=y), 直接塞進 href 會被 Telegram 判成壞 entity → 400,
+    連結消失。屬性 context 必須連引號一起 escape。
+    """
+    if s is None:
+        return ""
+    try:
+        return _html.escape(str(s), quote=True)
+    except Exception:
+        return ""
+
+
 def _strip_caret(sym: str) -> str:
     """剝 ^TWII → TWII (yfinance ticker 顯示給用戶看的清理)."""
     if not sym:
@@ -145,29 +159,34 @@ def _looks_like_html_parse_error(resp_text: str) -> bool:
 def build_stock_action_keyboard(stock_id: str, market: str = "TW") -> dict:
     """建一組 inline keyboard, 給個股推播附加「快捷動作」按鈕.
 
-    callback_data 短碼定義 (給未來 webhook handler 配對):
-      wl:<sid>      加入自選
-      ai:<sid>      AI 深入分析
-      sl:<sid>      設停損
-      tv:<sid>      開 TradingView
-      X:<id>        忽略 (本則訊息不再追蹤)
+    callback_data 短碼定義 (scripts/tg_callback_listener.py 負責配對處理):
+      wl:<mkt>:<sid>   加入自選
+      ai:<mkt>:<sid>   AI 深入分析
+      sl:<mkt>:<sid>   設停損 (依現價算 -8% 建議停損)
+      tv:<sid>         開 TradingView (url button, 不需 handler)
 
-    無 webhook 時, url button (TradingView) 仍可直接跳轉; callback button 會
-    顯示「無法處理」, 但不會崩, 也不影響主訊息.
+    callback button 由 tg_callback_listener long-poll getUpdates 處理;
+    listener 沒跑時 url button (TradingView) 仍可直接跳轉, callback button 會
+    顯示轉圈 (Telegram 端逾時), 但不會崩, 也不影響主訊息.
+
+    註: callback_data 帶 market, 讓 handler 知道用台股還是美股資料源.
+        舊格式 wl:<sid> (無 market) listener 仍向後相容 (由 sid 是否純數字推斷).
     """
-    if market == "US":
+    mkt = "US" if str(market).upper() == "US" else "TW"
+    if mkt == "US":
         tv_url = f"https://www.tradingview.com/symbols/{stock_id}/"
     else:
         tv_url = f"https://www.tradingview.com/symbols/TWSE-{stock_id}/"
-    sid_short = (stock_id or "")[:32]  # callback_data 上限 64 bytes
+    # callback_data 上限 64 bytes; "wl:US:" 6 + sid → 留 32 給 sid 綽綽有餘
+    sid_short = (stock_id or "")[:32]
     return {
         "inline_keyboard": [
             [
-                {"text": "➕ 加自選", "callback_data": f"wl:{sid_short}"},
-                {"text": "🤖 AI 分析", "callback_data": f"ai:{sid_short}"},
+                {"text": "➕ 加自選", "callback_data": f"wl:{mkt}:{sid_short}"},
+                {"text": "🤖 AI 分析", "callback_data": f"ai:{mkt}:{sid_short}"},
             ],
             [
-                {"text": "🛡️ 設停損", "callback_data": f"sl:{sid_short}"},
+                {"text": "🛡️ 設停損", "callback_data": f"sl:{mkt}:{sid_short}"},
                 {"text": "📊 看圖", "url": tv_url},
             ],
         ]
@@ -392,7 +411,7 @@ def fmt_tw_combined(combined_df, latest_date_str: str, market_label: str, max_n:
             lines.append(f"   {_esc(labels)}")
         lines.append("")
 
-    return "\n".join(lines)
+    return _truncate_tg_msg("\n".join(lines))
 
 
 def fmt_us_top_picks(df, fg: dict, top_n: int = 10) -> str:
@@ -2386,9 +2405,9 @@ def fmt_news_event_alerts(alerts: list, impact_analysis: str = "") -> str:
                 f"<i>{src_text}</i>  {hits_display}"
             )
             if link:
-                lines.append(f'  <a href="{link}">{title}</a>')
+                lines.append(f'  <a href="{_esc_attr(link)}">{_esc(title)}</a>')
             else:
-                lines.append(f"  {title}")
+                lines.append(f"  {_esc(title)}")
             if publisher:
                 lines.append(f"  <i>來源: {publisher}</i>")
             lines.append("")

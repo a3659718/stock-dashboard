@@ -20,6 +20,33 @@ from datetime import timezone
 from typing import Dict, List, Optional
 
 
+def _esc(s) -> str:
+    """跳脫 Telegram parse_mode=HTML 的特殊字元 (<, >, &).
+
+    name / 產業 / Gemini 產出 (competitive / worth_reason / entry_action) 常含
+    `<`, `>`, `&` (例: 「毛利率 > 50%」, 「A&B」), 不跳脫會觸發 400 can't parse
+    entities, 退回純文字後格式 (粗體/code) 全失。
+    """
+    if s is None:
+        return ""
+    return (str(s).replace("&", "&amp;")
+                  .replace("<", "&lt;")
+                  .replace(">", "&gt;"))
+
+
+def _truncate(text: str, max_bytes: int = 3900) -> str:
+    """避免 IPO 多檔 + Gemini 理由超過 TG 4096 bytes 硬上限 → 400 fail."""
+    try:
+        import notifier
+        return notifier._truncate_tg_msg(text, max_bytes)
+    except Exception:
+        # fallback: 粗略 byte 截斷
+        b = text.encode("utf-8")
+        if len(b) <= max_bytes:
+            return text
+        return b[:max_bytes].decode("utf-8", "ignore") + "\n…(已截斷)"
+
+
 HOT_THEME_KEYWORDS = {
     "AI / 半導體": ["ai", "人工智慧", "晶片", "半導體", "ic 設計", "ic設計", "asic",
                        "edge ai", "hpc", "高效能運算", "gpu"],
@@ -231,7 +258,7 @@ def build_us_ipo_preview_msg() -> str:
             rp_high = analysis.get("reasonable_price_high")
             worth_reason = analysis.get("worth_reason", "")
             lines.append(
-                f"  <code>{sid}</code> {name} · {ex} · {price_str} · {shares_m} 股 {worth_emoji}"
+                f"  <code>{_esc(sid)}</code> {_esc(name)} · {_esc(ex)} · {price_str} · {shares_m} 股 {worth_emoji}"
             )
             if rp_low and rp_high:
                 try:
@@ -239,12 +266,12 @@ def build_us_ipo_preview_msg() -> str:
                 except (TypeError, ValueError):
                     pass
             if worth_reason:
-                lines.append(f"     🎯 {worth_reason}")
+                lines.append(f"     🎯 {_esc(worth_reason)}")
         lines.append("")
 
     lines.append("<i>※ 已過濾「不值得買」的標的, 只列值得關注</i>")
     lines.append("<i>※ 美股 IPO 開盤常有 ±50% 波動, 嚴守風控</i>")
-    return "\n".join(lines)
+    return _truncate("\n".join(lines))
 
 
 def check_next_week_listings() -> List[Dict]:
@@ -471,7 +498,7 @@ def build_today_listing_msg() -> str:
         worth_reason = analysis.get("worth_reason", "")
         worth_emoji = {"yes": "✅", "maybe": "🟡"}.get(worth, "🟡")
 
-        lines.append(f"<code>{sid}</code> <b>{name}</b> ({industry}) {worth_emoji}")
+        lines.append(f"<code>{_esc(sid)}</code> <b>{_esc(name)}</b> ({_esc(industry)}) {worth_emoji}")
         lines.append(f"  承銷價 <b>{offer:.2f}</b> 元")
 
         if rp_low and rp_high:
@@ -486,16 +513,16 @@ def build_today_listing_msg() -> str:
                 pass
 
         if competitive:
-            lines.append(f"  💼 {competitive}")
+            lines.append(f"  💼 {_esc(competitive)}")
         if worth_reason:
-            lines.append(f"  🎯 <b>{worth_emoji} 值得買: {worth_reason}</b>")
+            lines.append(f"  🎯 <b>{worth_emoji} 值得買: {_esc(worth_reason)}</b>")
         if entry_action:
-            lines.append(f"  💡 進場: {entry_action}")
+            lines.append(f"  💡 進場: {_esc(entry_action)}")
         lines.append("")
 
     lines.append("<i>※ 已過濾「不值得買」的標的, 只列值得關注</i>")
     lines.append("<i>※ 首日波動極大, 嚴守停損 ≤ 部位 5%</i>")
-    return "\n".join(lines)
+    return _truncate("\n".join(lines))
 
 
 def check_and_push(mode: str = "today", market: str = "TW") -> Dict:
@@ -506,13 +533,6 @@ def check_and_push(mode: str = "today", market: str = "TW") -> Dict:
       "next_week" — 推下週上市預告 (輕量版)
     market: TW / US — 只對 mode='next_week' 生效
     """
-    if mode == "next_week":
-        if market == "US":
-            msg = build_us_ipo_preview_msg()
-            log_tag = "ipo_us_next_week"
-        else:
-            msg = build_next_week_preview_msg()
-            log_tag = "ipo_tw_next_week"
     if mode == "next_week":
         if market == "US":
             msg = build_us_ipo_preview_msg()
@@ -594,7 +614,7 @@ def build_next_week_preview_msg() -> str:
             worth_reason = analysis.get("worth_reason", "")
             industry_short = (industry or "—")[:6]
             lines.append(
-                f"  <code>{sid}</code> {name} · {industry_short} · 承銷 {offer:.1f} 元 {worth_emoji}"
+                f"  <code>{_esc(sid)}</code> {_esc(name)} · {_esc(industry_short)} · 承銷 {offer:.1f} 元 {worth_emoji}"
             )
             if rp_low and rp_high:
                 try:
@@ -602,9 +622,9 @@ def build_next_week_preview_msg() -> str:
                 except (TypeError, ValueError):
                     pass
             if worth_reason:
-                lines.append(f"     🎯 {worth_reason}")
+                lines.append(f"     🎯 {_esc(worth_reason)}")
         lines.append("")
 
     lines.append("<i>※ 已過濾「不值得買」的標的, 只列值得關注</i>")
     lines.append("<i>※ 上市當天 08:30 會推具體進場建議</i>")
-    return "\n".join(lines)
+    return _truncate("\n".join(lines))

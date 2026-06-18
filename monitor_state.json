@@ -94,6 +94,12 @@
       "type": "📅 <b>下週台股新股上市預告</b>",
       "ok": false,
       "err": "尚未設定 TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID"
+    },
+    {
+      "ts": "2026-06-18T14:48:17.527262",
+      "type": "hi",
+      "ok": false,
+      "err": "尚未設定 TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID"
     }
   ],
   "cron_runs": [
