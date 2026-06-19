@@ -267,9 +267,13 @@ def check_and_push_if_surge() -> Optional[Dict]:
         if trigger_key in sent_today:
             return {"triggered": True, "n_picks": 0, "sent": False, "reason": "dup"}
     except Exception:
+        # Bug fix: 原本 except 沒定義 trigger_key/state → 送出成功後 sent_today.append(trigger_key)
+        #          會 NameError(被外層 except 吞), 害成功的推播被記成失敗且未去重 → 下個 tick 重複推.
         sent_today = []
         ssa = {}
         today_str = dt.date.today().strftime("%Y-%m-%d")
+        trigger_key = surge.get("trigger", "")
+        state = None
 
     print(f"[strong_stock_alert] 觸發: {surge['trigger']}", flush=True)
     picks = scan_strong_stocks_now(top_n=10)
@@ -282,10 +286,11 @@ def check_and_push_if_surge() -> Optional[Dict]:
         if ok:
             sent_today.append(trigger_key)
             ssa[today_str] = sent_today
-            try:
-                watchlist_store.save_monitor_state(state)
-            except Exception:
-                pass
+            if state is not None:  # state load 失敗時不寫, 避免用空 dict 覆蓋 monitor_state
+                try:
+                    watchlist_store.save_monitor_state(state)
+                except Exception:
+                    pass
             return {"triggered": True, "n_picks": len(picks), "sent": True}
         else:
             print(f"[strong_stock_alert] 推送失敗: {info}", flush=True)
@@ -438,7 +443,9 @@ def _fmt_intraday_strong_msg(picks: List[Dict]) -> str:
     for i, p in enumerate(picks_sorted, 1):
         sid = str(p.get("stock_id", ""))
         name = _esc(name_map.get(sid, ""))
-        cur = p.get("current", "—")
+        cur = p.get("current")
+        # Bug fix: 原 default "—" 字串套 :.2f 會 TypeError 炸掉整封強勢股推播. 改安全格式化.
+        cur_s = f"{cur:.2f}" if isinstance(cur, (int, float)) else "—"
         tp = p.get("today_pct", 0)
         vr = p.get("vol_ratio", 0)
         el = p.get("entry_label", "—")
@@ -459,7 +466,7 @@ def _fmt_intraday_strong_msg(picks: List[Dict]) -> str:
             q_tag = f" {q_action}"  # 🔥 / 💎 高品質
         lines.append(
             f"{i}. <code>{_esc(sid)}</code> {name} · "
-            f"{cur:.2f} <b>+{tp:.2f}%</b> · 量比 {vr:.2f}x{el_tag}{q_tag}"
+            f"{cur_s} <b>+{tp:.2f}%</b> · 量比 {vr:.2f}x{el_tag}{q_tag}"
         )
         # 進出場建議 (只給 BUY/HOLD 標的, AVOID 改顯警告)
         if el in ("BUY", "STRONG_BUY", "HOLD"):

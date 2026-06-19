@@ -284,19 +284,21 @@ def check_triggers() -> List[Dict]:
         market = entries[0][1].get("market", "TW")
         # price_above / price_below 不需要等收盤 (盤中即時觸發是合理的)
         # KD/MACD/MA cross 必須等收盤 (盤中 partial-bar 會誤觸)
+        # Bug fix: 同股同時有 price_* 與 cross 觸發時, 原本整組用 require_closed=True →
+        #          price_* 也被迫等收盤才判, 盤中收不到即時價格警報. 改成 price 用盤中資料、
+        #          cross 用收盤資料各取所需, 兩類各自在正確時機觸發.
         types_in_group = [t.get("type", "") for _, t in entries]
-        only_price_triggers = all(tp.startswith("price_") for tp in types_in_group)
-        m_state = _fetch_kd_macd_state(sid, market,
-                                          require_closed=not only_price_triggers)
-        if not m_state:
-            continue
+        has_price = any(tp.startswith("price_") for tp in types_in_group)
+        has_cross = any(not tp.startswith("price_") for tp in types_in_group)
+        intraday_state = _fetch_kd_macd_state(sid, market, require_closed=False) if has_price else None
+        closed_state = _fetch_kd_macd_state(sid, market, require_closed=True) if has_cross else None
         for tid, t in entries:
             t_type = t.get("type", "")
-            # 對 cross 類, 若是 require_closed=False 拿到的盤中資料, 跳過 cross 判斷
             is_cross = (t_type.startswith("kd_") or t_type.startswith("macd_")
                         or t_type.startswith("ma_cross"))
-            if is_cross and only_price_triggers:
-                continue  # 防呆 (不會發生)
+            m_state = closed_state if is_cross else intraday_state
+            if not m_state:
+                continue
             msg = _evaluate_trigger(t, m_state)
             if msg:
                 t["fired_at"] = today

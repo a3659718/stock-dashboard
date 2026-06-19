@@ -296,7 +296,8 @@ def vote_for_stock(stock_id: str, market: str = "auto") -> Dict:
         except Exception as e:
             d = {"strategy": voter.__name__, "vote": "—", "reason": f"err: {e}"[:60]}
         details.append(d)
-        strat_name = d.get("strategy", "").split()[0]  # "Minervini SEPA+VCP" → "Minervini"
+        _strat = (d.get("strategy") or "").split()  # Bug fix: 空 strategy 時 "".split()[0] 會 IndexError
+        strat_name = _strat[0] if _strat else ""     # "Minervini SEPA+VCP" → "Minervini"
         w = STRATEGY_WEIGHTS.get(strat_name, 1.0)
         if d["vote"] == "BUY":
             buy_w += w; buy_n += 1

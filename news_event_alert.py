@@ -315,6 +315,10 @@ def check_news_events() -> List[Dict]:
     universe = _gather_universe()
     print(f"[news_event] 掃 {len(universe)} 檔 universe", flush=True)
 
+    # Bug fix: all_alerts 原本從未初始化 → 進到下方 .extend / if not all_alerts 必 NameError,
+    #          導致新聞事件警報每次呼叫都炸、等於完全沒在推。
+    all_alerts: list = []
+
     # 並行掃 (Yahoo News 每檔 ~1-2s, 30 檔 ~5s with 8 workers)
     from concurrent.futures import ThreadPoolExecutor, as_completed
     with ThreadPoolExecutor(max_workers=2) as ex:  # 每檔掃 4 來源, workers=2 避免 Yahoo 429

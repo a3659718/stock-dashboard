@@ -103,10 +103,12 @@ def _scan_one_stock(sid: str) -> Optional[Dict]:
             import theme_analyzer
             tr = theme_analyzer.theme_score(sid)
             if isinstance(tr, dict):
-                narratives = tr.get("narratives") or []
+                # Bug fix: theme_score() 回的是 narrative_tags / total_score, 不是 narratives / score
+                #          → 原本題材 tag 永遠空、score 永遠 0, 題材加權形同失效.
+                narratives = tr.get("narrative_tags") or []
                 if narratives:
                     theme_tag = " / ".join(narratives[:2])
-                    theme_score_val = int(tr.get("score", 0) or 0)
+                    theme_score_val = int(tr.get("total_score", 0) or 0)
         except Exception:
             pass
 

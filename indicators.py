@@ -64,9 +64,13 @@ def rsi(close: pd.Series, period: int = 14) -> pd.Series:
     loss = -delta.clip(upper=0)
     avg_gain = gain.ewm(alpha=1.0 / period, adjust=False, min_periods=period).mean()
     avg_loss = loss.ewm(alpha=1.0 / period, adjust=False, min_periods=period).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
+    # Bug fix: 原本 avg_loss.replace(0, nan) 會把「純上漲(窗內無下跌)」的 RS 變 NaN → fillna(50),
+    #          害最強的票 RSI 顯示 50(中性) 而非 ~100. 改用 errstate 讓 x/0=inf → RSI=100 (正確);
+    #          完全無波動 (0/0=NaN) 與初期暖身 NaN 仍由下方 fillna(50) 視為中性.
+    with np.errstate(divide="ignore", invalid="ignore"):
+        rs = avg_gain / avg_loss
     out = 100 - (100 / (1 + rs))
-    return out.fillna(50)  # 初期 NaN 視為中性
+    return out.fillna(50)  # 初期暖身 / 完全無波動 NaN 視為中性
 
 
 # ---------------------------------------------------------------------------

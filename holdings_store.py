@@ -89,9 +89,11 @@ def save_holdings(items: List[Dict]) -> bool:
     items = items[:MAX_HOLDINGS]
     items = [_normalize(d) for d in items]
     try:
-        HOLDINGS_FILE.write_text(
+        # Bug fix: 改用 atomic 寫入 (寫 tmp 再 os.replace), 避免併發 cron/Streamlit 讀到半寫的壞檔.
+        import watchlist_store
+        watchlist_store._atomic_write_text(
+            HOLDINGS_FILE,
             json.dumps(items, ensure_ascii=False, indent=2),
-            encoding="utf-8",
         )
     except Exception:
         pass

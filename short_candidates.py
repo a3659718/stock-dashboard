@@ -183,7 +183,8 @@ def _fmt_intraday_weak_msg(picks: List[Dict]) -> str:
     for i, p in enumerate(picks, 1):
         sid = str(p.get("stock_id", ""))
         name = _esc(name_map.get(sid, ""))
-        cur = p.get("current", "—")
+        cur = p.get("current")
+        cur_s = f"{cur:.2f}" if isinstance(cur, (int, float)) else "—"  # Bug fix: 缺值套 :.2f 會崩
         tp = p.get("today_pct", 0)
         vr = p.get("vol_ratio", 0)
         # 跌破 MA 標記
@@ -195,7 +196,7 @@ def _fmt_intraday_weak_msg(picks: List[Dict]) -> str:
 
         lines.append(
             f"{i}. <code>{_esc(sid)}</code> {name} · "
-            f"{cur:.2f} <b>{tp:.2f}%</b> · 量比 {vr:.2f}x{bma}"
+            f"{cur_s} <b>{tp:.2f}%</b> · 量比 {vr:.2f}x{bma}"
         )
         # 短空操作建議
         try:

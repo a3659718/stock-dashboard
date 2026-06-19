@@ -1503,13 +1503,22 @@ with tab_tw:
         rating_zh = tw_pulse.get("rating_zh", "")
         color = ("#A32D2D" if s <= 25 else "#D85A30" if s <= 45 else
                  "#888780" if s <= 55 else "#3B6D11" if s <= 75 else "#791F1F")
+        # Bug fix: TWII 缺值時 None:,.0f → TypeError, 且此段不在 try 內 → 整個台股分頁變空白.
+        #          連同 ['raw'] 直接 subscript (缺 key 會 KeyError) 一併改成安全取值.
+        _raw = tw_pulse.get("raw") or {}
+        _twii = _raw.get("TWII")
+        _twii_s = f"{_twii:,.0f}" if isinstance(_twii, (int, float)) else "—"
+        _d5 = _raw.get("5日%")
+        _d5_s = f"{_d5}" if _d5 is not None else "—"
+        _mma = _raw.get("距 MA60 %")
+        _mma_s = f"{_mma}" if _mma is not None else "—"
         st.markdown(
             f"<div style='padding:8px 12px; background:rgba(127,127,127,0.08); "
             f"border-left:4px solid {color}; border-radius:6px; margin-bottom:8px'>"
             f"🇹🇼 <b>台股市場情緒指數: {s} ({rating_zh})</b> · "
-            f"加權 {tw_pulse['raw'].get('TWII'):,.0f} · "
-            f"5日 {tw_pulse['raw'].get('5日%')}% · "
-            f"距 MA60 {tw_pulse['raw'].get('距 MA60 %')}%"
+            f"加權 {_twii_s} · "
+            f"5日 {_d5_s}% · "
+            f"距 MA60 {_mma_s}%"
             f"</div>",
             unsafe_allow_html=True,
         )
@@ -1859,12 +1868,14 @@ with tab_pulse:
                 if ok:
                     st.markdown("##### 🤖 Gemini 觀點")
                     st.markdown(ai_text)
-                    st.session_state["tw_open_ai"] = ai_text
+                    # Bug fix: 不能寫 st.session_state["tw_open_ai"] — 那個 key 已被上面
+                    #          key="tw_open_ai" 的 button 佔用, 再賦值會丟 StreamlitAPIException.
+                    st.session_state["tw_open_ai_text"] = ai_text
                 else:
                     st.error(ai_text)
         if st.button("✈️ Send 台股開盤分析 to TG", key="tw_open_send",
                       disabled=not notifier.is_configured(), use_container_width=True):
-            ai_text = st.session_state.get("tw_open_ai", "")
+            ai_text = st.session_state.get("tw_open_ai_text", "")
             _send_tg(notifier.fmt_tw_open_picks(tw_open, ai_text=ai_text), "台股開盤分析")
 
     # 顯示美股開盤結果
@@ -1920,12 +1931,13 @@ with tab_pulse:
                 if ok:
                     st.markdown("##### 🤖 Gemini 觀點")
                     st.markdown(ai_text)
-                    st.session_state["us_open_ai"] = ai_text
+                    # Bug fix: 同 tw_open_ai — 改寫到非 widget key, 避免 StreamlitAPIException.
+                    st.session_state["us_open_ai_text"] = ai_text
                 else:
                     st.error(ai_text)
         if st.button("✈️ Send 美股開盤分析 to TG", key="us_open_send",
                       disabled=not notifier.is_configured(), use_container_width=True):
-            ai_text = st.session_state.get("us_open_ai", "")
+            ai_text = st.session_state.get("us_open_ai_text", "")
             _send_tg(notifier.fmt_us_open_picks(us_open, ai_text=ai_text), "美股開盤分析")
 
     # === 🕵️ 大戶偷進場 (smart_money_stealth) + 熱門題材 3 型態 ===
@@ -1945,11 +1957,15 @@ with tab_pulse:
                 with st.expander(f"🕵️ {sid} {name} · {p.get('current', 0):.2f} ({p.get('today_pct', 0):+.2f}%) · 分數 {p.get('score', 0)}/16", expanded=True):
                     for r in p.get("reasons", []):
                         st.markdown(f"- {r}")
+                    # Bug fix: entry_low/high/stop_loss/target_* 缺 default, 任一為 None → :.2f TypeError
+                    #          → 整個大戶偷進場區塊空白. 缺值統一顯示 — 而非崩潰.
+                    def _f2(v):
+                        return f"{v:.2f}" if isinstance(v, (int, float)) else "—"
                     st.markdown(
-                        f"**進場區** {p.get('entry_low'):.2f}-{p.get('entry_high'):.2f} | "
-                        f"**停損** {p.get('stop_loss'):.2f} | "
-                        f"**短目標** {p.get('target_short'):.2f} | "
-                        f"**中目標** {p.get('target_mid'):.2f} | "
+                        f"**進場區** {_f2(p.get('entry_low'))}-{_f2(p.get('entry_high'))} | "
+                        f"**停損** {_f2(p.get('stop_loss'))} | "
+                        f"**短目標** {_f2(p.get('target_short'))} | "
+                        f"**中目標** {_f2(p.get('target_mid'))} | "
                         f"**R:R** {p.get('rr', 0):.2f}"
                     )
 

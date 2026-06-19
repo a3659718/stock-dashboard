@@ -149,6 +149,11 @@ def screen_break_ma(daily: pd.DataFrame) -> pd.DataFrame:
 def screen_volume_burst(daily: pd.DataFrame, params: TWParams) -> pd.DataFrame:
     if daily.empty:
         return pd.DataFrame()
+    # Bug fix: FinMind 若改名/缺 Trading_Volume 欄, 原本會在 groupby 迴圈內 KeyError 炸掉整個量能篩選.
+    #          先檢查欄位, 缺就 graceful 回空 (不中斷其他篩選).
+    if "Trading_Volume" not in daily.columns:
+        print("[tw_screener] 缺 Trading_Volume 欄, 跳過量能篩選", flush=True)
+        return pd.DataFrame()
     rows = []
     for sid, g in daily.groupby("stock_id"):
         g = g.sort_values("date")

@@ -92,8 +92,43 @@ def close_batched_state() -> None:
     _BATCH_DIRTY = False
 
 
+def _read_persisted_raw() -> Dict:
+    """直接從 backend 讀目前持久化的 monitor_state (不碰 batch cache) — 給 _flush_state merge 用."""
+    sheet = _get_sheet("monitor_state")
+    if sheet is not None:
+        try:
+            cell = sheet.acell("A1").value
+            if cell:
+                return json.loads(cell)
+        except Exception:
+            pass
+    if MONITOR_STATE_FILE.exists():
+        try:
+            return json.loads(MONITOR_STATE_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {}
+
+
 def _flush_state(state: Dict) -> None:
-    """實際寫入 state (本地檔案 + GSheet). 跟舊版 save_monitor_state 邏輯相同."""
+    """實際寫入 state (本地檔案 + GSheet). 跟舊版 save_monitor_state 邏輯相同.
+
+    Bug fix (lost-update): 各模組各自管自己的 top-level key (push_cap→secondary_push_cap /
+    push_dedup→slot_dedup / alert_priority→alert_dedup …), 但原本每次都「整包覆寫」, 後寫的
+    會蓋掉前一個模組/另一個併發 runner 剛寫的 key → 去重表/每日上限/計數器無聲遺失 → 重複或漏推。
+    這裡寫入前先讀回目前持久化的版本, 做 shallow top-level merge: 我們手上的 key 覆蓋, 其餘保留。
+    monitor_state 沒有任何「刪頂層 key」的用法 (刪除都在子 dict 內), 故 merge 安全。
+    註: 仍非真正的鎖, 同一 key 的併發更新 (e.g. 兩個 runner 同時 +1 計數) 仍可能 last-writer-wins;
+        但「不同 key 互相覆蓋」這個主要 lost-update 已消除。
+    """
+    try:
+        persisted = _read_persisted_raw()
+        if isinstance(persisted, dict) and persisted:
+            merged = dict(persisted)
+            merged.update(state)  # 我們的 top-level key 覆蓋, 其餘 (別人寫的) 保留
+            state = merged
+    except Exception as _me:
+        print(f"[watchlist_store] monitor_state merge skip (non-fatal): {_me}", flush=True)
     blob = json.dumps(state, ensure_ascii=False, indent=2)
     try:
         _atomic_write_text(MONITOR_STATE_FILE, blob)
@@ -102,7 +137,8 @@ def _flush_state(state: Dict) -> None:
     sheet = _get_sheet("monitor_state")
     if sheet is not None:
         try:
-            sheet.clear()
+            # Bug fix: 原本 clear() 再 update_acell, 中間有空窗, 併發 reader 會讀到空 → state 當預設值
+            #          (去重表/每日上限瞬間被當成清空). update_acell 本就會整格覆寫, clear() 多餘且有害, 移除.
             sheet.update_acell("A1", blob)
         except Exception as _e:
             print(f"[watchlist_store] monitor_state gsheets update failed: {_e}", flush=True)

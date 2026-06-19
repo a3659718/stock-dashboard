@@ -48,13 +48,23 @@ def _is_tw_session() -> bool:
 
 
 def _is_us_session() -> bool:
-    """美股交易時段 (簡化, 不處理 DST 邊界)."""
-    now_utc = dt.datetime.now(dt.timezone.utc)
-    if now_utc.weekday() >= 5:
-        return False
-    cur = now_utc.hour + now_utc.minute / 60.0
-    # EDT 13:30-20:00 UTC, EST 14:30-21:00 UTC — 取聯集
-    return 13.5 <= cur < 21.0
+    """美股 RTH 交易時段 — 用 US/Eastern 直接判, 自動處理 DST."""
+    # Bug fix: 原本用 13.5-21.0 UTC 聯集, EST 季的 13:30-14:30 UTC 其實是盤前,
+    #          會用盤前/舊資料評估持倉. 改用 US/Eastern 9:30-16:00 RTH, DST 自動正確.
+    try:
+        import pytz
+        et = dt.datetime.now(pytz.timezone("US/Eastern"))
+        if et.weekday() >= 5:
+            return False
+        mins = et.hour * 60 + et.minute
+        return 9 * 60 + 30 <= mins < 16 * 60
+    except Exception:
+        # pytz 不可用 → 退回舊聯集 (寬鬆但不崩)
+        now_utc = dt.datetime.now(dt.timezone.utc)
+        if now_utc.weekday() >= 5:
+            return False
+        cur = now_utc.hour + now_utc.minute / 60.0
+        return 13.5 <= cur < 21.0
 
 
 def _tw_suffix(stock_id: str) -> Optional[str]:

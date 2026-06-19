@@ -464,6 +464,7 @@ def _run_impl(symbols: List[str], max_workers: int = 5,
     print("[us_upside] scanning " + str(len(symbols)) + " symbols...", flush=True)
     spy_df = _fetch_yf_one("SPY", period="3mo")
     features = []
+    last_dates: List[str] = []  # 收集各檔最新一根 K 線日期, 用來推真正資料日 (而非寫死 today)
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
         futures = {ex.submit(_fetch_yf_one, s, "1y"): s for s in symbols}
         for fut in as_completed(futures):
@@ -471,6 +472,10 @@ def _run_impl(symbols: List[str], max_workers: int = 5,
             df = fut.result()
             if df is None:
                 continue
+            try:
+                last_dates.append(str(df["Date"].iloc[-1])[:10])
+            except Exception:
+                pass
             f = _compute_us_features(s, df, spy_df=spy_df)
             if f:
                 features.append(f)
@@ -570,7 +575,10 @@ def _run_impl(symbols: List[str], max_workers: int = 5,
         "meta": {
             "scanned": len(features),
             "universe_size": len(symbols),
-            "data_date": dt.date.today().strftime("%Y-%m-%d"),
+            # Bug fix: 原本寫死 today() — 週末/假日/yfinance 卡住時會把昨天資料標成今天.
+            #          改取實際抓到的最新 K 線日期眾數, 反映真正資料日.
+            "data_date": (max(set(last_dates), key=last_dates.count)
+                          if last_dates else dt.date.today().strftime("%Y-%m-%d")),
             "breakout_count": len(breakout),
             "acceleration_count": len(acceleration),
             "squeeze_count": len(squeeze),

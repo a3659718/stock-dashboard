@@ -314,12 +314,14 @@ def fmt_smart_stealth_msg(picks: List[Dict]) -> str:
         for r in p.get("reasons", [])[:3]:
             lines.append(f"   ✓ {_esc(r)}")
         # 進出場價
+        # Bug fix: 原本 default 給字串 '—' 又套 :.2f → 任一價位缺值就 TypeError 炸掉整封推播;
+        #          且進場/停損那兩行重複貼了一次. 改用安全格式化 + 去掉重複.
+        def _f2(v):
+            return f"{v:.2f}" if isinstance(v, (int, float)) else "—"
         lines.append(
-            f"   📍 進場 {p.get('entry_low', '—'):.2f}-{p.get('entry_high', '—'):.2f} · "
-            f"停損 {p.get('stop_loss', '—'):.2f} · "
-            f"   📍 進場 {p.get('entry_low', '—'):.2f}-{p.get('entry_high', '—'):.2f} · "
-            f"停損 {p.get('stop_loss', '—'):.2f} · "
-            f"目標 {p.get('target_short', '—'):.2f}/{p.get('target_mid', '—'):.2f} · "
+            f"   📍 進場 {_f2(p.get('entry_low'))}-{_f2(p.get('entry_high'))} · "
+            f"停損 {_f2(p.get('stop_loss'))} · "
+            f"目標 {_f2(p.get('target_short'))}/{_f2(p.get('target_mid'))} · "
             f"R:R {p.get('rr', 0):.2f}"
         )
         lines.append("")

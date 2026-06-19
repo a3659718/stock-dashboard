@@ -115,7 +115,10 @@ def _extract_signals(symbol: str) -> Optional[Dict]:
     drift_pct = (current_price - today_open) / today_open * 100 if today_open else 0
     range_pct = (today_high - today_low) / today_open * 100 if today_open else 0
 
-    today_vol = float(today_bars["Volume"].sum())
+    # Bug fix: 原本 today_vol 用「今日整段累計量」去比「昨日前 30 分量」, 越接近收盤比值結構性
+    #          灌水 5-10 倍 → 型態信心度失真. 改成今日「前 30 分鐘量」(head 6 根 5 分鐘) 對基準,
+    #          開盤+30 分呼叫時等價, 盤中/盤後呼叫也不再爆量.
+    today_vol = float(today_bars.head(6)["Volume"].sum())
     # 用昨日跟前天的「前 30 分鐘量」平均當基準 (6 根 5 分鐘 = 30 分鐘)
     avg_first_30min_vol = 0.0
     distinct_prev = sorted(prev_bars["d"].unique(), reverse=True)[:5]

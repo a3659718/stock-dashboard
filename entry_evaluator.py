@@ -685,7 +685,16 @@ def _enrich_chip_signal(snap: Dict, symbol: str, market: str) -> Dict:
             streak = 0
         snap["foreign_streak_days"] = streak
         cum_5d = net_5d.sum()
-        snap["foreign_5d_pct_outstanding"] = round(cum_5d / 50000 * 100, 2) if abs(cum_5d) > 0 else 0
+        # Bug fix: 原本固定除以 50000 張股本, 對股本非 5 萬張的股票 % 嚴重失準.
+        #          改抓實際流通張數 (fetch_shares_outstanding 回張, 單位一致), 抓不到才退回 50000 proxy.
+        _lots = 50000.0
+        try:
+            _so = _ds.fetch_shares_outstanding((symbol,))
+            if _so.get(symbol, 0) and _so[symbol] > 0:
+                _lots = float(_so[symbol])
+        except Exception:
+            pass
+        snap["foreign_5d_pct_outstanding"] = round(cum_5d / _lots * 100, 2) if abs(cum_5d) > 0 else 0
     except Exception as _e:
         print(f"[entry_eval] enrich chip {symbol} failed: {_e}", flush=True)
     return snap

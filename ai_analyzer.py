@@ -52,6 +52,29 @@ def gemini_available() -> bool:
         return False
 
 
+def _get_model(model_name: str = DEFAULT_MODEL):
+    """回一個設定好 (含 safety settings) 的 GenerativeModel; 不可用時回 None.
+
+    Bug fix: 先前此函式不存在, 但有 8 個模組 (ipo_calendar / pre_market / trump_policy /
+    analyst_insider / news_impact / rate_cycle / tw_post_market / ai_confidence_scorer)
+    都 `from ai_analyzer import _get_model` 然後 `model.generate_content(prompt)`. 缺這個
+    函式 → 那些 import 全部 ImportError → 被各自 try/except 吞掉 → Gemini 分析默默失效,
+    只剩規則式 / 空白 fallback. 補上後一次救活全部 8 個功能.
+
+    呼叫端會處理 None (e.g. `if model is None: return ""`), 故 key/套件不可用時回 None.
+    """
+    key = get_gemini_key()
+    if not key:
+        return None
+    try:
+        import google.generativeai as genai
+        genai.configure(api_key=key)
+        return genai.GenerativeModel(model_name, safety_settings=get_safety_settings())
+    except Exception as e:
+        print(f"[ai_analyzer] _get_model 建立失敗: {e}", flush=True)
+        return None
+
+
 # ---------------------------------------------------------------------------
 # 把資料壓縮成適合 LLM 的精簡 prompt
 # ---------------------------------------------------------------------------

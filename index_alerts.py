@@ -1706,11 +1706,13 @@ def check_index_alerts() -> List[Dict]:
                 "threshold_used": threshold,
                 "consecutive": consecutive,
                 "warning": consecutive >= 2,
-                "alerts_today": alerts_today + 1,
+                "alerts_today": alerts_count + 1,
             })
             sym_state["last_alert_diff"] = diff
             sym_state["last_alert_price"] = current
-            sym_state["alerts_today"] = alerts_today + 1
+            # Bug fix: 原本用未定義的 alerts_today → NameError 把整個指數警報炸掉;
+            #          且寫錯 key (alerts_today), 害每日上限讀的 alerts_today_count 永不累加.
+            sym_state["alerts_today_count"] = alerts_count + 1
 
     state["index_alerts"] = idx_state
     watchlist_store.save_monitor_state(state)
