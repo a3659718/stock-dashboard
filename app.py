@@ -1705,8 +1705,11 @@ with tab_tw:
                         st.toast("已自動推送 Telegram", icon="✈️")
 
             if send_tg_btn:
-                msg = notifier.fmt_tw_combined(view, latest_str, market_label="台股篩選")
-                _send_tg(msg, "台股篩選")
+                if view is None or (hasattr(view, "empty") and view.empty):
+                    st.warning("⚠️ 還沒有資料 — 請先選條件 + 按執行篩選")
+                else:
+                    msg = notifier.fmt_tw_combined(view, latest_str, market_label="台股篩選")
+                    _send_tg(msg, "台股篩選")
 
 
 # =============================================================================
@@ -1754,7 +1757,22 @@ with tab_pulse:
     if theme_btn:
         try:
             with st.spinner("計算熱門題材中…"):
-                st.session_state["themes"] = sector_pulse.compute_hot_themes()
+                _theme_res = sector_pulse.compute_hot_themes()
+            st.session_state["themes"] = _theme_res
+            # 跨分頁可見的完成提示: Streamlit 在分頁內按鈕觸發 rerun 後, 有時畫面會
+            # 跳回別的分頁 → 結果其實算好了、卻像「按了沒反應/空白」。st.toast 會浮在
+            # 最上層, 不管目前在哪個分頁都看得到, 同時直接告訴你抓到幾個題材。
+            try:
+                _tdf = (_theme_res or {}).get("themes")
+                _n = 0 if _tdf is None or getattr(_tdf, "empty", True) else len(_tdf)
+                if _n:
+                    st.toast(f"✅ 熱門題材完成：命中 {_n} 個題材，請切到「強勢族群 / 熱門題材」分頁查看",
+                              icon="🔥")
+                else:
+                    st.toast("⚠️ 熱門題材：本次抓不到資料(可能 yfinance 限流)，稍等幾秒再按一次",
+                              icon="⚠️")
+            except Exception:
+                pass
         except Exception as e:
             st.error(f"題材分析失敗：{e}")
 
@@ -2004,6 +2022,7 @@ with tab_pulse:
             st.info("📭 **今日熱門題材抓不到** — 可能是 yfinance 限流或所有題材都平淡. 稍後再試或改點「📊 產業分類」")
         else:
             st.markdown("### 🔥 熱門題材熱度排行")
+            st.caption(f"✅ 分析完成：共 {len(themes_df)} 個題材熱度排序如下")
             st.dataframe(themes_df, use_container_width=True, hide_index=True)
 
             # Bug fix: 縮排錯, 原本在 else 外導致 themes_df 是 None 時 crash → 看起來「沒反應」
@@ -2109,15 +2128,24 @@ with tab_pulse:
        and (_themes_check is None or (hasattr(_themes_check, 'empty') and _themes_check.empty)):
         st.info("按上方按鈕開始分析 (盤前/休市時 yfinance 資料可能尚未更新)。")
 
-    if send_pulse_tg and (_sectors_check is not None and hasattr(_sectors_check, 'empty') and not _sectors_check.empty):
-        try:
-            msg = notifier.fmt_strong_sectors(
-                _sectors_check, leaders_map=_leaders_check,
-                themes_df=_themes_check, theme_leaders=_leaders_map_check,
-            )
-            _send_tg(msg, "強勢族群")
-        except Exception as _e:
-            st.error(f"強勢族群推播失敗: {type(_e).__name__}: {_e}")
+    if send_pulse_tg:
+        # BUG FIX: 原本條件只看 _sectors_check, 用戶只按「熱門題材」時 send 不會跑
+        # 改成「sectors 有 OR themes 有」就送 (fmt_strong_sectors 內部會處理可選欄位)
+        _has_sectors = (_sectors_check is not None and hasattr(_sectors_check, 'empty')
+                         and not _sectors_check.empty)
+        _has_themes = (_themes_check is not None and hasattr(_themes_check, 'empty')
+                        and not _themes_check.empty)
+        if not (_has_sectors or _has_themes):
+            st.warning("⚠️ 還沒有資料 — 請先按上方「強勢族群」或「熱門題材」按鈕跑分析")
+        else:
+            try:
+                msg = notifier.fmt_strong_sectors(
+                    _sectors_check, leaders_map=_leaders_check,
+                    themes_df=_themes_check, theme_leaders=_leaders_map_check,
+                )
+                _send_tg(msg, "強勢族群/熱門題材")
+            except Exception as _e:
+                st.error(f"推播失敗: {type(_e).__name__}: {_e}")
 
     # ========== 🔎 隱藏概念股探勘 (從新聞反向挖) ==========
     st.divider()
@@ -2281,7 +2309,14 @@ with tab_growth:
                     cat = row.get("催化劑", "")
                     if cat:
                         st.markdown(f"- **{code} {nm}** — {cat}")
-        if send_growth_tg:
+        # send 處理移到 if/else 外面 (見下方)
+        pass
+
+    # Send to TG handler — 拉出 if/else 外確保 picks empty 時也能顯示 warning
+    if send_growth_tg:
+        if picks is None or (hasattr(picks, "empty") and picks.empty):
+            st.warning("⚠️ 還沒抓到 picks — 請先按「更新成長動能榜」")
+        else:
             _send_tg(notifier.fmt_growth_picks(picks), "成長動能 Top 10")
 
 
@@ -3045,7 +3080,14 @@ with tab_us:
                     st.caption("  _(該股無近期新聞)_")
                 st.markdown("---")
 
-        if send_us_tg:
+        # send 處理移到 if/else 外面 (見下方)
+        pass
+
+    # Send to TG handler — 拉出 if/else 外確保 top_picks empty 時也能顯示 warning
+    if send_us_tg:
+        if top_picks is None or (hasattr(top_picks, "empty") and top_picks.empty):
+            st.warning("⚠️ 還沒抓到 picks — 請先按「更新美股 Top 10」")
+        else:
             _send_tg(notifier.fmt_us_top_picks(top_picks, fg), "美股 Top 10")
 
 

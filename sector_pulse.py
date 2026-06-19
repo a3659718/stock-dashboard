@@ -120,7 +120,16 @@ def fetch_intraday_metrics(stock_ids: List[str], market_map: dict) -> pd.DataFra
     market_map_tuple = tuple(sorted(
         (sid, market_map.get(sid)) for sid in stock_ids_tuple
     ))
-    return _fetch_intraday_metrics_cached(stock_ids_tuple, market_map_tuple)
+    df = _fetch_intraday_metrics_cached(stock_ids_tuple, market_map_tuple)
+    # Bug fix: 空結果(多半是 yfinance 一時限流)原本會被 cache 住 120s, 害用戶連按
+    # 幾次「熱門題材」都拿到同一份空資料 → 看起來「按了沒反應」。空結果就清掉 cache,
+    # 讓下一次點擊真的重抓, 而不是吃到被毒化的快取。
+    if df is None or df.empty:
+        try:
+            _fetch_intraday_metrics_cached.clear()
+        except Exception:
+            pass
+    return df
 
 
 # ---------------------------------------------------------------------------
