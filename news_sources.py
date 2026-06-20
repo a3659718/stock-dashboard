@@ -87,7 +87,10 @@ def fetch_world_news() -> List[Dict]:
             seen_titles.add(t)
             out.append(item)
     # 過濾近 36 小時
-    cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=36)
+    # Bug fix: 原本 cutoff 是 tz-aware, 但下面 d 由 ts.replace("Z","") 解析成 tz-naive,
+    #          d >= cutoff 必丟 TypeError → 被 except 接住後 fresh.append(it) → 36h 過濾
+    #          其實完全失效 (過期舊聞全部放行). 改用 naive UTC cutoff, 與 naive d 同型可比.
+    cutoff = dt.datetime.utcnow() - dt.timedelta(hours=36)
     fresh = []
     for it in out:
         ts = it.get("time")
@@ -190,7 +193,10 @@ def fetch_finance_news(max_items: int = 15) -> List[Dict]:
             out.append(item)
 
     # 過濾近 36 小時
-    cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=36)
+    # Bug fix: 原本 cutoff 是 tz-aware, 但下面 d 由 ts.replace("Z","") 解析成 tz-naive,
+    #          d >= cutoff 必丟 TypeError → 被 except 接住後 fresh.append(it) → 36h 過濾
+    #          其實完全失效 (過期舊聞全部放行). 改用 naive UTC cutoff, 與 naive d 同型可比.
+    cutoff = dt.datetime.utcnow() - dt.timedelta(hours=36)
     fresh = []
     for it in out:
         ts = it.get("time")

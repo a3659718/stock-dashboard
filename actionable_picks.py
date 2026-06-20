@@ -688,8 +688,6 @@ def fmt_actionable_picks_tg(picks: List[Dict]) -> str:
             lines.append(f"   目標 {_esc(p['target'])} · 停損 {_esc(p.get('stop','—'))}")
         if p.get("win_prob"):
             lines.append(f"   勝率 {_esc(p['win_prob'])} · 持有 {_esc(p.get('hold_period','—'))}")
-        if p.get("win_prob"):
-            lines.append(f"   勝率 {_esc(p['win_prob'])} · 持有 {_esc(p.get('hold_period','—'))}")
         if p.get("entry_label"):
             lines.append(f"   {p.get('entry_emoji','')} 入場: {_esc(p['entry_label'])}")
         if p.get("entry_timing_label"):
