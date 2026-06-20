@@ -397,10 +397,16 @@ def _gemini_translate_batch(titles: List[str]) -> Dict[str, str]:
         return {}
 
 
-def translate_news_titles(news_list: List[Dict]) -> List[Dict]:
-    """為每則 news 補上 title_zh 欄位 (繁中).
-    台股 / 已是中文的不會被翻譯, 只翻英文新聞.
-    Gemini 不可用時 title_zh = 原文.
+def translate_news_titles_cached(news_list: List[Dict]) -> List[Dict]:
+    """為每則 news 補上 title_zh 欄位 (繁中) — 帶 _translation_cache 的版本.
+
+    Bug fix: 原本這個函式叫 translate_news_titles, 與下方第二個同名函式衝突, 在 Python 裡
+    被「後定義的」那個遮蔽 → 這個帶快取/30 批次的版本其實從未被呼叫 (dead code), 連帶
+    _translation_cache / _gemini_translate_batch 也成了死路。改名消除靜默遮蔽, 保留現行
+    執行的是下方簡版 (max_items=15)。若想改用這個有快取的版本 (省 Gemini 成本/翻全部),
+    再把呼叫端指向 translate_news_titles_cached 即可。
+
+    台股 / 已是中文的不會被翻譯, 只翻英文新聞. Gemini 不可用時 title_zh = 原文.
     """
     cache = _translation_cache()
     pending: List[str] = []

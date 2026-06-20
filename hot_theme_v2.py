@@ -49,7 +49,10 @@ def _stock_metrics(stock_id: str) -> Optional[Dict]:
         today_pct = (cur / prev - 1) * 100 if prev > 0 else 0
         ma5 = float(c.tail(5).mean())
         ma20 = float(c.tail(20).mean())
-        high_20d = float(h.tail(20).max())
+        # Bug fix: 原本 h.tail(20) 含「今日」高點 → cur >= high_20d*0.99 幾乎必過, 變成假突破.
+        #          改用「今日之前」的 20 日高 (排除今日) 才是真正突破前高.
+        high_20d = float(h.iloc[-21:-1].max()) if len(h) >= 21 else (
+            float(h.iloc[:-1].max()) if len(h) >= 2 else cur)
         avg_vol_20d = float(v.tail(20).mean())
         today_vol = float(v.iloc[-1])
         vol_ratio = today_vol / avg_vol_20d if avg_vol_20d > 0 else 0
