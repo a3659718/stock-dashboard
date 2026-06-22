@@ -48,7 +48,10 @@ def check_quality(symbol: str) -> Dict:
         de = f.get("debtToEquity")
         if de is not None:
             try:
-                de_ratio = float(de) / 100 if float(de) > 5 else float(de)
+                # Bug fix: yfinance debtToEquity 是「百分比」形式 (e.g. 80 = 80% = 0.8 倍), 應一律 /100.
+                #          原本 `if >5 else 原值` 會把「負債極低」(D/E% ≤ 5, 例 4% = 0.04 倍) 的公司不除,
+                #          當成 ratio 4.0 → 誤標「高負債」, 把最乾淨的資產負債表誤殺。
+                de_ratio = float(de) / 100.0
                 out["debt_equity"] = round(de_ratio, 2)
                 if de_ratio < 0.5:
                     score += 3; reasons.append(f"✅ Debt/Equity {de_ratio:.2f} (低負債)")

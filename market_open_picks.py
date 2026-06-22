@@ -1055,7 +1055,7 @@ def get_weekend_recap_summary() -> Dict:
     INDICES_7D = {
         "^GSPC":  "S&P 500",
         "^IXIC":  "Nasdaq",
-        "^SOX":   "費城半導體",
+        "^SOX":   "費半",
         "^TWII":  "台灣加權",
         "^N225":  "日經 225",
         "^KS11":  "韓國 KOSPI",

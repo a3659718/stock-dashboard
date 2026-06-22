@@ -476,7 +476,7 @@ with tab_overview:
         sox = _ds_ov.fetch_yf_history("^SOX", period="2d", interval="1d")
         twii = _ds_ov.fetch_yf_history("^TWII", period="2d", interval="1d")
         vix = _ds_ov.fetch_yf_history("^VIX", period="2d", interval="1d")
-        for c, df, label in [(col1, sp, "S&P 500"), (col2, sox, "費半 SOX"),
+        for c, df, label in [(col1, sp, "S&P 500"), (col2, sox, "費半"),
                               (col3, twii, "台灣加權"), (col4, vix, "VIX")]:
             if df is not None and not df.empty and len(df) >= 2:
                 cur = float(df["Close"].iloc[-1])

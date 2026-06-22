@@ -56,7 +56,7 @@ INDEX_CONFIG = {
     "^TWII":  {"name": "台灣加權",   "threshold": 200.0, "country": "TW",
                "disable_atr_boost": True, "reversal_pct": 1.0},  # 中等: 0.7→1.0 TWII
     # 美股
-    "^SOX":   {"name": "費城半導體", "threshold": 100.0, "country": "US",
+    "^SOX":   {"name": "費半", "threshold": 100.0, "country": "US",
                "reversal_pct": 0.8},  # 中等: 0.6→0.8 (用戶最終選 0.8 為穩)
     "^IXIC":  {"name": "那斯達克",   "threshold": 200.0, "country": "US",
                "reversal_pct": 1.2},  # 中等: 0.8→1.2 IXIC
@@ -1257,7 +1257,7 @@ def check_weak_open_alerts() -> List[Dict]:
 SYSTEMIC_CRASH_CONFIG = {
     # 為什麼 SOX 用 -2.0%: 費半波動較大 + 對台股傳導性強, 使用者要求 30-60 min 內 -2% 就推
     "^TWII": {"name": "台灣加權", "country": "TW", "intraday_threshold": -3.0},
-    "^SOX":  {"name": "費城半導體", "country": "US", "intraday_threshold": -2.0},
+    "^SOX":  {"name": "費半", "country": "US", "intraday_threshold": -2.0},
     "^IXIC": {"name": "那斯達克", "country": "US", "intraday_threshold": -3.0},
     "TSM":   {"name": "台積電 ADR", "country": "US", "intraday_threshold": -3.0},
 }

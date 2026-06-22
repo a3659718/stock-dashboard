@@ -142,7 +142,7 @@ def build_morning_action_msg(market: str = "TW") -> str:
         if spy.get("current"):
             ovn_parts.append(f"SPY {spy.get('pct_vs_prev', 0):+.2f}%")
         if sox.get("current"):
-            ovn_parts.append(f"SOX {sox.get('pct_vs_prev', 0):+.2f}%")
+            ovn_parts.append(f"費半 {sox.get('pct_vs_prev', 0):+.2f}%")
         if ovn_parts:
             lines.append(f"  美股隔夜: {' · '.join(ovn_parts)}")
         lead_parts = []
@@ -190,7 +190,7 @@ def build_morning_action_msg(market: str = "TW") -> str:
         buys = _get_us_buy_picks(3)
 
         lines = ["🌅 <b>美股早盤情境 (10:05 NYC)</b>", "━━━━━━━━━━━━━━━"]
-        for sym, name in [("SPY", "SPY"), ("QQQ", "QQQ"), ("^SOX", "SOX")]:
+        for sym, name in [("SPY", "SPY"), ("QQQ", "QQQ"), ("^SOX", "費半")]:
             snap = _fetch_index_snap(sym)
             if snap.get("current"):
                 tag = "⚡強開" if snap.get("pct_vs_prev", 0) >= 1.0 \

@@ -148,7 +148,7 @@ def _gemini_predict(market: str, snapshot: Dict) -> Dict:
         if snapshot.get("us_nasdaq_pct") is not None:
             sig_lines.append(f"昨夜 Nasdaq: {snapshot['us_nasdaq_pct']:+.2f}%")
         if snapshot.get("us_sox_pct") is not None:
-            sig_lines.append(f"昨夜 費半 SOX: {snapshot['us_sox_pct']:+.2f}%")
+            sig_lines.append(f"昨夜 費半: {snapshot['us_sox_pct']:+.2f}%")
         if snapshot.get("vix") is not None:
             vp = snapshot.get("vix_pct")
             vpt = f" ({vp:+.2f}%)" if vp is not None else ""

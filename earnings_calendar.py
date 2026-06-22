@@ -92,7 +92,9 @@ def _last_tw_quarterly(stock_id: str) -> Optional[dt.date]:
 @st.cache_data(ttl=86400, show_spinner=False)
 def _last_tw_monthly_revenue(stock_id: str) -> Optional[Dict]:
     today = dt.date.today()
-    start = (today - dt.timedelta(days=120)).strftime("%Y-%m-%d")
+    # Bug fix: 原本只抓 120 天 → 自算 YoY 時抓不到「一年前」那筆 → YoY 分支永遠失效.
+    #          放寬到 400 天, 讓 fallback 自算 YoY 拿得到去年同月資料.
+    start = (today - dt.timedelta(days=400)).strftime("%Y-%m-%d")
     end = today.strftime("%Y-%m-%d")
     try:
         df = ds._finmind_get("TaiwanStockMonthRevenue",
@@ -111,7 +113,10 @@ def _last_tw_monthly_revenue(stock_id: str) -> Optional[Dict]:
             # 自己算 YoY
             try:
                 rev_now = float(last.get("Revenue", last.get("revenue", 0)) or 0)
-                yoy_row = df[df["date"] == (last["date"] - pd.DateOffset(years=1))]
+                # Bug fix: 原本用「精確等於一年前那天」比對, 月營收日期不會剛好對齊 → 抓不到.
+                #          改用「去年、同月」比對, 才抓得到去年同月那筆。
+                _t = last["date"] - pd.DateOffset(years=1)
+                yoy_row = df[(df["date"].dt.year == _t.year) & (df["date"].dt.month == _t.month)]
                 if not yoy_row.empty:
                     rev_yoy = float(yoy_row.iloc[0].get("Revenue", yoy_row.iloc[0].get("revenue", 0)) or 0)
                     if rev_yoy > 0:
