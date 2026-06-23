@@ -198,6 +198,22 @@ def main() -> int:
     except Exception as _hbe:
         print(f"[heartbeat] record_cron_run fail (non-fatal): {_hbe}", flush=True)
 
+    # === 排程去重守衛 (cron drift 防重複) ===
+    # 一天只該推一次的 slot (tw_open / us_close / morning_recap …) 若因 cron drift
+    # 被誤路由 / 兩個相鄰 cron 落進同一 slot → 同一則內容一天推兩次。這裡在送出前
+    # claim 一次, window 內已送過就跳過。monitor 等「本來就多跑」的不套; 手動觸發
+    # (workflow_dispatch) 也不套, 讓你能強制補推。fail-open: dedup 壞掉一律照送。
+    try:
+        import os as _os
+        _is_manual = _os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
+        if not _is_manual:
+            import push_dedup as _pd
+            if _pd.should_guard(market) and not _pd.claim_slot(market):
+                print(f"[push_dedup] '{market}' 視為重複 (cron drift), 本次跳過。", flush=True)
+                return 0
+    except Exception as _de:
+        print(f"[push_dedup] 守衛例外, fail-open 照跑: {_de}", flush=True)
+
     # === 假日檢查 ===
     try:
         import holiday_check
@@ -234,7 +250,12 @@ def main() -> int:
             print(f"市場狀態: {holiday_check.market_status_summary()}")
             print(f"=====================\n")
         else:
-            market_for_holiday = "TW" if market.startswith("tw") else "US"
+            # Bug fix: pre_market_* / morning_action_tw 等都是台股, 不是 US
+            if (market.startswith("tw") or market.startswith("pre_market")
+                    or market == "tw_post_market" or market == "morning_action_tw"):
+                market_for_holiday = "TW"
+            else:
+                market_for_holiday = "US"
             if holiday_check.is_market_closed_today(market_for_holiday):
                 print(f"=== Holiday Check ===")
                 print(f"今日 {market_for_holiday} 休市，跳過此次推播。")
@@ -385,7 +406,8 @@ def main() -> int:
                 ai_msg = notifier.fmt_analyst_insider_alerts(ai_alerts, gem)
                 if ai_msg:
                     ok_a, info_a = notifier.send_message(
-                        ai_msg, disable_preview=True, disable_notification=False
+                        ai_msg, disable_preview=True, disable_notification=False,
+                        category="analyst_insider",
                     )
                     if ok_a:
                         _ai.mark_alerts_sent(ai_alerts)
@@ -454,21 +476,12 @@ def main() -> int:
             print(f"[speculation] failed: {_e}", flush=True)
             traceback.print_exc()
 
-    # === 🌅 morning_action 早盤情境推播 (tw_open / us_open 都跑) ===
-    if market in ("tw_open", "us_open"):
-        try:
-            import morning_action_alert as _ma
-            mk = "TW" if market == "tw_open" else "US"
-            ma_msg = _ma.build_morning_action_msg(mk)
-            if ma_msg:
-                ok_ma, info_ma = notifier.send_message(
-                    ma_msg, disable_preview=True, disable_notification=False
-                )
-                print(f"[morning_action] {mk} TG: ok={ok_ma}", flush=True)
-        except Exception as _e:
-            import traceback
-            print(f"[morning_action] failed (non-fatal): {_e}", flush=True)
-            traceback.print_exc()
+    # === 🌅 morning_action 整合 ===
+    # 砍掉獨立推播 — 內容已被 tw_open / us_open 主訊息涵蓋:
+    #   - 大盤開盤實況 → tw_open / us_open 都已包含
+    #   - 強勢族群 → strong_sector_alert 已推
+    #   - BUY picks → actionable_picks / us_actionable 已推
+    # morning_action_alert 模組保留供 dashboard 內顯示用
 
     # === 🚀 美股盤整突破 (US session 內每次 monitor 都掃) ===
     if market in ("us_open", "us_mid", "monitor"):
@@ -745,7 +758,107 @@ def main() -> int:
                 print("No holdings configured, skip daily report")
         except Exception as e:
             print(f"Holdings daily report failed (non-fatal): {e}", flush=True)
-    elif market in ("us_open", "us_mid"):
+    # === IPO 今日上市推播 (pre_market_830 後跑) ===
+    # 沒上市 silent skip; 有上市 → 推一封獨立含 Gemini 進場分析
+    if market == "pre_market_830":
+        try:
+            import ipo_calendar_alert as _ipo
+            ipo_result = _ipo.check_and_push(mode="today")
+            print(f"[ipo_today] check: {ipo_result}", flush=True)
+        except Exception as _ipoe:
+            print(f"[ipo_today] check failed (non-fatal): {_ipoe}", flush=True)
+
+    # === IPO 下週預告 (週五 us_open 跑, 14:00 UTC = 22:00 TPE) ===
+    # 用戶要的「週五晚 22:00 推下週上市」— 不加新 cron, 用 us_open + Friday 判斷
+    if market == "us_open":
+        try:
+            import datetime as _dt
+            if _dt.datetime.utcnow().weekday() == 4:  # 週五
+                import ipo_calendar_alert as _ipo
+                # 週五推台股下週 IPO
+                ipo_result = _ipo.check_and_push(mode="next_week", market="TW")
+                print(f"[ipo_tw_next_week] friday preview: {ipo_result}", flush=True)
+        except Exception as _ipoe:
+            print(f"[ipo_next_week] check failed (non-fatal): {_ipoe}", flush=True)
+
+    # 手動觸發 ipo_weekly (workflow_dispatch) — 推台股下週預告 (跟週五自動一致)
+    if market == "ipo_weekly":
+        try:
+            import ipo_calendar_alert as _ipo
+            ipo_result = _ipo.check_and_push(mode="next_week", market="TW")
+            print(f"[ipo_tw_next_week] manual push: {ipo_result}", flush=True)
+        except Exception as _ipoe:
+            print(f"[ipo_tw_next_week] manual failed: {_ipoe}", flush=True)
+        return 0
+
+    # 早安推播 (UTC 23:30 = TPE 07:30 隔日) — 摘要昨夜美股 + 昨夜推播
+    if market == "morning_recap":
+        try:
+            import morning_recap_alert as _mr
+            r = _mr.check_and_push()
+            print(f"[morning_recap] result: {r}", flush=True)
+        except Exception as _mre:
+            print(f"[morning_recap] failed: {_mre}", flush=True)
+        return 0
+
+    # 美股盤前 BUY Top 5 (UTC 12:30 = TPE 20:30, NYSE 開盤前 ~1.5-2hr)
+    # 只推 entry_label=BUY + score≥70 的; 沒符合就明確說「無高品質 BUY」
+    if market == "us_buy_picks":
+        # BUG #2 fix: 美股假日 (7/4, Thanksgiving, Christmas) 跳過, 避免推過時資料
+        try:
+            import holiday_check as _hc
+            if _hc.is_market_closed_today("US"):
+                print("[us_buy_picks] US market closed today, skip", flush=True)
+                return 0
+        except Exception as _hce:
+            print(f"[us_buy_picks] holiday check fail (continue anyway): {_hce}", flush=True)
+        try:
+            import us_actionable as _ua
+            import html as _html
+            picks = _ua.compute_us_actionable_picks(top_n=10) or []
+            buy_picks = [
+                p for p in picks
+                if p.get("symbol")
+                and p.get("entry_label") == "BUY"
+                and (p.get("entry_score") is None or float(p.get("entry_score") or 0) >= 70)
+            ][:5]
+
+            def _esc(s):
+                return _html.escape(str(s) if s is not None else "", quote=False)
+
+            lines = ["🇺🇸 <b>美股盤前 BUY Top 5</b> (TPE 20:30 / NYSE 開盤前 ~1.5hr)"]
+            lines.append("━━━━━━━━━━━━━━━━━")
+            if not buy_picks:
+                lines.append("🎯 <i>今日無高品質 BUY (entry_label=BUY + 分數 ≥70), 觀望為主</i>")
+            else:
+                for i, p in enumerate(buy_picks, 1):
+                    sym = _esc(p.get("symbol", ""))
+                    name = _esc(p.get("name", "") or p.get("company", ""))
+                    sector = _esc(p.get("sector", "—"))
+                    cur = p.get("current") or p.get("price")
+                    el = p.get("entry_low")
+                    eh = p.get("entry_high")
+                    tgt = p.get("target") or p.get("target_mid")
+                    stop = p.get("stop")
+                    score = p.get("entry_score")
+                    head = f"<b>{i}. {sym} {name}</b> [{sector}]"
+                    if score is not None:
+                        head += f" · 入場分 {float(score):.0f}"
+                    lines.append(head)
+                    if cur is not None and el and eh:
+                        lines.append(f"   現價 ${cur} · 進場 ${el}~${eh}")
+                    if tgt:
+                        lines.append(f"   目標 ${tgt} · 停損 ${_esc(stop or '—')}")
+                    if p.get("win_prob"):
+                        lines.append(f"   勝率 {_esc(p['win_prob'])} · 持有 {_esc(p.get('hold_period','—'))}")
+            msg = "\n".join(lines)
+            notifier.send_message(msg)
+            print(f"[us_buy_picks] sent {len(buy_picks)} BUY picks", flush=True)
+        except Exception as _ube:
+            print(f"[us_buy_picks] failed (non-fatal): {_ube}", flush=True)
+        return 0
+
+    if market in ("us_open", "us_mid"):
         label = "開盤後 30 分鐘 (10:00 EDT)" if market == "us_open" else "開盤後 2 小時 (11:30 EDT)"
         print(f"Running US {label}...")
         try:
@@ -790,12 +903,33 @@ def main() -> int:
         if market == "us_mid":
             msg = msg.replace("美股開盤後 30 分鐘 · 資金流向",
                                "美股開盤後 2 小時 · 中盤更新 · 資金流向")
+        # BUG FIX (CRITICAL): 之前缺 send_message → us_open / us_mid 整封都沒推
+        if msg:
+            ok_uo, info_uo = notifier.send_message(msg, disable_preview=True)
+            print(f"[us_{('mid' if market == 'us_mid' else 'open')}] TG send: ok={ok_uo}, info={info_uo}")
+        return 0 if msg else 0
+
     elif market == "us_close":
         print("Running US market close analysis (+2h, 18:00 EDT)...")
-        data = market_open_picks.get_us_close_analysis()
-        if data.get("ai_text"):
-            print(f"Gemini reasoning: {len(data['ai_text'])} chars")
-        msg = notifier.fmt_us_close_analysis(data)
+        try:
+            data = market_open_picks.get_us_close_analysis()
+            if data.get("ai_text"):
+                print(f"Gemini reasoning: {len(data['ai_text'])} chars")
+            msg = notifier.fmt_us_close_analysis(data)
+            # BUG FIX (CRITICAL): 之前缺 send_message → us_close 不推
+            if msg:
+                ok_uc, info_uc = notifier.send_message(msg, disable_preview=True)
+                print(f"[us_close] TG send: ok={ok_uc}, info={info_uc}")
+                return 0 if ok_uc else 2
+            else:
+                print("[us_close] empty msg, skip send")
+                return 0
+        except Exception as e:
+            import traceback
+            print(f"us_close fatal: {e}", flush=True)
+            traceback.print_exc()
+            return 1
+
     elif market == "weekend_recap":
         # 週末重點摘要 (Sat/Sun 22:00 TPE) — 比 holiday_news 早 30 min
         # 觸發後設 state flag, holiday_news 30 min 後若 flag 是今天就 skip (dedup)
@@ -810,6 +944,15 @@ def main() -> int:
                   f"{len(data.get('week_perf', {}))} indices, "
                   f"{len(data.get('etf_snapshot', []))} ETFs")
             msg = notifier.fmt_weekend_recap(data)
+            # BUG FIX (CRITICAL): 之前只 build 沒 send → 用戶完全收不到週末推播
+            if msg:
+                ok, info = notifier.send_message(msg)
+                print(f"[weekend_recap] TG send: ok={ok}, info={info}")
+                if not ok:
+                    return 2
+            else:
+                print("[weekend_recap] empty msg, skip send")
+                return 0
             # 設 dedup flag — 讓 30 min 後的 holiday_news cron 知道週末摘要已推, 不要重複
             try:
                 import watchlist_store
@@ -819,6 +962,7 @@ def main() -> int:
                 print(f"[weekend_recap] dedup flag set: weekend_recap_last_fired={today_str}")
             except Exception as _e:
                 print(f"[weekend_recap] flag set failed (non-fatal): {_e}")
+            return 0
         except Exception as e:
             import traceback
             print(f"weekend_recap fatal: {e}", flush=True)
@@ -842,11 +986,26 @@ def main() -> int:
                 return 0
         except Exception as _e:
             print(f"[holiday_news] dedup check failed (non-fatal, 繼續執行): {_e}")
-        data = market_open_picks.get_holiday_news_summary()
-        if data.get("ai_text"):
-            print(f"Gemini reasoning: {len(data['ai_text'])} chars")
-        print(f"Got {len(data.get('news', []))} news items")
-        msg = notifier.fmt_holiday_news(data)
+        try:
+            data = market_open_picks.get_holiday_news_summary()
+            if data.get("ai_text"):
+                print(f"Gemini reasoning: {len(data['ai_text'])} chars")
+            print(f"Got {len(data.get('news', []))} news items")
+            msg = notifier.fmt_holiday_news(data)
+            # BUG FIX (CRITICAL): 之前 build 完沒 send → 假日新聞沒推
+            if msg:
+                ok, info = notifier.send_message(msg)
+                print(f"[holiday_news] TG send: ok={ok}, info={info}")
+                return 0 if ok else 2
+            else:
+                print("[holiday_news] empty msg, skip send")
+                return 0
+        except Exception as e:
+            import traceback
+            print(f"holiday_news fatal: {e}", flush=True)
+            traceback.print_exc()
+            return 1
+
     elif market == "crypto_picks":
         print("[crypto_picks] 已停用 (用戶要求取消加密貨幣)")
         return 0
@@ -885,7 +1044,7 @@ def main() -> int:
         try:
             import index_alerts as _ia_pre
             import datetime as _dt
-            now_utc = _dt.datetime.utcnow()
+            now_utc = _dt.datetime.now(dt.timezone.utc)
             cur_hour = now_utc.hour
             in_any_session = any(
                 _ia_pre._is_market_in_session(c) for c in ["TW", "JP", "KR", "US"]
@@ -948,6 +1107,17 @@ def main() -> int:
         try:
             import index_alerts as _ia_rev
             reversal_alerts = _ia_rev.check_intraday_reversal() or []
+            # B: 跨類去重 — 同 symbol 30min 內已推過 → skip
+            try:
+                import alert_priority as _ap
+                original_n = len(reversal_alerts)
+                reversal_alerts = _ap.filter_dedup_picks(
+                    reversal_alerts, "intraday_reversal", "down"
+                )
+                if original_n > len(reversal_alerts):
+                    print(f"[intraday reversal] dedup 過濾 {original_n - len(reversal_alerts)}", flush=True)
+            except Exception:
+                pass
             if reversal_alerts:
                 print(
                     f"[intraday reversal] triggered {len(reversal_alerts)}: "
@@ -956,6 +1126,12 @@ def main() -> int:
                     ),
                     flush=True,
                 )
+                # mark 已推 (送 TG 成功後再標, 但 super combined 流程後段才送, 在此先標保險)
+                try:
+                    import alert_priority as _ap2
+                    _ap2.mark_picks_pushed(reversal_alerts, "intraday_reversal", "down")
+                except Exception:
+                    pass
         except Exception as _e:
             import traceback
             print(f"[intraday reversal] check failed (non-fatal): {_e}", flush=True)
@@ -980,6 +1156,18 @@ def main() -> int:
                         f"(同 sym reversal 已推)",
                         flush=True,
                     )
+            # B: 跨類去重 — 同 symbol+方向 30min 內已推
+            if weak_open_alerts:
+                try:
+                    import alert_priority as _ap_wo
+                    # weak_open 含 type=weak/strong, direction 對應 down/up
+                    weak_subset = [a for a in weak_open_alerts if a.get("type") in ("weak",)]
+                    strong_subset = [a for a in weak_open_alerts if a.get("type") in ("strong",)]
+                    weak_subset = _ap_wo.filter_dedup_picks(weak_subset, "weak_open", "down")
+                    strong_subset = _ap_wo.filter_dedup_picks(strong_subset, "strong_open", "up")
+                    weak_open_alerts = weak_subset + strong_subset
+                except Exception:
+                    pass
             if weak_open_alerts:
                 print(
                     f"[weak/strong open] triggered {len(weak_open_alerts)}: "
@@ -988,6 +1176,15 @@ def main() -> int:
                     ),
                     flush=True,
                 )
+                # mark 已推
+                try:
+                    import alert_priority as _ap_wo2
+                    for a in weak_open_alerts:
+                        d = "down" if a.get("type") == "weak" else "up"
+                        _ap_wo2.mark_picks_pushed([a],
+                                                    "weak_open" if d == "down" else "strong_open", d)
+                except Exception:
+                    pass
         except Exception as _e:
             import traceback
             print(f"[weak/strong open] check failed (non-fatal): {_e}", flush=True)
@@ -1022,15 +1219,47 @@ def main() -> int:
         if sc_result:
             print(f"[intraday weak] {sc_result}", flush=True)
 
-        # === 新增: 條件觸發 (watchlist_triggers) ===
+        # === A: 台指期 / 微台專屬 alert (升貼水 + 法人 + 散戶反指標) ===
+        def _tx_check():
+            import tx_futures_alert as _tx
+            return _tx.check_and_push()
+        tx_result = _run_with_timeout(_tx_check, "tx_futures", timeout_sec=60)
+        if tx_result:
+            print(f"[tx_futures] {tx_result}", flush=True)
+
+        # === watchlist_triggers 整合到 16:00 盤後 ===
+        # 盤中不再獨立推播 (避免盤中分心), 改成 tw_post_market_summary 一次顯示當天累積觸發
+        # 仍 check + 寫 state, 給盤後用
         try:
             import watchlist_triggers as _wt
             fired = _wt.check_triggers() or []
             if fired:
-                wt_msg = _wt.fmt_trigger_alerts(fired)
-                if wt_msg:
-                    ok_wt, _ = notifier.send_message(wt_msg, disable_preview=True)
-                    print(f"[watchlist_triggers] {len(fired)} fired, sent ok={ok_wt}", flush=True)
+                print(f"[watchlist_triggers] {len(fired)} fired (queued for 16:00 summary)", flush=True)
+                # mark 觸發 → 累積到 state, 給 16:00 盤後拉
+                try:
+                    import watchlist_store
+                    state = watchlist_store.load_monitor_state()
+                    wt_today = state.setdefault("watchlist_triggers_today", [])
+                    import datetime as _dt
+                    today_str = _dt.date.today().strftime("%Y-%m-%d")
+                    # 過濾掉舊日的, 只留今天
+                    wt_today = [t for t in wt_today if t.get("date") == today_str]
+                    # 加入新觸發
+                    for f in fired:
+                        if not any(t.get("stock_id") == f.get("stock_id") and
+                                   t.get("trigger_type") == f.get("trigger_type")
+                                   for t in wt_today):
+                            wt_today.append({
+                                "date": today_str,
+                                "stock_id": f.get("stock_id"),
+                                "trigger_type": f.get("trigger_type"),
+                                "current": f.get("current"),
+                                "value": f.get("value"),
+                            })
+                    state["watchlist_triggers_today"] = wt_today
+                    watchlist_store.save_monitor_state(state)
+                except Exception:
+                    pass
         except Exception as _wte:
             print(f"[watchlist_triggers] check failed (non-fatal): {_wte}", flush=True)
 
@@ -1084,6 +1313,7 @@ def main() -> int:
                         ne_msg,
                         disable_preview=False,
                         disable_notification=(not has_urgent),
+                        category="news_event",
                     )
                     print(f"[news event] TG result: ok={ok_n} info={info_n} urgent={has_urgent}",
                           flush=True)
@@ -1111,6 +1341,7 @@ def main() -> int:
                     ok_vb, info_vb = notifier.send_message(
                         vb_msg, disable_preview=False,
                         disable_notification=False,  # Tier 1 響鈴
+                        category="volume_breakout",
                     )
                     if ok_vb:
                         _vb.mark_alerts_sent(vb_alerts)
@@ -1122,7 +1353,8 @@ def main() -> int:
             print(f"[vol_breakout] failed (non-fatal): {_e}", flush=True)
             traceback.print_exc()
 
-        # === P2-B: 籌碼異常 (Tier 2 — 響鈴批次) ===
+
+        # === P2-B: chip anomaly (Tier 2) ===
         try:
             import chip_anomaly_alert as _ca
             ca_alerts = _ca.check_chip_anomaly() or []
@@ -1132,74 +1364,23 @@ def main() -> int:
                 if ca_msg:
                     ok_ca, info_ca = notifier.send_message(
                         ca_msg, disable_preview=False,
-                        disable_notification=False,  # Tier 2 響鈴
+                        disable_notification=False,
+                        category="chip_anomaly",
                     )
                     if ok_ca:
                         _ca.mark_alerts_sent(ca_alerts)
+                        print("[chip_anomaly] sent ok", flush=True)
+                    else:
+                        print(f"[chip_anomaly] send fail: {info_ca}", flush=True)
         except Exception as _e:
             import traceback
             print(f"[chip_anomaly] failed (non-fatal): {_e}", flush=True)
-
-        # === Q2: 盤中強勢族群推播 (per-day cap 1, 全域 60min cooldown) ===
-        strong_sector_alerts = []
-        try:
-            import strong_sector_alert as _ssec
-            strong_sector_alerts = _ssec.check_strong_sectors_intraday() or []
-            if strong_sector_alerts:
-                print(
-                    f"[strong sector] triggered {len(strong_sector_alerts)}: "
-                    + ", ".join(
-                        f"{a.get('sector_name')}({a.get('sector_type')})"
-                        for a in strong_sector_alerts
-                    ),
-                    flush=True,
-                )
-        except Exception as _e:
-            import traceback
-            print(f"[strong sector] check failed (non-fatal): {_e}", flush=True)
             traceback.print_exc()
 
-        # === A fix: 合 monitor 推播 (反轉+開盤即弱+強勢族群+大跌+bucket) ===
-        # H1: fmt_combined_intraday_super 回 list[str], 一般合 1 封;
-        # 三段太長時自動拆多封, 避免 byte 截斷 silent 砍掉後面段.
-        try:
-            super_msgs = notifier.fmt_combined_intraday_super(
-                crash_data=crash_data,
-                reversal_alerts=reversal_alerts,
-                bucket_alerts=bucket_alerts,
-                weak_open_alerts=weak_open_alerts,
-                strong_sector_alerts=strong_sector_alerts,
-                holdings_intraday_alerts=holdings_intraday_alerts,
-                crash_ai_text=crash_ai_text,
-            )
-            if super_msgs:
-                all_ok = True
-                for i, msg in enumerate(super_msgs, 1):
-                    print(
-                        f"[super combined] sending {i}/{len(super_msgs)} ({len(msg)} chars)",
-                        flush=True,
-                    )
-                    ok_c, info_c = notifier.send_message(msg)
-                    print(f"[super combined] TG #{i} result: ok={ok_c} info={info_c}", flush=True)
-                    if not ok_c:
-                        all_ok = False
-                if all_ok:
-                    if strong_sector_alerts:
-                        try:
-                            import strong_sector_alert as _ssec_mark
-                            _ssec_mark.mark_sectors_sent(strong_sector_alerts)
-                            print(
-                                f"[strong sector] state updated: "
-                                f"{len(strong_sector_alerts)} 族群 marked sent",
-                                flush=True,
-                            )
-                        except Exception as _me:
-                            print(f"[strong sector] mark_sectors_sent failed: {_me}", flush=True)
-        except Exception as _e:
-            print(f"[strong sector] handle fail: {_e}", flush=True)
+        return 0
 
-    print("=== Done ===")
-    return 0
+    print(f"Unknown market: {market}")
+    return 2
 
 
 if __name__ == "__main__":

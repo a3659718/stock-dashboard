@@ -114,7 +114,7 @@ def send_test_message() -> bool:
     _hr("4) 發測試訊息到 Telegram")
     try:
         import notifier
-        now = dt.datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+        now = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
         msg = f"🧪 <b>Smoke Test</b>\n推播管道測試訊息\n時間: {now}"
         ok, info = notifier.send_message(msg)
         if ok:
@@ -131,7 +131,7 @@ def send_test_message() -> bool:
 def print_expected_cron_times():
     """印出今日 GH Actions 應該跑的 cron 時間 (給用戶對照 Actions tab)."""
     _hr("5) 今日預期 cron 時間 (對照 GH Actions Runs)")
-    now_utc = dt.datetime.utcnow()
+    now_utc = dt.datetime.now(dt.timezone.utc)
     print(f"  現在 UTC: {now_utc.strftime('%Y-%m-%d %H:%M')}")
     print(f"  現在 TPE: {(now_utc + dt.timedelta(hours=8)).strftime('%Y-%m-%d %H:%M')}")
     print()

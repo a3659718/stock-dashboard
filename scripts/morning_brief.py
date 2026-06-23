@@ -282,7 +282,7 @@ def _section_chip_price_pattern() -> str:
             name = name_map.get(sid, "")
             emoji = r.get("emoji", "")
             pat = r.get("pattern", "")
-            tp = r.get("raw", {}).get("today_pct", 0)
+            tp = r.get("raw", {}).get("today_pct", 0) or 0  # Bug fix: today_pct=None 時 :+.2f 會 TypeError → 整段盤後籌碼被吞掉
             lines.append(f"  {emoji} <b>{sid}</b> {name} — {pat} ({tp:+.2f}%)")
             rec = r.get("recommendation", "")
             if rec:
