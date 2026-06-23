@@ -155,7 +155,9 @@ def fetch_tw_major_announcements(stock_id: Optional[str] = None,
         out = []
         for row in rows[:30]:
             out.append({
-                "title": row.get("title") or row.get("description", "")[:80],
+                # Bug fix: 原本 description 若是「存在但為 None」, None[:80] 會 TypeError 炸掉整批抓取.
+                #          用 (... or ... or "")[:80] 先擋掉 None 再切片.
+                "title": row.get("title") or (row.get("description") or "")[:80],
                 "link": row.get("link") or row.get("source_link") or "",
                 "publisher": row.get("source") or "FinMind TW News",
                 "date": str(row.get("date", ""))[:10],

@@ -207,7 +207,9 @@ def _enrich_pick(row: Dict) -> Dict:
     # 動能加分: 近期上漲速度 (從 row "今日%" 或 5d_pct)
     momentum_bonus = 0
     try:
-        today_pct = float(row.get("今日%") or 0)
+        # Bug fix: US row 的日漲幅 key 是 daily_% (見 line 166 schema), 不是台股的「今日%」
+        #          → 原本動能加分對美股恆為 0, 等於這段「無鑑別度」修正對美股沒生效。
+        today_pct = float(row.get("daily_%") or row.get("今日%") or 0)
         if today_pct >= 3: momentum_bonus += 3
         elif today_pct >= 1: momentum_bonus += 1
         elif today_pct <= -2: momentum_bonus -= 3
@@ -224,7 +226,8 @@ def _enrich_pick(row: Dict) -> Dict:
 
     # RS 加分 (vs S&P 500)
     try:
-        rs = float(row.get("RS") or 0)
+        # Bug fix: US row 的相對強度 key 是 RS_20d (見 line 166 schema), 不是「RS」→ 原本恆 0.
+        rs = float(row.get("RS_20d") or row.get("RS") or 0)
         if rs >= 1.10: momentum_bonus += 2
         elif rs >= 1.0: momentum_bonus += 1
     except (TypeError, ValueError):

@@ -208,7 +208,10 @@ def evaluate_history_performance(history: pd.DataFrame, days_window: int = 30) -
 
     df["current_price"] = df["stock_id"].astype(str).map(last_close)
     df["base_price"] = pd.to_numeric(df["base_price"], errors="coerce")
-    df["return%"] = ((df["current_price"] - df["base_price"]) / df["base_price"] * 100).round(2)
+    # Bug fix: base_price 為 0 時除法會得 inf, 滲進 win-rate/平均報酬統計把數字拉爆.
+    #          0 先換成 NaN, 讓 return% 變 NaN (後續 .notna() 會濾掉), 避免 inf 汙染。
+    _base = df["base_price"].replace(0, float("nan"))
+    df["return%"] = ((df["current_price"] - _base) / _base * 100).round(2)
     df = df.sort_values(["snapshot_date", "stock_id"], ascending=[False, True]).reset_index(drop=True)
 
     # 額外算「持有日數」
