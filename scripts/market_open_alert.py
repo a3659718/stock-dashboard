@@ -1290,6 +1290,15 @@ def main() -> int:
                     + ", ".join(a.get("symbol", "") for a in news_event_alerts),
                     flush=True,
                 )
+                # 防重複: 送出「之前」就先 claim (標記已推), 把併發/連跑兩 run 的競爭視窗從
+                #         「Gemini+送出數秒」縮到毫秒; 送失敗再 unmark 回滾, 不會漏推。
+                _ne_claimed = False
+                try:
+                    _ne.mark_alerts_sent(news_event_alerts)
+                    _ne_claimed = True
+                except Exception as _me:
+                    print(f"[news event] pre-claim failed (continue): {_me}", flush=True)
+
                 # C: 對 HIGH urgency 跑 Gemini 影響分析 (加進 message)
                 try:
                     import news_impact_analyzer as _nia
@@ -1317,12 +1326,19 @@ def main() -> int:
                     )
                     print(f"[news event] TG result: ok={ok_n} info={info_n} urgent={has_urgent}",
                           flush=True)
-                    if ok_n:
+                    # 已在送出前 claim; 送失敗才回滾 (讓下次能重試), 成功則維持已標記.
+                    if not ok_n and _ne_claimed:
                         try:
-                            _ne.mark_alerts_sent(news_event_alerts)
-                            print(f"[news event] state updated", flush=True)
+                            _ne.unmark_alerts_sent(news_event_alerts)
+                            print(f"[news event] send failed → 回滾 claim", flush=True)
                         except Exception as _me:
-                            print(f"[news event] mark_alerts_sent failed: {_me}", flush=True)
+                            print(f"[news event] unmark failed: {_me}", flush=True)
+                elif _ne_claimed:
+                    # fmt 回空 (無可顯示內容) 但已 claim → 回滾, 避免靜默吞掉這批事件.
+                    try:
+                        _ne.unmark_alerts_sent(news_event_alerts)
+                    except Exception:
+                        pass
         except Exception as _e:
             import traceback
             print(f"[news event] check/send failed (non-fatal): {_e}", flush=True)
