@@ -346,8 +346,25 @@ def check_news_events() -> List[Dict]:
     return all_alerts[:NEWS_MAX_PER_BATCH]
 
 
+def unmark_alerts_sent(alerts: List[Dict]) -> None:
+    """回滾 mark_alerts_sent — 送出失敗時呼叫, 把剛 claim 的 (sid, h_hash) 移除, 讓下次能重試."""
+    if not alerts:
+        return
+    try:
+        state = watchlist_store.load_monitor_state()
+        ne_state = state.get("news_event_alert") or {}
+        alerted = set(ne_state.get("alerted") or [])
+        for a in alerts:
+            alerted.discard(f"{a.get('symbol', '')}:{a.get('h_hash', '')}")
+        ne_state["alerted"] = sorted(alerted)
+        state["news_event_alert"] = ne_state
+        watchlist_store.save_monitor_state(state)
+    except Exception as e:
+        print(f"[news_event] unmark_alerts_sent failed: {e}", flush=True)
+
+
 def mark_alerts_sent(alerts: List[Dict]) -> None:
-    """caller 在 send 成功後呼叫. 把 (sid, h_hash) 加進已 alerted set."""
+    """把 (sid, h_hash) 加進已 alerted set. 防重複建議「送出前」就 claim, 送失敗再 unmark 回滾."""
     if not alerts:
         return
     try:
