@@ -566,8 +566,8 @@ def _fmt_prediction_block(prediction: dict, accuracy: dict) -> list:
         raw_parts.append(f"開盤跳空 {prediction['gap_pct']:+.2f}%")
     if prediction.get("drift_pct") is not None:
         raw_parts.append(f"30 分鐘走勢 {prediction['drift_pct']:+.2f}%")
-    if prediction.get("vol_ratio") is not None:
-        raw_pass  # 量比已移除
+    # Bug fix: 移除「量比」功能時留下孤兒 `raw_pass`(未定義變數的裸語句), 只要預測有
+    #          vol_ratio 就 NameError → 炸掉整封 us_open/us_mid 推播. 整段死碼移除。
     if raw_parts:
         out.append(f"   {' · '.join(raw_parts)}")
     if prediction.get("explanation"):
@@ -2946,7 +2946,7 @@ def fmt_holdings_daily(holdings: list) -> str:
         if tech.get("ma_status"): tech_parts.append(_esc(tech["ma_status"]))
         if tech.get("kd_signal"): tech_parts.append(f"KD {_esc(tech['kd_signal'])}")
         if tech.get("macd_signal"): tech_parts.append(f"MACD {_esc(tech['macd_signal'])}")
-        if tech.get("vol_ratio"): tech_pass  # 量比已移除
+        # (量比已移除; 原本殘留的孤兒 `tech_pass` 會 NameError, 已刪)
         if tech_parts:
             lines.append("  技術: " + " · ".join(tech_parts))
 

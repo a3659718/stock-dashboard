@@ -149,6 +149,33 @@ def check_dup_paste() -> list:
 
 
 # ---------------------------------------------------------------------------
+# [6] 裸名稱 / 死碼語句 (NameError 地雷) — 抓 raw_pass / tech_pass 那種孤兒
+# ---------------------------------------------------------------------------
+def check_bare_statements() -> list:
+    """抓「一行就是一個裸名稱/裸屬性」的 expression statement — 多半是移除程式時留下的
+    死碼孤兒 (e.g. `raw_pass  # 量比已移除`), 一旦該行被執行就 NameError 炸掉整封推播。
+    這正是 [3] 空輸入測不到 (在非空路徑上) 的那類。"""
+    problems = []
+    for f in (glob.glob(os.path.join(ROOT, "*.py")) +
+              glob.glob(os.path.join(ROOT, "scripts", "*.py"))):
+        try:
+            tree = ast.parse(open(f, encoding="utf-8").read(), filename=f)
+        except Exception:
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Expr):
+                continue
+            v = node.value
+            if isinstance(v, ast.Name):
+                problems.append((os.path.relpath(f, ROOT), node.lineno,
+                                 f"裸名稱 '{v.id}' 當語句 — 多半是死碼, 執行到會 NameError"))
+            elif isinstance(v, ast.Compare):
+                problems.append((os.path.relpath(f, ROOT), node.lineno,
+                                 "裸比較當語句 — 可能是 = 寫成 == 之類的手誤"))
+    return problems
+
+
+# ---------------------------------------------------------------------------
 # [2] 模組匯入
 # ---------------------------------------------------------------------------
 def check_imports() -> list:
@@ -233,6 +260,7 @@ def main() -> int:
     report("[1] 靜態 local-import 符號檢查", check_local_imports())
     report("[4] 排程 handler 覆蓋", check_schedule_coverage())
     report("[5] 重複貼上手誤 (append/if 區塊)", check_dup_paste())
+    report("[6] 裸名稱/死碼語句 (NameError 地雷)", check_bare_statements())
 
     if not static_only:
         report("[2] 模組匯入", check_imports())
