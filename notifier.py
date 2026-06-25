@@ -96,25 +96,25 @@ def _safe_float(v, default: float = 0.0) -> float:
     return f
 
 
-def _truncate_tg_msg(out: str, max_bytes: int = 3900) -> str:
-    """Telegram parse_mode=HTML 限 4096 bytes (UTF-8). 中文 3 bytes/char,
-    所以 char-based truncate (out[:3900]) 在中文訊息中常爆 byte 限制 → HTTP 400.
+def _truncate_tg_msg(out: str, max_chars: int = 4000) -> str:
+    """Telegram 限 4096 個「字元」(UTF-16 code units), 不是 bytes.
 
-    這個 helper 用 byte-length 切割, errors='ignore' 防斷尾砍到中文中間,
-    取代散落各處的:
-        if len(out) > 3900: out = out[:3900] + ...
+    Bug fix: 舊版註解誤以為限 4096 BYTES, 用 byte 切 (3900 bytes). 但中文 1 字 = 1 個
+    TG 字元卻佔 3 bytes → 中文訊息只能放 ~1300 字就被砍, 而 TG 其實能放 ~4096 字。
+    這正是「急報等中文推播文字被截斷」的主因。改用 UTF-16 長度判斷後, 中文可用篇幅
+    約是舊版的 3 倍, 大多數訊息不再需要截斷。
+    (emoji 等非 BMP 字元 = 2 個 UTF-16 units, 已被正確計入; max_chars=4000 留 margin。)
 
-    取 max_bytes=3900 留 ~200 bytes 給 (節錄) 標籤 + safety margin.
+    第二參數沿用位置呼叫 (ipo_calendar_alert 傳 3900) — 現在語意是「字元數」, 仍安全。
     """
     if not out:
         return ""
-    out_bytes = out.encode("utf-8")
-    if len(out_bytes) <= max_bytes:
+    u16 = out.encode("utf-16-le")
+    if len(u16) // 2 <= max_chars:  # TG 長度 = UTF-16 code units
         return out
-    truncated = out_bytes[:max_bytes].decode("utf-8", errors="ignore")
-    # MED fix: byte 硬切可能切在 HTML tag 中間 (e.g. "<cod") 或留未閉合 tag,
-    # 導致 Telegram parse_mode=HTML 回 400. 這裡 (1) 砍掉結尾不完整 tag
-    # (2) 補齊未閉合的常見 tag, 避免 parse error (省掉 send_message 純文字 retry).
+    # 砍到 (max_chars - 8) 個 unit; errors='ignore' 會丟掉切到一半的 surrogate pair
+    truncated = u16[: (max_chars - 8) * 2].decode("utf-16-le", errors="ignore")
+    # 砍掉結尾半截 HTML tag (避免 parse_mode=HTML 回 400)
     last_lt = truncated.rfind("<")
     last_gt = truncated.rfind(">")
     if last_lt > last_gt:  # 最後一個 '<' 之後沒有 '>' → 結尾是半截 tag
@@ -2375,14 +2375,14 @@ def fmt_news_event_alerts(alerts: list, impact_analysis: str = "") -> str:
 
     # 按 urgency 區塊輸出 (急報/注意/普通)
     section_alerts = [
-        ("🚨 急報 (建議立即處理)", high_alerts),
-        ("⚠️ 注意 (近期重要)", med_alerts),
-        ("📰 一般新聞", low_alerts),
+        ("🚨 急報", high_alerts),
+        ("⚠️ 注意", med_alerts),
+        ("📰 一般", low_alerts),
     ]
     for sect_title, sect_list in section_alerts:
         if not sect_list:
             continue
-        lines.append(f"━━━━━━━ {sect_title} ━━━━━━━")
+        lines.append(f"<b>{sect_title}</b>")
         for a in sect_list:
             sym = _esc(a.get("symbol", ""))
             market = _esc(a.get("market", ""))
@@ -2408,13 +2408,11 @@ def fmt_news_event_alerts(alerts: list, impact_analysis: str = "") -> str:
                 lines.append(f'  <a href="{_esc_attr(link)}">{_esc(title)}</a>')
             else:
                 lines.append(f"  {_esc(title)}")
-            if publisher:
-                lines.append(f"  <i>來源: {publisher}</i>")
             lines.append("")
     # 接 Gemini 影響分析 (若有)
     if impact_analysis:
         lines.append(impact_analysis)
-    lines.append("<i>※ 新聞驅動訊號, 仍須自行確認消息真偽與後續發展.</i>")
+    lines.append("<i>※ 新聞訊號, 請自行確認真偽.</i>")
     return _truncate_tg_msg("\n".join(lines).rstrip())
 
 

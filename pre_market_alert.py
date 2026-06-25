@@ -219,7 +219,7 @@ def _gemini_summary(us_snaps: Dict, asia_snaps: Dict, slot: str) -> str:
         import ai_analyzer
         if not ai_analyzer.gemini_available():
             return ""
-        lines = [f"以下是台股開盤前 {slot} 的市場數據, 請給 3 句中文白話結論:"]
+        lines = [f"以下是台股開盤前 {slot} 的市場數據, 請依下列項目給精簡繁中結論:"]
         if us_snaps:
             us_parts = []
             for sym in ["SPY", "QQQ", "^SOX", "^IXIC"]:
@@ -237,7 +237,11 @@ def _gemini_summary(us_snaps: Dict, asia_snaps: Dict, slot: str) -> str:
             if asia_parts:
                 lines.append(f"亞股盤中: {', '.join(asia_parts)}")
         lines.append("")
-        lines.append("請給: (1) 台股今日開盤方向預測 (2) 偏好族群 (3) 風險提醒")
+        lines.append("(1) 台股今日開盤方向 (偏多/偏空/震盪)")
+        lines.append("(2) 偏好族群 + 具體受惠台股個股 (代號, 2-3 檔)")
+        lines.append("(3) 🇺🇸 昨夜可留意的美股個股 (ticker, 對應強勢族群, 2-3 檔)")
+        lines.append("(4) 風險提醒 (一句)")
+        lines.append("個股務必含代號/ticker; 美股、台股都要給。")
         prompt = "\n".join(lines)
         from ai_analyzer import _get_model
         model = _get_model()

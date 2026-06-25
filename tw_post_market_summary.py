@@ -132,7 +132,7 @@ def _gemini_next_day_advice(twii: Dict, sectors: Dict, breadth: Dict, leaders: L
         import ai_analyzer
         if not ai_analyzer.gemini_available():
             return ""
-        lines = ["以下是台股今日盤後數據, 請給 3 句中文白話: (1) 今日盤勢解讀 (2) 隔日操作建議 (3) 留意風險:"]
+        lines = ["以下是台股今日盤後數據, 請依下列項目給精簡繁中結論:"]
         if twii.get("current"):
             lines.append(f"加權 收 {twii['current']:.2f}, {twii.get('pct_vs_prev', 0):+.2f}%, "
                           f"區間 {twii.get('low', 0):.2f}-{twii.get('high', 0):.2f}")
@@ -145,7 +145,13 @@ def _gemini_next_day_advice(twii: Dict, sectors: Dict, breadth: Dict, leaders: L
         if sectors.get("bot3"):
             bot_parts = [f"{s['sector']} {s['avg']:+.2f}%" for s in sectors["bot3"][:3]]
             lines.append(f"弱勢族群: {', '.join(bot_parts)}")
-        prompt = "\n".join(lines) + "\n\n聚焦結論, 不要列數據."
+        lines.append("")
+        lines.append("(1) 今日盤勢解讀 (一句)")
+        lines.append("(2) 隔日操作建議 + 具體可留意台股個股 (代號, 2-3 檔)")
+        lines.append("(3) 🇺🇸 今晚美股可留意個股 (ticker, 對應台股連動族群, 2-3 檔)")
+        lines.append("(4) 留意風險 (一句)")
+        lines.append("個股務必含代號/ticker; 美股、台股都要給; 聚焦結論不要列數據。")
+        prompt = "\n".join(lines)
         from ai_analyzer import _get_model
         model = _get_model()
         if model is None:
