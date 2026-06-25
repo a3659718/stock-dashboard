@@ -1194,6 +1194,28 @@ def main() -> int:
         # 不再呼叫 check_index_alerts(), 省每次 monitor tick 5 個指數的 yfinance fetch
         bucket_alerts = []
 
+        # === Phase 1 送出: 把 crash + 反轉 + 開盤即弱 合併成 TG (可能多封) ===
+        # Bug fix (重大): 之前這三類只「偵測 + 標記已推」(reversal 在 1132 行先標保險),
+        #   但「組合 + send」整段在某次重構被刪掉 → 費半反轉 / 系統性大跌 / 開盤即弱 全部被
+        #   偵測卻從未送出, 而且還被標成已推 → 下次直接被去重濾掉。這裡把缺失的送出補回來。
+        try:
+            if crash_data or reversal_alerts or weak_open_alerts:
+                _combined_parts = notifier.fmt_combined_intraday_super(
+                    crash_data=crash_data,
+                    reversal_alerts=reversal_alerts,
+                    bucket_alerts=bucket_alerts,
+                    weak_open_alerts=weak_open_alerts,
+                    crash_ai_text=crash_ai_text,
+                )
+                for _cp in (_combined_parts or []):
+                    if _cp:
+                        _okc, _infoc = notifier.send_message(_cp, disable_preview=True)
+                        print(f"[combined intraday] sent ok={_okc}: {_infoc}", flush=True)
+        except Exception as _ce:
+            import traceback
+            print(f"[combined intraday] send failed (non-fatal): {_ce}", flush=True)
+            traceback.print_exc()
+
         # === 新增: 大盤大漲 → 強勢股推播 (跨 tick 去重, 每天每 trigger 只推一次) ===
         try:
             import strong_stock_alert as _ssa
