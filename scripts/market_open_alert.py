@@ -758,6 +758,18 @@ def main() -> int:
                 print("No holdings configured, skip daily report")
         except Exception as e:
             print(f"Holdings daily report failed (non-fatal): {e}", flush=True)
+
+    # Bug fix (重大): tw_open/tw_mid/tw_close 組好主分析訊息 msg 卻「從未送出」, 而且這三個
+    #   market 跑完都沒有 return → 一路 fall through 到結尾的 "Unknown market" → exit 2。
+    #   結果台股開盤後30分 / 中盤更新 / 盤後分析三封主推播長期都沒送出還報錯。補上送出 + return。
+    if market in ("tw_open", "tw_mid", "tw_close"):
+        if msg:
+            ok_tw, info_tw = notifier.send_message(msg, disable_preview=True)
+            print(f"[{market}] 主分析 TG send: ok={ok_tw} {info_tw}", flush=True)
+        else:
+            print(f"[{market}] 主分析訊息為空, 不送 (可能 FinMind 失效/無資料)", flush=True)
+        return 0
+
     # === IPO 今日上市推播 (pre_market_830 後跑) ===
     # 沒上市 silent skip; 有上市 → 推一封獨立含 Gemini 進場分析
     if market == "pre_market_830":
