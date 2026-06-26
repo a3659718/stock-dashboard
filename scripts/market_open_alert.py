@@ -361,14 +361,13 @@ def main() -> int:
             tp_alerts = _tp.check_trump_policy_news() or []
             if tp_alerts:
                 print(f"[trump_policy] triggered {len(tp_alerts)}", flush=True)
+                _tp.mark_alerts_sent(tp_alerts)  # claim 在送出前 → 併發兩 tick 不會各送一次
                 gem = _tp.analyze_with_gemini(tp_alerts)
                 tp_msg = notifier.fmt_trump_policy_alerts(tp_alerts, gem)
                 if tp_msg:
                     ok_tp, info_tp = notifier.send_message(
                         tp_msg, disable_preview=False, disable_notification=False
                     )
-                    if ok_tp:
-                        _tp.mark_alerts_sent(tp_alerts)
                     print(f"[trump_policy] sent ok={ok_tp}", flush=True)
         except Exception as _e:
             import traceback
@@ -382,13 +381,12 @@ def main() -> int:
             al_alerts = _al.check_asia_leading() or []
             if al_alerts:
                 print(f"[asia_leading] triggered {len(al_alerts)}", flush=True)
+                _al.mark_alerts_sent(al_alerts)  # claim 在送出前 → 防併發重複
                 al_msg = notifier.fmt_asia_leading_alerts(al_alerts)
                 if al_msg:
                     ok_al, info_al = notifier.send_message(
                         al_msg, disable_preview=True, disable_notification=False
                     )
-                    if ok_al:
-                        _al.mark_alerts_sent(al_alerts)
                     print(f"[asia_leading] sent ok={ok_al}", flush=True)
         except Exception as _e:
             import traceback
@@ -402,6 +400,7 @@ def main() -> int:
             ai_alerts = _ai.check_analyst_insider() or []
             if ai_alerts:
                 print(f"[analyst_insider] triggered {len(ai_alerts)}", flush=True)
+                _ai.mark_alerts_sent(ai_alerts)  # claim 在送出前 → 防併發重複
                 gem = _ai.analyze_with_gemini(ai_alerts)
                 ai_msg = notifier.fmt_analyst_insider_alerts(ai_alerts, gem)
                 if ai_msg:
@@ -409,8 +408,6 @@ def main() -> int:
                         ai_msg, disable_preview=True, disable_notification=False,
                         category="analyst_insider",
                     )
-                    if ok_a:
-                        _ai.mark_alerts_sent(ai_alerts)
                     print(f"[analyst_insider] sent ok={ok_a}", flush=True)
         except Exception as _e:
             import traceback
@@ -492,13 +489,12 @@ def main() -> int:
                 print(f"[breakout] triggered {len(bc_alerts)}: "
                       + ", ".join(a.get("symbol", "") for a in bc_alerts),
                       flush=True)
+                _bc.mark_alerts_sent(bc_alerts)  # claim 在送出前 → 防併發重複
                 bc_msg = notifier.fmt_breakout_consolidation_alerts(bc_alerts)
                 if bc_msg:
                     ok_bc, info_bc = notifier.send_message(
                         bc_msg, disable_preview=True, disable_notification=False
                     )
-                    if ok_bc:
-                        _bc.mark_alerts_sent(bc_alerts)
         except Exception as _e:
             import traceback
             print(f"[breakout] failed (non-fatal): {_e}", flush=True)
@@ -1386,6 +1382,7 @@ def main() -> int:
                 print(f"[vol_breakout] triggered {len(vb_alerts)}: "
                       + ", ".join(a.get("symbol", "") for a in vb_alerts),
                       flush=True)
+                _vb.mark_alerts_sent(vb_alerts)  # claim 在送出前 → 防併發重複
                 vb_msg = notifier.fmt_volume_breakout_alerts(vb_alerts)
                 if vb_msg:
                     ok_vb, info_vb = notifier.send_message(
@@ -1394,7 +1391,6 @@ def main() -> int:
                         category="volume_breakout",
                     )
                     if ok_vb:
-                        _vb.mark_alerts_sent(vb_alerts)
                         print(f"[vol_breakout] sent ok", flush=True)
                     else:
                         print(f"[vol_breakout] send fail: {info_vb}", flush=True)
@@ -1410,6 +1406,7 @@ def main() -> int:
             ca_alerts = _ca.check_chip_anomaly() or []
             if ca_alerts:
                 print(f"[chip_anomaly] triggered {len(ca_alerts)}", flush=True)
+                _ca.mark_alerts_sent(ca_alerts)  # claim 在送出前 → 防併發重複
                 ca_msg = notifier.fmt_chip_anomaly_alerts(ca_alerts)
                 if ca_msg:
                     ok_ca, info_ca = notifier.send_message(
@@ -1418,7 +1415,6 @@ def main() -> int:
                         category="chip_anomaly",
                     )
                     if ok_ca:
-                        _ca.mark_alerts_sent(ca_alerts)
                         print("[chip_anomaly] sent ok", flush=True)
                     else:
                         print(f"[chip_anomaly] send fail: {info_ca}", flush=True)
