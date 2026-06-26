@@ -809,6 +809,27 @@ def main() -> int:
             print(f"[morning_recap] failed: {_mre}", flush=True)
         return 0
 
+    # 美股新興突破掃描 (平日 19:00 TPE = 11:00 UTC) — 池外廣掃, 獨立於核心 Top10
+    if market == "us_emerging":
+        print("Running US emerging breakout scan (19:00 TPE)...")
+        try:
+            import us_screener as _uss
+            data = _uss.run_emerging_breakout(top_n=10)
+            print(f"[us_emerging] scanned {data.get('scanned', 0)} / "
+                  f"universe {data.get('universe_size', 0)}", flush=True)
+            msg = notifier.fmt_emerging_breakout(data)
+            if msg:
+                ok_eb, info_eb = notifier.send_message(msg, disable_preview=True)
+                print(f"[us_emerging] TG send: ok={ok_eb} {info_eb}", flush=True)
+            else:
+                print("[us_emerging] empty msg, skip send", flush=True)
+        except Exception as e:
+            import traceback
+            print(f"[us_emerging] failed: {e}", flush=True)
+            traceback.print_exc()
+            return 1
+        return 0
+
     # 美股盤前 BUY Top 5 (UTC 12:30 = TPE 20:30, NYSE 開盤前 ~1.5-2hr)
     # 只推 entry_label=BUY + score≥70 的; 沒符合就明確說「無高品質 BUY」
     if market == "us_buy_picks":

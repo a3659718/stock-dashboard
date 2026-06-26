@@ -191,6 +191,130 @@ def _dedup_correlated(scored_rows: List[Dict], score_key: str = "score",
 # ---------------------------------------------------------------------------
 # 主流程
 # ---------------------------------------------------------------------------
+def _score_row(sym: str, tech: Dict, mom: Dict, theme: Dict, df) -> Dict:
+    """單檔評分 (技術突破 + 動能 + RS + 題材 + 過熱剎車). 核心 Top10 與新興突破共用.
+
+    過熱剎車: 動能策略最怕追在噴出末端. 無基本面估值, 改用「技術過熱」扣分:
+      ① 乖離 MA20 太遠 (追高) ② 20 日已大漲 (末端) ③ RSI 超買. 並標警示讓使用者看到原因。
+    """
+    score = 0.0
+    reasons: List[str] = []
+    if tech.get("ma20_break"):
+        score += 1.5; reasons.append("突破 MA20")
+    if tech.get("ma50_break"):
+        score += 1.5; reasons.append("突破 MA50")
+    if tech.get("vol_ratio") and tech["vol_ratio"] >= 1.5:
+        score += 1.0; reasons.append(f"量比 {tech['vol_ratio']:.1f}x")
+    if mom.get("daily_pct") and mom["daily_pct"] > 1:
+        score += 0.5; reasons.append(f"當日 +{mom['daily_pct']:.1f}%")
+    if mom.get("rs_vs_spy_20d") and mom["rs_vs_spy_20d"] > 0:
+        score += min(2.0, mom["rs_vs_spy_20d"] / 5.0)
+        reasons.append(f"RS+{mom['rs_vs_spy_20d']:.1f}")
+    if theme["themes"]:
+        score += 1.0 * len(theme["themes"])
+        reasons.append(f"題材: {', '.join(theme['themes'])}")
+    if theme["news_count"] >= 3:
+        score += 1.5; reasons.append(f"新聞熱度高 ({theme['news_count']} 則)")
+    elif theme["news_count"] >= 1:
+        score += 0.5
+
+    # 過熱剎車
+    overheat: List[str] = []
+    rsi_v = None
+    if tech.get("ma20") and tech.get("last") and tech["ma20"] > 0:
+        ext = (tech["last"] / tech["ma20"] - 1) * 100
+        if ext > 20:
+            score -= 2.0; overheat.append(f"乖離MA20 +{ext:.0f}%")
+        elif ext > 12:
+            score -= 1.0; overheat.append(f"乖離MA20 +{ext:.0f}%")
+    if mom.get("twenty_pct") is not None and mom["twenty_pct"] > 40:
+        score -= 1.5; overheat.append(f"20日已 +{mom['twenty_pct']:.0f}%")
+    elif mom.get("twenty_pct") is not None and mom["twenty_pct"] > 25:
+        score -= 0.5
+    try:
+        import indicators as _ind
+        _rsi_s = _ind.rsi(df["Close"].astype(float))
+        if _rsi_s is not None and len(_rsi_s):
+            rsi_v = float(_rsi_s.iloc[-1])
+            if rsi_v >= 80:
+                score -= 1.5; overheat.append(f"RSI {rsi_v:.0f} 超買")
+            elif rsi_v >= 72:
+                score -= 0.5
+    except Exception:
+        pass
+    if overheat:
+        reasons.append("⚠️過熱: " + " / ".join(overheat))
+
+    return {
+        "symbol": sym,
+        "last": tech.get("last"),
+        "daily_%": mom.get("daily_pct"),
+        "5d_%": mom.get("five_pct"),
+        "20d_%": mom.get("twenty_pct"),
+        "RS_20d": mom.get("rs_vs_spy_20d"),
+        "MA20突破": "Y" if tech.get("ma20_break") else "",
+        "MA50突破": "Y" if tech.get("ma50_break") else "",
+        "量比": tech.get("vol_ratio"),
+        "RSI": round(rsi_v, 1) if rsi_v is not None else None,
+        "過熱警示": " / ".join(overheat) if overheat else "",
+        "題材": ", ".join(theme["themes"]) if theme["themes"] else "",
+        "近期新聞": theme["news"],
+        "進場理由": " · ".join(reasons),
+        "score": round(float(score), 2),
+    }
+
+
+def _expert_signal(symbol: str) -> tuple:
+    """用現成 Finnhub 資料算「專家共識」加分: 內部人 Form 4 買進 + 分析師評等. 回 (bonus, label).
+
+    不接 IB 跟單 (IB 無公開 API); 改用「內部人自己掏錢買 + 分析師偏多/上調」當專家背書。
+    """
+    bonus = 0.0
+    tags: List[str] = []
+    try:
+        import analyst_insider_alert as _ai
+        ins = _ai._fetch_insider_transactions(symbol, days_back=45) or []
+        if ins:
+            ceo = any(x.get("is_ceo_cfo") for x in ins)
+            bonus += 2.0 if ceo else 1.2
+            tags.append("CEO/CFO 買進" if ceo else f"內部人買進×{len(ins)}")
+        rec = _ai._fetch_recommendation_trends(symbol) or {}
+        if rec:
+            br = rec.get("buy_ratio_cur", 0) or 0
+            if br >= 75:
+                bonus += 1.0; tags.append(f"分析師偏多 {br:.0f}%")
+            elif br >= 60:
+                bonus += 0.5
+            if (rec.get("buy_ratio_change_pp", 0) or 0) >= 5:
+                bonus += 0.5; tags.append("分析師上調")
+    except Exception:
+        pass
+    return round(bonus, 2), " · ".join(tags)
+
+
+def _apply_expert_bonus(df_all, n_enrich: int = 20):
+    """對技術評分前段的候選, 加「專家共識」分後重排 (只 enrich 前 n_enrich 檔, 省 Finnhub 速率).
+
+    效果: 技術強的標的若同時有內部人買進 / 分析師偏多, 排名往前; 純技術沒專家背書的維持原位。
+    """
+    if df_all is None or getattr(df_all, "empty", True):
+        return df_all
+    df = df_all.copy()
+    df["專家"] = ""
+    for idx in df.head(min(len(df), n_enrich)).index:
+        try:
+            sym = str(df.at[idx, "symbol"])
+            bonus, label = _expert_signal(sym)
+            if bonus:
+                df.at[idx, "score"] = round(float(df.at[idx, "score"]) + bonus, 2)
+                df.at[idx, "專家"] = label
+                if label:
+                    df.at[idx, "進場理由"] = (str(df.at[idx, "進場理由"]) + " · 👑" + label).strip(" ·")
+        except Exception:
+            continue
+    return df.sort_values("score", ascending=False).reset_index(drop=True)
+
+
 def run_us_recommendation(top_n: int = 5, dedup_correlated: bool = True) -> dict:
     """B13: dedup_correlated=True 時, 同一相關性族群只取分數最高的那檔."""
     syms = _watchlist()
@@ -211,44 +335,7 @@ def run_us_recommendation(top_n: int = 5, dedup_correlated: bool = True) -> dict
         mom = _momentum_metrics(df, spy_df)
         theme = _theme_score_for(sym, news_pool)
 
-        # 評分權重 (消息面加重)
-        score = 0
-        reasons: List[str] = []
-        if tech.get("ma20_break"):
-            score += 1.5; reasons.append("突破 MA20")
-        if tech.get("ma50_break"):
-            score += 1.5; reasons.append("突破 MA50")
-        if tech.get("vol_ratio") and tech["vol_ratio"] >= 1.5:
-            score += 1.0; reasons.append(f"量比 {tech['vol_ratio']:.1f}x")
-        if mom.get("daily_pct") and mom["daily_pct"] > 1:
-            score += 0.5; reasons.append(f"當日 +{mom['daily_pct']:.1f}%")
-        if mom.get("rs_vs_spy_20d") and mom["rs_vs_spy_20d"] > 0:
-            score += min(2.0, mom["rs_vs_spy_20d"] / 5.0)
-            reasons.append(f"RS+{mom['rs_vs_spy_20d']:.1f}")
-        # 消息面權重提高
-        if theme["themes"]:
-            score += 1.0 * len(theme["themes"])
-            reasons.append(f"題材: {', '.join(theme['themes'])}")
-        if theme["news_count"] >= 3:
-            score += 1.5; reasons.append(f"新聞熱度高 ({theme['news_count']} 則)")
-        elif theme["news_count"] >= 1:
-            score += 0.5
-
-        rows.append({
-            "symbol": sym,
-            "last": tech.get("last"),
-            "daily_%": mom.get("daily_pct"),
-            "5d_%": mom.get("five_pct"),
-            "20d_%": mom.get("twenty_pct"),
-            "RS_20d": mom.get("rs_vs_spy_20d"),
-            "MA20突破": "Y" if tech.get("ma20_break") else "",
-            "MA50突破": "Y" if tech.get("ma50_break") else "",
-            "量比": tech.get("vol_ratio"),
-            "題材": ", ".join(theme["themes"]) if theme["themes"] else "",
-            "近期新聞": theme["news"],
-            "進場理由": " · ".join(reasons),
-            "score": round(float(score), 2),
-        })
+        rows.append(_score_row(sym, tech, mom, theme, df))
 
     if not rows:
         return {"top_picks": pd.DataFrame(), "fear_greed": fg, "sectors": sector, "news": news_pool}
@@ -258,6 +345,7 @@ def run_us_recommendation(top_n: int = 5, dedup_correlated: bool = True) -> dict
         rows = _dedup_correlated(rows, score_key="score", min_kept=top_n)
 
     df_all = pd.DataFrame(rows).sort_values("score", ascending=False).reset_index(drop=True)
+    df_all = _apply_expert_bonus(df_all, n_enrich=max(top_n * 2, 15))  # 👑 專家共識加分後重排
     top_df = df_all.head(top_n).copy()
 
     # 補催化劑（美股 Top 5）
@@ -297,4 +385,103 @@ def run_us_recommendation(top_n: int = 5, dedup_correlated: bool = True) -> dict
         "fear_greed": fg,
         "sectors": sector,
         "news": news_pool,
+    }
+
+
+# ===========================================================================
+# 新興突破掃描 (池外) — 獨立於核心 Top10
+# ===========================================================================
+# 設計: 核心 Top10 (run_us_recommendation) 維持精選池不動; 這裡用「更廣的池 + 嚴格流動性
+#       過濾」掃出池外正在發動的標的, 沿用同一套 _score_row 評分 (含過熱剎車)。
+#   候選池 = 內建擴大成分股清單 (S&P500/Nasdaq100 流動性高的) ∪ DEFAULT_UNIVERSE
+#            ∪ 使用者自訂 US_EMERGING_UNIVERSE secret ∪ (可選) Finnhub 活躍榜。
+#   「活躍」: Finnhub 免費版沒有乾淨的 most-active 端點, 故活躍度由「掃這個廣池後用
+#            量比/動能排序」浮出; 要抓清單外小型股需付費資料源, 已留 _fetch_active_extra 擴充點。
+
+EXTENDED_UNIVERSE = [
+    # 更多半導體 / 設備
+    "LRCX", "KLAC", "AMAT", "ADI", "NXPI", "MCHP", "ON", "MPWR", "SWKS", "TER", "ENTG", "WOLF",
+    # 軟體 / 雲 / 資安
+    "NOW", "INTU", "WDAY", "TEAM", "ZS", "S", "OKTA", "FTNT", "HUBS", "TWLO", "DOCU", "U", "PATH", "GTLB", "AI",
+    # 網路 / 消費網路
+    "PYPL", "SQ", "COIN", "HOOD", "ROKU", "PINS", "SNAP", "DASH", "RBLX", "SPOT", "MELI", "SE", "BABA", "PDD", "JD",
+    # 生技 / 製藥
+    "LLY", "MRNA", "REGN", "VRTX", "GILD", "BIIB", "AMGN", "ISRG", "DXCM", "ELV",
+    # 工業 / 國防 / 能源
+    "RTX", "NOC", "GD", "ETN", "PH", "EMR", "PWR", "SLB", "HAL", "OXY", "DVN", "MPC", "PSX", "LNG", "SMR",
+    # 金融
+    "GS", "MS", "WFC", "C", "SCHW", "BLK", "AXP", "COF", "PGR", "KKR", "APO",
+    # 消費 / 其他動能
+    "LULU", "DECK", "CMG", "ELF", "CAVA", "DKNG", "CELH", "WING", "ANF", "RDDT", "ASTS", "RKLB", "IONQ", "RGTI", "TEM",
+]
+
+
+def _fetch_active_extra() -> List[str]:
+    """擴充點: 之後可接 Finnhub/付費的「當日活躍/漲幅榜」抓清單外小型股. 目前回 []."""
+    return []
+
+
+def _emerging_universe() -> List[str]:
+    """組合廣池: 擴大成分股 + 預設精選 + 使用者自訂 + (可選) 活躍榜, 去重."""
+    uni = list(EXTENDED_UNIVERSE) + list(DEFAULT_UNIVERSE)
+    try:
+        custom = ds._secret("US_EMERGING_UNIVERSE", "").strip()
+        if custom:
+            uni += [s.strip().upper() for s in re.split(r"[,\s]+", custom) if s.strip()]
+    except Exception:
+        pass
+    try:
+        uni += _fetch_active_extra()
+    except Exception:
+        pass
+    # 去重 + 去掉 ETF
+    seen, out = set(), []
+    for s in uni:
+        s = s.upper()
+        if s and s not in seen and s not in _US_ETF_BLACKLIST:
+            seen.add(s); out.append(s)
+    return out
+
+
+def run_emerging_breakout(top_n: int = 10, min_price: float = 3.0,
+                          min_avg_vol: float = 500_000) -> dict:
+    """池外新興突破掃描. 流動性過濾 (股價 ≥ min_price, 5日均量 ≥ min_avg_vol) 濾掉雞蛋水餃,
+    沿用 _score_row 評分 (含過熱剎車), 標出「池外」(不在精選 DEFAULT_UNIVERSE 內) 的新標的。
+    """
+    spy_df = ds.fetch_yf_history("SPY", period="3mo")
+    news_pool = ds.fetch_market_news_themes()
+    core_set = set(DEFAULT_UNIVERSE)
+    rows = []
+    for sym in _emerging_universe():
+        df = ds.fetch_yf_history(sym, period="6mo")
+        if df is None or df.empty or len(df) < 60:
+            continue
+        # 流動性過濾 — 濾掉低價 / 低量 (雞蛋水餃 / 拉高出貨高風險)
+        try:
+            close = df["Close"].astype(float); vol = df["Volume"].astype(float)
+            if float(close.iloc[-1]) < min_price:
+                continue
+            if float(vol.iloc[-6:-1].mean()) < min_avg_vol:
+                continue
+        except Exception:
+            continue
+        tech = _ma_breakout_score(df)
+        mom = _momentum_metrics(df, spy_df)
+        theme = _theme_score_for(sym, news_pool)
+        if not tech or not mom:
+            continue
+        row = _score_row(sym, tech, mom, theme, df)
+        row["池外"] = "🆕" if sym not in core_set else ""   # 標出非精選池的新標的
+        rows.append(row)
+
+    if not rows:
+        return {"top_picks": pd.DataFrame(), "scanned": 0}
+    rows = _dedup_correlated(rows, score_key="score", min_kept=top_n)
+    df_all = pd.DataFrame(rows).sort_values("score", ascending=False).reset_index(drop=True)
+    df_all = _apply_expert_bonus(df_all, n_enrich=max(top_n * 2, 15))  # 👑 專家共識加分後重排
+    return {
+        "top_picks": df_all.head(top_n).copy(),
+        "all_scored": df_all,
+        "scanned": len(rows),
+        "universe_size": len(_emerging_universe()),
     }

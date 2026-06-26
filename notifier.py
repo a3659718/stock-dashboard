@@ -414,6 +414,45 @@ def fmt_tw_combined(combined_df, latest_date_str: str, market_label: str, max_n:
     return _truncate_tg_msg("\n".join(lines))
 
 
+def fmt_emerging_breakout(data: dict, top_n: int = 10) -> str:
+    """美股『新興突破』掃描推播 (us_screener.run_emerging_breakout 的輸出)."""
+    df = data.get("top_picks") if isinstance(data, dict) else None
+    if df is None or getattr(df, "empty", True):
+        return "🚀 <b>美股新興突破掃描</b>\n\n今日無符合條件的突破標的 (流動性 / 過熱過濾後)。"
+    n = min(top_n, len(df))
+    lines = [
+        f"🚀 <b>美股新興突破 Top {n}</b> · 盤後掃描",
+        f"<i>掃 {data.get('scanned','?')}/{data.get('universe_size','?')} 檔 · 🆕=精選池外新標的 · ⚠️=過熱降評</i>",
+        "",
+    ]
+    for i, (_, r) in enumerate(df.head(top_n).iterrows(), 1):
+        sym = _esc(str(r.get("symbol", "")))
+        new_tag = "🆕 " if r.get("池外") else ""
+        lines.append(f"{i}. {new_tag}<b><code>{sym}</code></b>  分數 {_fmt_num(r.get('score'))}")
+        seg = []
+        if r.get("last") is not None:
+            seg.append(f"${_fmt_num(r.get('last'))}")
+        if r.get("daily_%") is not None:
+            seg.append(f"日 {_safe_pct(r.get('daily_%'))}")
+        if r.get("20d_%") is not None:
+            seg.append(f"20d {_safe_pct(r.get('20d_%'))}")
+        if r.get("RS_20d") is not None:
+            seg.append(f"RS {_fmt_num(r.get('RS_20d'))}")
+        if r.get("量比"):
+            seg.append(f"量比 {_fmt_num(r.get('量比'))}x")
+        if seg:
+            lines.append("   " + " · ".join(seg))
+        if r.get("題材"):
+            lines.append(f"   題材: {_esc(str(r.get('題材')))}")
+        if r.get("專家"):
+            lines.append(f"   👑 專家: {_esc(str(r.get('專家')))}")
+        if r.get("過熱警示"):
+            lines.append(f"   ⚠️ {_esc(str(r.get('過熱警示')))}")
+        lines.append("")
+    lines.append("<i>※ 技術動能 + 內部人/分析師背書; 非投資建議, 池外標的風險較高, 嚴守風控.</i>")
+    return _truncate_tg_msg("\n".join(lines).rstrip())
+
+
 def fmt_us_top_picks(df, fg: dict, top_n: int = 10) -> str:
     if df is None or df.empty:
         return f"美股 Top {top_n} 推薦：今日無符合篩選條件的標的。"
@@ -430,12 +469,16 @@ def fmt_us_top_picks(df, fg: dict, top_n: int = 10) -> str:
         sym = row.get("symbol") or "—"
         sc = row.get("score") or "—"
         theme_v = row.get("題材")
+        expert_v = row.get("專家")
+        overheat_v = row.get("過熱警示")
         lines.append(
             f"{i+1}. <b><code>{_esc(sym)}</code></b>  "
             f"日 {_esc(row.get('daily_%'))}% / 20d {_esc(row.get('20d_%'))}% · 分數 {_esc(sc)}"
             + (f"\n   題材: {_esc(theme_v)}" if theme_v else "")
+            + (f"\n   👑 專家: {_esc(expert_v)}" if expert_v else "")
+            + (f"\n   ⚠️ {_esc(overheat_v)}" if overheat_v else "")
         )
-    return "\n".join(lines)
+    return _truncate_tg_msg("\n".join(lines))
 
 
 def fmt_strong_sectors(sectors_df, leaders_map: dict = None, themes_df=None,
