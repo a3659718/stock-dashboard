@@ -142,10 +142,16 @@ def _send_tg(msg: str, label: str = "推播",
 
     若提供 stock_id, 會附加 inline keyboard (➕加自選 / 🤖AI / 🛡️停損 / 📊 看圖).
     """
+    # 回饋一律用 st.toast (浮層, 不管 rerun 跳分頁/重置捲動都看得到) +
+    # 行內 st.error/success (保留詳細訊息可複製)。
+    # 為什麼: 送出按鈕在分頁很下面, 之前只用 st.success 行內顯示, rerun 後常被捲走 →
+    #         使用者以為「按了沒反應/空白」, 其實 TG 已送出。toast 解決這個感知問題。
     if not msg or not msg.strip():
+        st.toast(f"{label}:沒有可推送內容", icon="⚠️")
         st.warning(f"{label}：沒有可推送內容")
         return False
     if not notifier.is_configured():
+        st.toast(f"{label} 失敗:TG bot 未設定", icon="🚫")
         st.error(
             f"{label} 失敗：TG bot 未設定。\n"
             "請到 Streamlit Cloud → App → Settings → Secrets 補 "
@@ -158,11 +164,14 @@ def _send_tg(msg: str, label: str = "推播",
             reply_markup = notifier.build_stock_action_keyboard(stock_id, market=market)
         ok, info = notifier.send_message(msg, reply_markup=reply_markup)
         if ok:
+            st.toast(f"✅ 已推送到 TG:{label}", icon="✈️")
             st.success(f"已推送到 TG：{label}")
             return True
+        st.toast(f"❌ {label} 失敗", icon="🚫")
         st.error(f"{label} 失敗：{info}")
         return False
     except Exception as e:
+        st.toast(f"❌ {label} 例外:{type(e).__name__}", icon="🚫")
         st.error(f"{label} 例外：{type(e).__name__}: {e}")
         return False
 
