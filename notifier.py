@@ -445,7 +445,7 @@ def fmt_emerging_breakout(data: dict, top_n: int = 10) -> str:
         if r.get("題材"):
             lines.append(f"   題材: {_esc(str(r.get('題材')))}")
         if r.get("專家"):
-            lines.append(f"   👑 專家: {_esc(str(r.get('專家')))}")
+            lines.append(f"   👑 大戶: {_esc(str(r.get('專家')))}")
         if r.get("過熱警示"):
             lines.append(f"   ⚠️ {_esc(str(r.get('過熱警示')))}")
         lines.append("")
@@ -475,7 +475,7 @@ def fmt_us_top_picks(df, fg: dict, top_n: int = 10) -> str:
             f"{i+1}. <b><code>{_esc(sym)}</code></b>  "
             f"日 {_esc(row.get('daily_%'))}% / 20d {_esc(row.get('20d_%'))}% · 分數 {_esc(sc)}"
             + (f"\n   題材: {_esc(theme_v)}" if theme_v else "")
-            + (f"\n   👑 專家: {_esc(expert_v)}" if expert_v else "")
+            + (f"\n   👑 大戶: {_esc(expert_v)}" if expert_v else "")
             + (f"\n   ⚠️ {_esc(overheat_v)}" if overheat_v else "")
         )
     return _truncate_tg_msg("\n".join(lines))

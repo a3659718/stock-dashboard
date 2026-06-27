@@ -607,7 +607,10 @@ def fetch_market_news_themes() -> List[Dict]:
 
 
 def get_finnhub_token() -> str:
-    return _secret("FINNHUB_TOKEN")
+    # 雙名後備: 不同 workflow / secret 命名習慣不一 (FINNHUB_TOKEN vs FINNHUB_API_KEY)。
+    # 之前 market_open_alert.yml 只傳 FINNHUB_API_KEY 但這裡只讀 FINNHUB_TOKEN → Actions 上
+    # token 永遠空, 專家訊號 / 8-K 急報 / IPO / 川普新聞全部靜默失效。改成兩個名都認。
+    return _secret("FINNHUB_TOKEN") or _secret("FINNHUB_API_KEY")
 
 
 # ---------------------------------------------------------------------------

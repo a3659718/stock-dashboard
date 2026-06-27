@@ -278,7 +278,7 @@ def _expert_signal(symbol: str) -> tuple:
             ceo = any(x.get("is_ceo_cfo") for x in ins)
             bonus += 2.0 if ceo else 1.2
             tags.append("CEO/CFO 買進" if ceo else f"內部人買進×{len(ins)}")
-        rec = _ai._fetch_recommendation_trends(symbol) or {}
+        rec = _ai._fetch_analyst_recommendations(symbol) or {}
         if rec:
             br = rec.get("buy_ratio_cur", 0) or 0
             if br >= 75:
@@ -292,6 +292,87 @@ def _expert_signal(symbol: str) -> tuple:
     return round(bonus, 2), " · ".join(tags)
 
 
+def _accumulation_signal(symbol: str, df=None) -> tuple:
+    """量價吸籌訊號 — 台股「主力潛伏」的美股版, 純用 OHLCV, 零額外 API。
+    抓「上漲日量能 > 下跌日量能 (主力買盤)」+「OBV 上升 (持續吸貨)」。回 (bonus, tag)。"""
+    bonus = 0.0
+    tags: List[str] = []
+    try:
+        if df is None or getattr(df, "empty", True):
+            df = ds.fetch_yf_history(symbol, period="3mo", interval="1d")
+        if df is None or df.empty or len(df) < 25:
+            return 0.0, ""
+        last = df.tail(20).copy()
+        c = last["Close"].astype(float)
+        v = last["Volume"].astype(float)
+        chg = c.diff()
+        up_vol = float(v[chg > 0].sum())
+        dn_vol = float(v[chg < 0].sum())
+        if dn_vol > 0:
+            mfr = up_vol / dn_vol  # money-flow ratio: 上漲量能 / 下跌量能
+            if mfr >= 2.0:
+                bonus += 1.0; tags.append(f"買盤量能 {mfr:.1f}x")
+            elif mfr >= 1.4:
+                bonus += 0.5; tags.append(f"買盤量能 {mfr:.1f}x")
+        # OBV 斜率 (近 20 日上升 → 量能持續流入)
+        sign = chg.apply(lambda x: 1.0 if x > 0 else (-1.0 if x < 0 else 0.0))
+        obv = (sign * v).cumsum()
+        if len(obv) >= 2 and obv.iloc[-1] > obv.iloc[0] and obv.iloc[-1] > float(obv.median()):
+            bonus += 0.5
+            tags.append("OBV↑" if tags else "OBV 上升")
+    except Exception:
+        return 0.0, ""
+    return round(bonus, 2), " · ".join(tags)
+
+
+def _options_flow_signal(symbol: str) -> tuple:
+    """選擇權 flow: 近月 call/put 成交量比。call-heavy (P/C 低) → 大戶偏多布局。回 (bonus, tag)。
+    用 yfinance 免費選擇權鏈; 部分標的/ETF 無選擇權 → graceful 回 0。"""
+    try:
+        import yfinance as yf
+        t = yf.Ticker(symbol)
+        exps = list(getattr(t, "options", []) or [])
+        if not exps:
+            return 0.0, ""
+        ch = t.option_chain(exps[0])  # 近月
+        call_vol = float(ch.calls["volume"].fillna(0).sum()) if "volume" in ch.calls else 0.0
+        put_vol = float(ch.puts["volume"].fillna(0).sum()) if "volume" in ch.puts else 0.0
+        if call_vol < 500:  # 量太小不具代表性
+            return 0.0, ""
+        pcr = (put_vol / call_vol) if put_vol > 0 else 0.0
+        if pcr <= 0.6:
+            return 1.0, f"選擇權偏多 P/C {pcr:.2f}"
+        if pcr <= 0.8:
+            return 0.5, f"選擇權偏多 P/C {pcr:.2f}"
+    except Exception:
+        return 0.0, ""
+    return 0.0, ""
+
+
+def _institutional_signal(symbol: str) -> tuple:
+    """機構持股變化 (13F)。回 (bonus, tag)。
+    注意: Finnhub institutional-ownership 為『付費端點』, 免費 tier 多半回 403/空 → graceful 0,
+    僅在真的拿到資料時才加分 (淨增持 → 偏多)。升級付費後自動生效。"""
+    try:
+        import requests
+        token = ds.get_finnhub_token()
+        if not token:
+            return 0.0, ""
+        r = requests.get("https://finnhub.io/api/v1/stock/ownership",
+                          params={"symbol": symbol, "limit": 20, "token": token}, timeout=10)
+        if r.status_code != 200:
+            return 0.0, ""
+        data = (r.json() or {}).get("ownership", []) or []
+        if not data:
+            return 0.0, ""
+        net = sum((x.get("change", 0) or 0) for x in data)  # 正 = 機構淨增持
+        if net > 0:
+            return 1.0, "機構增持"
+    except Exception:
+        return 0.0, ""
+    return 0.0, ""
+
+
 def _apply_expert_bonus(df_all, n_enrich: int = 20):
     """對技術評分前段的候選, 加「專家共識」分後重排 (只 enrich 前 n_enrich 檔, 省 Finnhub 速率).
 
@@ -301,12 +382,33 @@ def _apply_expert_bonus(df_all, n_enrich: int = 20):
         return df_all
     df = df_all.copy()
     df["專家"] = ""
-    for idx in df.head(min(len(df), n_enrich)).index:
+    # 大戶共識 = 內部人 Form4 + 分析師 + 量價吸籌 + 選擇權 flow + 機構增持(13F)
+    _signals = (_expert_signal, _accumulation_signal,
+                _options_flow_signal, _institutional_signal)
+    # 昂貴(每檔額外 network round-trip)的訊號只跑排名最前的幾檔, 控制總執行時間,
+    # 避免 15-20 檔 × 選擇權鏈/13F 查詢把 job 拖到 timeout。便宜的(內部人/分析師/吸籌)全跑。
+    _HEAVY = {_options_flow_signal, _institutional_signal}
+    _n_heavy = min(8, n_enrich)
+    for pos, idx in enumerate(df.head(min(len(df), n_enrich)).index):
         try:
             sym = str(df.at[idx, "symbol"])
-            bonus, label = _expert_signal(sym)
-            if bonus:
-                df.at[idx, "score"] = round(float(df.at[idx, "score"]) + bonus, 2)
+            total = 0.0
+            parts: List[str] = []
+            for fn in _signals:
+                if fn in _HEAVY and pos >= _n_heavy:
+                    continue  # 排名較後者省去昂貴查詢
+                try:
+                    b, lab = fn(sym)
+                except Exception:
+                    b, lab = 0.0, ""
+                if b:
+                    total += b
+                    if lab:
+                        parts.append(lab)
+            total = min(total, 5.0)  # 大戶加分上限, 避免蓋過技術/動能本體
+            if total:
+                label = " · ".join(parts)
+                df.at[idx, "score"] = round(float(df.at[idx, "score"]) + total, 2)
                 df.at[idx, "專家"] = label
                 if label:
                     df.at[idx, "進場理由"] = (str(df.at[idx, "進場理由"]) + " · 👑" + label).strip(" ·")
