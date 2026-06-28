@@ -1701,7 +1701,14 @@ def fmt_combined_intraday_alerts(
 
     # ===== 訊息標題 — 用最高優先級的圖示 =====
     if has_crash:
-        title = "🚨 盤中重要事件 (含系統性大跌)"
+        _crash_dirs = {(info.get("crash") or {}).get("direction", "down")
+                       for info in per_sym.values() if info.get("crash")}
+        if _crash_dirs == {"up"}:
+            title = "🚀 盤中重要事件 (含系統性大漲)"
+        elif _crash_dirs == {"down"}:
+            title = "🚨 盤中重要事件 (含系統性大跌)"
+        else:
+            title = "🚨 盤中重要事件 (系統性大漲/大跌)"
     elif has_reversal:
         title = "🔄 盤中反轉警報"
     else:
@@ -1769,14 +1776,19 @@ def fmt_combined_intraday_alerts(
                 tval = pct_o = pct_p = today_open_c = prior_close_c = cur_c = 0.0
             ttype = crash_t.get("trigger_type", "intraday")
             ttype_zh = "盤中" if ttype == "intraday" else "連2日累計"
+            _is_up = (crash_t.get("direction", "down") == "up")
+            _move_emoji = "🚀" if _is_up else "🚨"
+            _move_zh = "系統性大漲" if _is_up else "系統性大跌"
             diff_o = cur_c - today_open_c
             diff_p = cur_c - prior_close_c
-            lines.append(f"  🚨 <b>系統性大跌觸發</b> ({ttype_zh} {tval:+.2f}%)")
+            _arr_o = "▲" if diff_o > 0 else ("▼" if diff_o < 0 else "—")
+            _arr_p = "▲" if diff_p > 0 else ("▼" if diff_p < 0 else "—")
+            lines.append(f"  {_move_emoji} <b>{_move_zh}觸發</b> ({ttype_zh} {tval:+.2f}%)")
             lines.append(
-                f"     vs 開盤 {today_open_c:,.0f}: ▼{abs(diff_o):,.0f} 點 ({pct_o:+.2f}%)"
+                f"     vs 開盤 {today_open_c:,.0f}: {_arr_o}{abs(diff_o):,.0f} 點 ({pct_o:+.2f}%)"
             )
             lines.append(
-                f"     vs 昨收 {prior_close_c:,.0f}: ▼{abs(diff_p):,.0f} 點 ({pct_p:+.2f}%)"
+                f"     vs 昨收 {prior_close_c:,.0f}: {_arr_p}{abs(diff_p):,.0f} 點 ({pct_p:+.2f}%)"
             )
 
         # === Reversal 觸發 — 直觀化: 從高/低 → 現價 顯示點數差 ===

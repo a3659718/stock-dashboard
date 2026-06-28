@@ -556,11 +556,17 @@ def analyze_systemic_crash(crash_data: Dict, model: str = DEFAULT_MODEL) -> Tupl
         sym = t.get("symbol", "")
         ttype = t.get("trigger_type", "")
         tval = t.get("trigger_value", 0)
+        _verb = "漲" if t.get("direction", "down") == "up" else "跌"
         if ttype == "intraday":
-            trigger_lines.append(f"  - {name} ({sym}): 盤中跌 {tval:+.2f}%")
+            trigger_lines.append(f"  - {name} ({sym}): 盤中{_verb} {tval:+.2f}%")
         elif ttype == "two_day":
-            trigger_lines.append(f"  - {name} ({sym}): 連 2 日累計跌 {tval:+.2f}%")
+            trigger_lines.append(f"  - {name} ({sym}): 連 2 日累計{_verb} {tval:+.2f}%")
     triggers_block = "\n".join(trigger_lines) if trigger_lines else "  (無)"
+
+    # 方向判定 (用戶: 漲跌都推) → 決定 prompt 框架 (大漲/大跌/混合)
+    _dirs = {t.get("direction", "down") for t in triggers}
+    _is_up = (_dirs == {"up"})
+    _is_down = (_dirs == {"down"})
 
     # ===== 全部標的 snapshot (給全局視野) =====
     snap_lines = []
@@ -584,8 +590,36 @@ def analyze_systemic_crash(crash_data: Dict, model: str = DEFAULT_MODEL) -> Tupl
             vix_hint = "(<20 → 正常區間, 尚無恐慌)"
         vix_line = f"{vix_line} {vix_hint}"
 
+    if _is_up:
+        _situation = "可能的系統性大漲 / 急拉"
+        _judge_line = ('這是「系統性轉強 (趨勢動能)」, 還是「事件性急拉 (留意拉高出貨)」? '
+                       '給出明確判斷 (二選一), 並以 2-3 點支持判斷的事實.')
+        _action_block = (
+            "- 追多 (適合於: 趨勢轉強 + 量價配合 + 體質佳)\n"
+            "- 觀望 (適合於: 訊號不明 / 等回測確認再進)\n"
+            "- 獲利了結 / 不追高 (適合於: 急拉過熱 + 量價背離 + 拉高出貨疑慮)"
+        )
+    elif _is_down:
+        _situation = "可能的系統性大跌"
+        _judge_line = ('這是「系統性大跌」, 還是「事件性回檔」? '
+                       '給出明確判斷 (二選一), 並以 2-3 點支持判斷的事實.')
+        _action_block = (
+            "- 加碼 (適合於: 事件性回檔 + 恐慌過頭 + 體質佳)\n"
+            "- 觀望 (適合於: 訊號不明 / 等更多 confirmation)\n"
+            "- 減碼 (適合於: 系統性風險升高 + 趨勢明顯轉空)"
+        )
+    else:  # 漲跌互現
+        _situation = "盤中劇烈波動 (多空互現)"
+        _judge_line = ('這是「多空分歧的震盪」, 還是「系統性轉折」? '
+                       '給出明確判斷, 並以 2-3 點支持判斷的事實.')
+        _action_block = (
+            "- 加碼 / 追多 (體質佳且方向明確時)\n"
+            "- 觀望 (訊號分歧時的預設)\n"
+            "- 減碼 / 獲利了結 (風險升高或過熱時)"
+        )
+
     prompt = f"""你是務實的台股 / 美股市場策略師, 風格冷靜不煽動。
-目前偵測到「可能的系統性大跌」訊號, 請依下面資料做快速判斷。
+目前偵測到「{_situation}」訊號, 請依下面資料做快速判斷。
 
 【觸發的標的】
 {triggers_block}
@@ -602,13 +636,11 @@ def analyze_systemic_crash(crash_data: Dict, model: str = DEFAULT_MODEL) -> Tupl
 請用繁體中文, 嚴格依下列格式回覆 (每段 2-4 句, 全文 ≤ 450 字):
 
 ## 🩺 判斷
-這是「系統性大跌」, 還是「事件性回檔」? 給出明確判斷 (二選一), 並以 2-3 點支持判斷的事實.
+{_judge_line}
 
 ## 🎯 動作建議
 從下列三個動作擇一明確建議, 並說明理由 (1-2 句):
-- 加碼 (適合於: 事件性回檔 + 恐慌過頭 + 體質佳)
-- 觀望 (適合於: 訊號不明 / 等更多 confirmation)
-- 減碼 (適合於: 系統性風險升高 + 趨勢明顯轉空)
+{_action_block}
 
 ## 🔭 關鍵觀察點
 列出 3-5 個未來 1-3 個交易日的觀察重點 (具體價位 / 指標水準).

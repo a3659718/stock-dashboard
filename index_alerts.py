@@ -163,6 +163,31 @@ REVERSAL_MAX_PER_DAY = 3           # 每 symbol 每日最多警報數
 REVERSAL_MIN_DIP_FOR_REBOUND_PCT = 0.5
 
 
+# yfinance 對某些「指數 ticker」的 5m 盤中資料常常回空 (^SOX 尤甚),
+# 害反轉 / 開盤即弱 / 系統性大跌對這些指數永遠拿不到盤中 → 靜默不跳。
+# 用「可交易的 ETF 代理」補盤中 (百分比走勢幾乎等同指數)。
+# 註: 代理只在本尊盤中『回空』時才啟用; 啟用時日線也一併改用代理 (見 crash snapshot),
+#     避免「代理盤中價 ÷ 指數昨收」這種不同價格尺度相除 → 垃圾百分比。
+INTRADAY_PROXY = {
+    "^SOX":  "SOXX",   # 費城半導體 → iShares 半導體 ETF
+    "^IXIC": "ONEQ",   # 那斯達克綜合 → Fidelity Nasdaq Composite ETF
+}
+
+
+def _fetch_intraday_5m_resilient(symbol: str):
+    """回 (df, used_symbol). 先試本尊 5m; 若空且有 ETF 代理 → 改試代理 5m。
+    讓 ^SOX 這種 intraday 不穩的指數不會因 5m 空而整個 silent 漏掉。"""
+    df = ds.fetch_yf_history(symbol, period="2d", interval="5m")
+    if (df is None or getattr(df, "empty", True)) and symbol in INTRADAY_PROXY:
+        proxy = INTRADAY_PROXY[symbol]
+        df2 = ds.fetch_yf_history(proxy, period="2d", interval="5m")
+        if df2 is not None and not df2.empty:
+            print(f"[intraday-proxy] {symbol} 5m 回空 → 改用代理 {proxy}", flush=True)
+            return df2, proxy
+        print(f"[intraday-proxy] {symbol} 5m 回空, 代理 {proxy} 也空 — 盤中偵測本 tick skip", flush=True)
+    return df, symbol
+
+
 def _fetch_intraday_anchor_data(symbol: str) -> Optional[Dict]:
     """抓盤中反轉判斷需要的數據: today_open / current / 今日 high / 今日 low.
 
@@ -172,7 +197,9 @@ def _fetch_intraday_anchor_data(symbol: str) -> Optional[Dict]:
     import math
     import pandas as pd
 
-    df = ds.fetch_yf_history(symbol, period="2d", interval="5m")
+    # SOX fix: 本尊 5m 回空時改用 ETF 代理 (反轉/開盤即弱純看盤中 open/high/low/current,
+    # 全部同源 → 代理百分比走勢一致, 無尺度混用問題)。
+    df, _src = _fetch_intraday_5m_resilient(symbol)
     if df is None or df.empty:
         return None
     try:
@@ -1261,10 +1288,14 @@ SYSTEMIC_CRASH_CONFIG = {
     "^IXIC": {"name": "那斯達克", "country": "US", "intraday_threshold": -3.0},
     "TSM":   {"name": "台積電 ADR", "country": "US", "intraday_threshold": -3.0},
 }
-SYSTEMIC_INTRADAY_PCT = -3.0      # 預設觸發門檻 (若 config 沒設 intraday_threshold)
+SYSTEMIC_INTRADAY_PCT = -3.0      # (保留) 舊的純跌門檻; 雙向版改用 SYSTEMIC_MOVE_PCT
 SYSTEMIC_TWO_DAY_CUM_PCT = -4.0   # 觸發門檻: 連續 2 日累計 -4%
 SYSTEMIC_COOLDOWN_MIN = 60        # 同 symbol 兩警報間最少間隔 (分)
-SYSTEMIC_MAX_PER_DAY = 2          # 全 symbol 每日最多警報數
+SYSTEMIC_MAX_PER_DAY = 5          # 全 symbol 每日最多警報數 (雙向 + 持續監控 → 從 2 放寬到 5;
+                                  # 同 symbol 仍受 60min cooldown 限制, 不會狂洗)
+# 用戶要求: 漲跌都當大事件, 統一門檻 ±1.5% (vs 開盤 / vs 昨收 任一達標即觸發)。
+# 雙向: 跌幅 <= -SYSTEMIC_MOVE_PCT → 大跌; 漲幅 >= +SYSTEMIC_MOVE_PCT → 大漲。
+SYSTEMIC_MOVE_PCT = 1.5           # 雙向觸發門檻 (絕對值 %)
 # 是否把「vs 昨收」也納入 intraday 跌幅判斷.
 # True (預設): 取 min(pct_vs_open, pct_vs_prior) — 能抓 gap down 場景, 但對 user 字面意思
 #              「盤中 -3%」較寬鬆
@@ -1287,8 +1318,12 @@ def _fetch_systemic_snapshot(symbol: str) -> Optional[Dict]:
     """
     import pandas as pd
 
-    # 1) Daily 抓 prior close 跟前前日 close (近 5 個交易日)
-    df_d = ds.fetch_yf_history(symbol, period="10d", interval="1d")
+    # SOX fix: 先決定盤中資料來源 (本尊或 ETF 代理)。若本尊 5m 回空 → 整組(日線+盤中)
+    # 都改用代理, 確保「盤中價 ÷ 昨收」同價格尺度, 不會混用 SOXX 價 ÷ ^SOX 價 變垃圾。
+    df_i, src = _fetch_intraday_5m_resilient(symbol)
+
+    # 1) Daily 抓 prior close 跟前前日 close (近 5 個交易日) — 用 src
+    df_d = ds.fetch_yf_history(src, period="10d", interval="1d")
     if df_d is None or df_d.empty or len(df_d) < 2:
         return None
     try:
@@ -1307,10 +1342,9 @@ def _fetch_systemic_snapshot(symbol: str) -> Optional[Dict]:
     except Exception:
         return None
 
-    # 2) 5m intraday 抓 today_open + current (若 latest_is_today 為 False, 表示盤前/休市)
+    # 2) 5m intraday 抓 today_open + current (df_i 已在上方用 src 抓好, 含代理 fallback)
     today_open = None
     current = None
-    df_i = ds.fetch_yf_history(symbol, period="2d", interval="5m")
     if df_i is not None and not df_i.empty:
         try:
             df_i = df_i.copy()
@@ -1472,24 +1506,33 @@ def check_systemic_crash() -> Optional[Dict]:
             except Exception:
                 pass
 
-        # SOX fix: per-symbol intraday threshold (default -3%, SOX 用 -2%)
-        sym_intraday_threshold = cfg.get("intraday_threshold", SYSTEMIC_INTRADAY_PCT)
+        # 雙向門檻 (用戶: 漲跌 ±1.5% 都當大事件, vs 開盤/vs 昨收 任一達標即觸發)。
+        sym_thr = SYSTEMIC_MOVE_PCT
+        if SYSTEMIC_INCLUDE_VS_PRIOR:
+            up_move = max(pct_vs_open, pct_vs_prior)    # 取較大漲幅 (含 gap up)
+        else:
+            up_move = pct_vs_open
+        down_move = intraday_pct  # 已是 min(vs_open, vs_prior) 或 vs_open
 
         trigger_type = None
         trigger_value = None
-        if intraday_pct <= sym_intraday_threshold:
-            trigger_type = "intraday"
-            trigger_value = intraday_pct
+        direction = None
+        if down_move <= -sym_thr:
+            trigger_type = "intraday"; trigger_value = down_move; direction = "down"
+        elif up_move >= sym_thr:
+            trigger_type = "intraday"; trigger_value = up_move; direction = "up"
         elif two_day_pct is not None and two_day_pct <= SYSTEMIC_TWO_DAY_CUM_PCT:
-            trigger_type = "two_day"
-            trigger_value = two_day_pct
+            trigger_type = "two_day"; trigger_value = two_day_pct; direction = "down"
+        elif two_day_pct is not None and two_day_pct >= abs(SYSTEMIC_TWO_DAY_CUM_PCT):
+            trigger_type = "two_day"; trigger_value = two_day_pct; direction = "up"
 
         if trigger_type:
             triggers.append({
                 **snap_full,
                 "trigger_type": trigger_type,
                 "trigger_value": round(trigger_value, 2),
-                "threshold_used": sym_intraday_threshold,
+                "threshold_used": (-sym_thr if direction == "down" else sym_thr),
+                "direction": direction,
             })
             sym_state["last_alert_at"] = now_utc.isoformat()
             sym_state["alerts_today"] = sym_state.get("alerts_today", 0) + 1
