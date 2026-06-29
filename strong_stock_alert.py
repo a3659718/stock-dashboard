@@ -29,6 +29,23 @@ from typing import Dict, List, Optional
 import data_sources as ds
 
 
+# yfinance 對 ^TWII 5m 盤中偶爾回空 → 用 0050.TW (元大台灣50, 走勢百分比幾近等同大盤) 當代理,
+# 避免台股大漲因指數盤中資料缺漏而靜默漏接 (與 index_alerts 的 ^SOX→SOXX 同理)。
+# 只用到「當日漲幅 %」, 代理與大盤百分比一致, 無價格尺度問題。
+_TWII_PROXY = "0050.TW"
+
+
+def _fetch_twii_5m_resilient():
+    """回 (df, used_symbol). ^TWII 5m 回空時改用 0050.TW。"""
+    df = ds.fetch_yf_history("^TWII", period="2d", interval="5m")
+    if df is None or getattr(df, "empty", True):
+        df2 = ds.fetch_yf_history(_TWII_PROXY, period="2d", interval="5m")
+        if df2 is not None and not df2.empty:
+            print(f"[strong_stock_alert] ^TWII 5m 回空 → 改用代理 {_TWII_PROXY}", flush=True)
+            return df2, _TWII_PROXY
+    return df, "^TWII"
+
+
 def check_market_surge() -> Optional[Dict]:
     """偵測大盤是否大漲. 回傳 surge_info 或 None.
 
@@ -52,7 +69,7 @@ def check_market_surge() -> Optional[Dict]:
     # 1. TWII 當日漲幅
     twii_pct = None
     try:
-        twii = ds.fetch_yf_history("^TWII", period="2d", interval="5m")
+        twii, _twii_src = _fetch_twii_5m_resilient()
         if twii is not None and not twii.empty:
             today_bars = twii.tail(50)  # 約近 4 小時的 5m bars
             if len(today_bars) >= 2:

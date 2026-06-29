@@ -169,8 +169,9 @@ REVERSAL_MIN_DIP_FOR_REBOUND_PCT = 0.5
 # 註: 代理只在本尊盤中『回空』時才啟用; 啟用時日線也一併改用代理 (見 crash snapshot),
 #     避免「代理盤中價 ÷ 指數昨收」這種不同價格尺度相除 → 垃圾百分比。
 INTRADAY_PROXY = {
-    "^SOX":  "SOXX",   # 費城半導體 → iShares 半導體 ETF
-    "^IXIC": "ONEQ",   # 那斯達克綜合 → Fidelity Nasdaq Composite ETF
+    "^SOX":  "SOXX",     # 費城半導體 → iShares 半導體 ETF
+    "^IXIC": "ONEQ",     # 那斯達克綜合 → Fidelity Nasdaq Composite ETF
+    "^TWII": "0050.TW",  # 台灣加權 → 元大台灣50 ETF (走勢百分比幾近等同大盤)
 }
 
 
