@@ -228,16 +228,18 @@ def check_watchlist_alerts() -> List[Dict]:
             sid_state["base_price"] = ep if ep else (round(today_open, 2) if today_open else None)
             sid_state["base_source"] = "entry" if ep else "auto"
 
-        # 算兩個錨點的 %
-        today_pct = ((current / today_open - 1) * 100) if (today_open and today_open > 0) else None
-        day_pct = ((current / prev_close - 1) * 100) if (prev_close and prev_close > 0) else None
+        # 算兩個錨點的 % — 用明確名字, 避免與其他推播「today_pct = vs 昨收」的慣例同名反義。
+        #   pct_vs_open  = vs 今日開盤
+        #   pct_vs_prior = vs 昨收 (= 看盤軟體顯示的當日漲跌幅)
+        pct_vs_open = ((current / today_open - 1) * 100) if (today_open and today_open > 0) else None
+        pct_vs_prior = ((current / prev_close - 1) * 100) if (prev_close and prev_close > 0) else None
 
         # 取較極端的當主 (絕對值大者)
         candidates = []
-        if today_pct is not None:
-            candidates.append(("open", "今日開盤", today_open, today_pct))
-        if day_pct is not None:
-            candidates.append(("close", "昨收", prev_close, day_pct))
+        if pct_vs_open is not None:
+            candidates.append(("open", "今日開盤", today_open, pct_vs_open))
+        if pct_vs_prior is not None:
+            candidates.append(("close", "昨收", prev_close, pct_vs_prior))
         if not candidates:
             continue
         candidates.sort(key=lambda x: abs(x[3]), reverse=True)
@@ -270,8 +272,8 @@ def check_watchlist_alerts() -> List[Dict]:
             "current": round(current, 2),
             "today_open": round(today_open, 2) if today_open else None,
             "prev_close": round(prev_close, 2) if prev_close else None,
-            "today_pct": round(today_pct, 2) if today_pct is not None else None,
-            "day_pct": round(day_pct, 2) if day_pct is not None else None,
+            "pct_vs_open": round(pct_vs_open, 2) if pct_vs_open is not None else None,
+            "pct_vs_prior": round(pct_vs_prior, 2) if pct_vs_prior is not None else None,
             "primary_anchor": primary_anchor,       # "open" / "close"
             "primary_anchor_label": anchor_label,   # 顯示用
             "primary_anchor_price": round(anchor_price, 2),

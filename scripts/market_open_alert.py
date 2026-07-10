@@ -1358,14 +1358,14 @@ def main() -> int:
                     print(f"[news event] impact analyzer failed (skip): {_ie}", flush=True)
                     impact_block = ""
 
-                # 用戶要求: HIGH「急報」只送有 AI 分析的版本。若這批含 HIGH 事件卻拿不到
-                # AI 分析 (Gemini 失敗/不可用), 不送這封無 AI 急報, 回滾 claim 讓下個 tick
-                # (Gemini 恢復時) 補送完整版; MED/LOW 一般新聞無 AI 屬正常, 照送不受影響。
-                _has_high = any(a.get("urgency") == "HIGH" for a in news_event_alerts)
+                # 用戶要求: 急報(HIGH) + 注意(MED) 都只送「有 AI 分析」的版本。若這批含 HIGH/MED
+                # 事件卻拿不到 AI 分析 (Gemini 失敗/不可用), 不送這封無 AI 版, 回滾 claim 讓下個 tick
+                # (Gemini 恢復時) 補送完整版; 純 LOW 一般快訊無 AI 屬正常, 照送不受影響。
+                _need_ai = any(a.get("urgency") in ("HIGH", "MED") for a in news_event_alerts)
                 ne_msg = notifier.fmt_news_event_alerts(news_event_alerts,
                                                           impact_analysis=impact_block)
-                if _has_high and not impact_block:
-                    print("[news event] HIGH 急報缺 AI 分析 → 跳過送出 + 回滾 claim, 等下個 tick 補 AI 版",
+                if _need_ai and not impact_block:
+                    print("[news event] 急報/注意 缺 AI 分析 → 跳過送出 + 回滾 claim, 等下個 tick 補 AI 版",
                           flush=True)
                     if _ne_claimed:
                         try:

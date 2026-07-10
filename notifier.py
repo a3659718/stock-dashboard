@@ -941,8 +941,9 @@ def fmt_monitor_alerts(watchlist_alerts: list, index_alerts: list, crypto_alerts
                 primary_pct = float(a.get("primary_pct", 0) or 0)
             except (TypeError, ValueError):
                 primary_pct = 0.0
-            today_pct = a.get("today_pct")
-            day_pct = a.get("day_pct")
+            # 明確欄位名 (watchlist_alerts 已改): pct_vs_open = vs 開盤, pct_vs_prior = vs 昨收
+            pct_vs_open = a.get("pct_vs_open")
+            pct_vs_prior = a.get("pct_vs_prior")
 
             sign = "+" if primary_pct > 0 else ""
             # 主行 (取較極端那個錨點)
@@ -952,12 +953,12 @@ def fmt_monitor_alerts(watchlist_alerts: list, index_alerts: list, crypto_alerts
             )
             # 次行 — 顯示另一個錨點對照 (如果兩個都有)
             other_parts = []
-            if today_pct is not None and a.get("primary_anchor") != "open":
-                s2 = "+" if today_pct > 0 else ""
-                other_parts.append(f"開盤 {s2}{today_pct:.2f}%")
-            if day_pct is not None and a.get("primary_anchor") != "close":
-                s2 = "+" if day_pct > 0 else ""
-                other_parts.append(f"昨收 {s2}{day_pct:.2f}%")
+            if pct_vs_open is not None and a.get("primary_anchor") != "open":
+                s2 = "+" if pct_vs_open > 0 else ""
+                other_parts.append(f"開盤 {s2}{pct_vs_open:.2f}%")
+            if pct_vs_prior is not None and a.get("primary_anchor") != "close":
+                s2 = "+" if pct_vs_prior > 0 else ""
+                other_parts.append(f"昨收 {s2}{pct_vs_prior:.2f}%")
             if other_parts:
                 lines.append(f"  ({' · '.join(other_parts)})")
         lines.append("")
@@ -1741,7 +1742,7 @@ def fmt_combined_intraday_alerts(
         current = anchors.get("current")
         prior_close = anchors.get("prior_close")
 
-        # === Symbol 主行: 加 ▼▲ 點數 + % vs 開盤 ===
+        # === Symbol 主行: 加 ▼▲ 點數 + % vs 開盤 + 當日% vs 昨收 ===
         cur_str = f"{current:,.2f}" if current is not None else "—"
         header_extra = ""
         if today_open is not None and current is not None and today_open > 0:
@@ -1750,7 +1751,14 @@ def fmt_combined_intraday_alerts(
             arrow_h = "▲" if diff_open > 0 else ("▼" if diff_open < 0 else "—")
             sign_p = "+" if pct_open > 0 else ""
             header_extra = f"  {arrow_h}{abs(diff_open):,.0f} 點 ({sign_p}{pct_open:.2f}% vs 開)"
-        lines.append(f"{country_tag}<b>{name_esc}</b> <code>{sym_esc}</code> {cur_str}{header_extra}")
+        # 加「當日 vs 昨收」= 看盤軟體顯示的當日漲跌幅, 讓百分比對得上實際盤面
+        # (反轉-only 訊息原本只有 vs 開盤 / 從高低點, 沒有 vs 昨收 → 數字對不上會覺得怪)
+        day_extra = ""
+        if prior_close is not None and current is not None and prior_close > 0:
+            pct_pc = (current / prior_close - 1) * 100
+            sign_d = "+" if pct_pc > 0 else ""
+            day_extra = f"  · 當日 {sign_d}{pct_pc:.2f}% (vs 昨收)"
+        lines.append(f"{country_tag}<b>{name_esc}</b> <code>{sym_esc}</code> {cur_str}{header_extra}{day_extra}")
 
         # === 今日 K 線走勢 line (4 個 key 價位, 視覺一目了然) ===
         if today_open is not None and current is not None:
@@ -2129,7 +2137,7 @@ def fmt_intraday_reversal_alerts(alerts: list) -> str:
                     f"{float(c.get('today_pct',0) or 0):+.2f}%"
                     for c in comp[:3]
                 )
-                lines.append(f"  同步弱: {wk_line}")
+                lines.append(f"  同步弱 (當日%): {wk_line}")
                 # 顯示「該減碼」(entry_label=AVOID 或 SELL) 的優先
                 avoid_list = [c for c in comp if c.get("entry_label") in ("AVOID", "SELL")][:3]
                 if avoid_list:
@@ -2175,7 +2183,7 @@ def fmt_intraday_reversal_alerts(alerts: list) -> str:
                     f"{float(cs.get('today_pct',0) or 0):+.2f}%"
                     for cs in companion[:3]
                 )
-                lines.append(f"  同步弱: {wk_line}")
+                lines.append(f"  同步弱 (當日%): {wk_line}")
             lines.append("")
 
     # #1 新增: recover (從跌轉漲) + #2 同步轉強權值 + #3 強勢族群
@@ -2226,7 +2234,7 @@ def fmt_intraday_reversal_alerts(alerts: list) -> str:
                         warn = "🟡"
                     return f"{sid} {emoji}{pct:+.2f}%{warn}"
                 st_line = " · ".join(_stock_render(cs) for cs in up_stocks[:3])
-                lines.append(f"  同步強: {st_line}")
+                lines.append(f"  同步強 (當日%): {st_line}")
                 # B: 明確「現在能買」區塊
                 # 主路徑: entry_label="BUY"; fallback (Gemini fail 時): entry_score >= 70
                 def _is_buy(cs):

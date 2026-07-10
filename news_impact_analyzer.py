@@ -62,17 +62,18 @@ def analyze_news_impact(alerts: List[Dict]) -> str:
     """
     if not alerts:
         return ""
+    # 用戶要求: AI 分析從「只有 HIGH 急報」擴到「HIGH 急報 + MED 注意」。
+    # 優先序 HIGH > MED; LOW(一般快訊)不進 AI。合併取前 3 則控 Gemini quota + 訊息長度。
     high_alerts = [a for a in alerts if a.get("urgency") == "HIGH"]
-    if not high_alerts:
+    med_alerts = [a for a in alerts if a.get("urgency") == "MED"]
+    focus_alerts = (high_alerts + med_alerts)[:3]
+    if not focus_alerts:
         return ""
     if not ai_analyzer.gemini_available():
         return ""
 
-    # 限制最多 3 則 (減量: 聚焦最重大幾則, 訊息才放得完整不截斷 + 省 quota)
-    high_alerts = high_alerts[:3]
-
     try:
-        prompt = _build_impact_prompt(high_alerts)
+        prompt = _build_impact_prompt(focus_alerts)
         from ai_analyzer import _get_model
         model = _get_model()
         if model is None:

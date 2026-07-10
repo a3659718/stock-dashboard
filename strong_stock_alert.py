@@ -81,16 +81,21 @@ def check_market_surge() -> Optional[Dict]:
                 twii["_d"] = twii["_dt"].dt.date
                 today = twii["_d"].max()
                 today_bars = twii[twii["_d"] == today].sort_values("_dt")
+                prev_bars = twii[twii["_d"] < today]
                 if not today_bars.empty:
                     today_open = float(today_bars["Open"].iloc[0])
                     current = float(today_bars["Close"].iloc[-1])
-                    if today_open > 0:
-                        twii_pct = (current / today_open - 1) * 100
+                    # 修正: 「當日漲幅」應為 vs 昨收 (跟個股 today_pct + 看盤軟體一致),
+                    #       原本用 vs 今日開盤, 跳空日會顯著偏低 → 顯示的百分比看起來怪。
+                    #       昨收 = 前一交易日最後一根 5m close; 無前日資料才退回用開盤。
+                    prev_close = float(prev_bars["Close"].iloc[-1]) if not prev_bars.empty else today_open
+                    if prev_close > 0:
+                        twii_pct = (current / prev_close - 1) * 100
     except Exception:
         pass
 
     if twii_pct is not None and twii_pct >= 1.5:
-        triggers.append(f"加權指數 +{twii_pct:.2f}% (>+1.5%)")
+        triggers.append(f"加權指數 +{twii_pct:.2f}% (當日 vs 昨收, >+1.5%)")
 
     # 2. 費半隔夜
     sox_pct = None
