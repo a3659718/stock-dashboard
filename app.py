@@ -563,11 +563,16 @@ with tab_overview:
 
     st.caption("※ 本頁每次打開即時計算, 跑 5 支自選股約需 15-30 秒")
 
-# Sub-tabs: 個股 outer 內含 2 個 (入場評估 / 深度分析)
+# 不再切子分頁: 用 container 讓「個股入場評估」(已整合 AI + 目標價 + 進出場) 置頂當主內容,
+# 「個股深度分析」(技術/籌碼/K線圖/完整 Gemini) 排在同一頁下方。
+# 註: 深度分析內部有多個 st.expander, 故不能包在 expander 內 (Streamlit 禁止巢狀); 改用 container。
 with _tab_stock_outer:
-    _inner_s = st.tabs(["⚡ 入場評估 (快, 30s)", "📊 深度分析 (Gemini 完整, 10-20s)"])
-    tab_entry = _inner_s[0]
-    tab_stock = _inner_s[1]
+    _entry_container = st.container()
+    st.divider()
+    st.caption("⬇️ 進階: 個股深度分析 (技術 + 籌碼 + 6 個月 K 線 + 完整 Gemini 解讀)")
+    _deep_container = st.container()
+tab_entry = _entry_container
+tab_stock = _deep_container
 
 # Sub-tabs: 策略驗證 outer 內含 2 個 (回測 / 追蹤)
 with _tab_bt_outer:
@@ -3528,6 +3533,70 @@ with tab_entry:
             cT1.metric("距 MA20", _sf(snap.get("ma20_dist_pct")))
             cT2.metric("距 52w 高", _sf(snap.get("from_52w_high_pct")))
             cT3.metric("距 52w 低", _sf(snap.get("from_52w_low_pct")))
+
+            # === 🎯 目標價 / 進出場參考 (由 snap 技術位反推, 透明可檢查) ===
+            cur_px = snap.get("current")
+
+            def _lvl_from_dist(dist_pct):
+                # dist_pct = (current/level - 1)*100 → level = current / (1 + dist/100)
+                try:
+                    if cur_px is None or dist_pct is None:
+                        return None
+                    return float(cur_px) / (1 + float(dist_pct) / 100.0)
+                except (TypeError, ValueError, ZeroDivisionError):
+                    return None
+
+            ma20 = _lvl_from_dist(snap.get("ma20_dist_pct"))
+            high52 = _lvl_from_dist(snap.get("from_52w_high_pct"))
+            low52 = _lvl_from_dist(snap.get("from_52w_low_pct"))
+            # 停損: 跌破 MA20 3% (無 MA20 → 現價 -7%)
+            stop_px = None
+            if ma20:
+                stop_px = round(ma20 * 0.97, 2)
+            elif cur_px:
+                try:
+                    stop_px = round(float(cur_px) * 0.93, 2)
+                except (TypeError, ValueError):
+                    stop_px = None
+            # 短期目標: R:R 2:1 (現價 vs 停損風險)
+            tgt1 = None
+            try:
+                if cur_px and stop_px:
+                    risk = float(cur_px) - stop_px
+                    if risk > 0:
+                        tgt1 = round(float(cur_px) + 2 * risk, 2)
+            except (TypeError, ValueError):
+                pass
+
+            st.markdown("#### 🎯 目標價 / 進出場參考")
+            # 進場區間: 向上趨勢拉回 MA20 ~ 現價; 否則現價附近
+            try:
+                if ma20 and cur_px and ma20 < float(cur_px):
+                    entry_zone = f"{ma20:,.2f} ~ {float(cur_px):,.2f} (拉回買)"
+                elif cur_px:
+                    entry_zone = f"{float(cur_px):,.2f} 附近"
+                else:
+                    entry_zone = "—"
+            except (TypeError, ValueError):
+                entry_zone = "—"
+            cL1, cL2, cL3 = st.columns(3)
+            cL1.metric("建議進場區間", entry_zone)
+            cL2.metric("停損參考", f"{stop_px:,.2f}" if stop_px else "—")
+            cL3.metric("短期目標 (R:R 2:1)", f"{tgt1:,.2f}" if tgt1 else "—")
+            cR1, cR2, cR3 = st.columns(3)
+            cR1.metric("支撐 (MA20)", f"{ma20:,.2f}" if ma20 else "—")
+            cR2.metric("阻力 (52w 高)", f"{high52:,.2f}" if high52 else "—")
+            cR3.metric("中期目標 / 52w 低", f"{high52:,.2f}" if high52 else (f"{low52:,.2f}" if low52 else "—"))
+            st.caption("※ 技術面參考位 (由均線/區間反推), 非保證目標; 實際進出以下方 AI 分析 + 個人風控為準.")
+
+            # === 🤖 AI 分析 (整合進場評估, 不再另開分頁) ===
+            st.divider()
+            st.markdown("#### 🤖 AI 分析 (Gemini) — 含進場時機 / 目標價 / 出場時機")
+            ai_txt = result.get("ai_summary")
+            if ai_txt:
+                st.markdown(ai_txt)
+            else:
+                st.caption("（AI 分析未產生 — 可能 Gemini 未設定 (GEMINI_API_KEY) 或本次呼叫失敗）")
 
 
 # ===== 🩺 系統健康 =====
