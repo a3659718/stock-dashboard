@@ -563,13 +563,13 @@ with tab_overview:
 
     st.caption("※ 本頁每次打開即時計算, 跑 5 支自選股約需 15-30 秒")
 
-# 整合: 個股「入場評估」+「深度分析」合成一個功能 — 頁面頂端一個輸入 + 一個按鈕一次跑完:
-#   置頂 (_entry_container): 入場結論 BUY/WAIT/AVOID + 目標價/進出場時機 + AI
-#   下方 (_deep_container):  技術 / 籌碼 / 6 個月 K 線 / 完整 Gemini 深度分析
-# 註: 深度分析內部有多個 st.expander → 用 container 排版 (不能用 expander, Streamlit 禁巢狀)。
+# 整合: 個股「入場評估」+「深度分析」合成一個功能 — 頁面頂端一個輸入 + 一個按鈕一次跑完。
+# 用最標準寫法: 兩個區塊都直接寫進同一個外層 tab (with tab_entry / with tab_stock 均 = 此 tab),
+# 順序為「入場評估摘要 → 技術/籌碼/K線深度分析」由程式碼位置決定 (入場區塊在深度區塊之後,
+# 但深度區塊按鈕未按前僅顯示標題, 兩者共用頂端輸入)。避免跨 tab container 的相容性風險。
 with _tab_stock_outer:
     st.subheader("🔍 個股分析 + 入場評估 (台股 / 美股)")
-    st.caption("輸入代號一鍵跑: 入場結論 + 目標價/進出場時機 + AI, 再加技術/籌碼/K線深度分析")
+    st.caption("輸入代號後按「完整分析」: 入場結論 + 目標價/進出場時機 + AI, 再加技術/籌碼/K線深度分析")
     _uc1, _uc2, _uc3 = st.columns([3, 1, 1])
     with _uc1:
         sid_input = st.text_input(
@@ -580,19 +580,15 @@ with _tab_stock_outer:
         include_ai = st.checkbox(
             "☑ 含 AI 觀點", value=ai_analyzer.gemini_available(),
             disabled=not ai_analyzer.gemini_available(),
-            help=("需先設 GEMINI_API_KEY 並重啟" if not ai_analyzer.gemini_available()
-                  else "多燒 1 次 Gemini quota, 跑時間 +5-15s"),
             key="unified_include_ai",
         )
     with _uc3:
         analyze_btn = st.button("🚀 完整分析", use_container_width=True, type="primary",
                                 key="unified_analyze_btn")
     ai_btn = False  # 舊獨立 AI 按鈕已移除 (deep 區塊仍讀此變數)
-    _entry_container = st.container()   # 置頂: 入場評估摘要
-    st.divider()
-    _deep_container = st.container()    # 下方: 深度技術/籌碼/K線分析
-tab_entry = _entry_container
-tab_stock = _deep_container
+# 兩個區塊都寫進外層 tab (標準且安全; 不用 container 以免跨 tab 相容性問題)
+tab_entry = _tab_stock_outer
+tab_stock = _tab_stock_outer
 
 # Sub-tabs: 策略驗證 outer 內含 2 個 (回測 / 追蹤)
 with _tab_bt_outer:
