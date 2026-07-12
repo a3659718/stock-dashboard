@@ -730,7 +730,7 @@ def _fmt_external_signals_block() -> list:
     oil = news_sources.fetch_oil_signal()
     if oil:
         out.append("")
-        out.append(f"<b>WTI 油價: ${_esc(oil.get('price'))} ({_safe_pct(oil.get('pct_5d'), '+.1f', suffix='% 5d')})</b>")
+        out.append(f"<b>WTI 油價: ${_fmt_num(oil.get('price'))} ({_safe_pct(oil.get('pct_5d'), '+.1f', suffix='% 5d')})</b>")
         if oil.get("signal"):
             out.append(f"   {_esc(oil.get('signal'))}")
     macro = news_sources.fetch_macro_indicators()
@@ -948,8 +948,8 @@ def fmt_monitor_alerts(watchlist_alerts: list, index_alerts: list, crypto_alerts
             sign = "+" if primary_pct > 0 else ""
             # 主行 (取較極端那個錨點)
             lines.append(
-                f"<b><code>{_esc(sid)}</code></b> {_esc(name)} {_esc(cur)} <b>{_esc(d)}{thr}%</b> "
-                f"{sign}{primary_pct:.2f}% vs {_esc(anchor_label)} {_esc(anchor_price)}"
+                f"<b><code>{_esc(sid)}</code></b> {_esc(name)} {_fmt_num(cur)} <b>{_esc(d)}{thr}%</b> "
+                f"{sign}{primary_pct:.2f}% vs {_esc(anchor_label)} {_fmt_num(anchor_price)}"
             )
             # 次行 — 顯示另一個錨點對照 (如果兩個都有)
             other_parts = []
@@ -1137,7 +1137,7 @@ def fmt_holiday_news(data: dict) -> str:
     # 油價
     if oil:
         lines.append("")
-        lines.append(f"🛢 WTI 油價: ${_esc(oil.get('price'))} ({_safe_pct(oil.get('pct_5d'), '+.1f', suffix='% 5d')})")
+        lines.append(f"🛢 WTI 油價: ${_fmt_num(oil.get('price'))} ({_safe_pct(oil.get('pct_5d'), '+.1f', suffix='% 5d')})")
         if oil.get("signal"):
             lines.append(f"   {_esc(oil.get('signal'))}")
 
@@ -1269,14 +1269,14 @@ def _fmt_potential_picks_block(picks: list, hide_low_rr: bool = True,
         nm = _esc(p.get("name", ""))
         theme = _esc(p.get("theme", ""))
         cur_raw = p.get("current", 0)
-        cur = _esc(cur_raw)
+        cur = _fmt_num(cur_raw)          # 價格一律 2 位小數
         el_raw = p.get("entry_low", 0)
         eh_raw = p.get("entry_high", 0)
-        e_low = _esc(el_raw)
-        e_high = _esc(eh_raw)
-        target = _esc(p.get("target_price", 0))
+        e_low = _fmt_num(el_raw)
+        e_high = _fmt_num(eh_raw)
+        target = _fmt_num(p.get("target_price", 0))
         target_pct = _safe_int_or_dash(p.get("target_pct", 0))
-        stop = _esc(p.get("stop_loss", 0))
+        stop = _fmt_num(p.get("stop_loss", 0))
         stop_pct = _safe_int_or_dash(p.get("stop_pct", 0))
         win_prob = _esc(p.get("win_prob", ""))
         hold = _esc(p.get("hold_period", ""))

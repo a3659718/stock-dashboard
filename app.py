@@ -135,6 +135,16 @@ def _show_table(df, market: str = "TW", pct_cols: list = None, **kwargs):
     st.dataframe(styled, **kwargs)
 
 
+def _px(v) -> str:
+    """價格顯示統一取小數點後兩位 (None / 非數字回 —)."""
+    try:
+        if v is None or v == "":
+            return "—"
+        return f"{float(v):.2f}"
+    except (TypeError, ValueError):
+        return "—"
+
+
 def _send_tg(msg: str, label: str = "推播",
               stock_id: Optional[str] = None, market: str = "TW") -> bool:
     """統一的 TG 推送 + 顯示成功/失敗 toast.
@@ -753,7 +763,7 @@ with tab_actionable:
                             st.caption("🎯 " + " / ".join(tlines))
                     with cH2:
                         if p.get("current") is not None:
-                            st.metric("現價", f"{p['current']}")
+                            st.metric("現價", _px(p['current']))
                     cBody1, cBody2 = st.columns(2)
                     with cBody1:
                         if p.get("entry_low") and p.get("entry_high"):
@@ -3003,15 +3013,15 @@ with tab_us:
                         except (TypeError, ValueError):
                             today_pct = 0
                         st.metric("現價",
-                                   f"${p['current']}",
+                                   f"${_px(p['current'])}",
                                    f"{today_pct:+.2f}%")
                 cB1, cB2 = st.columns(2)
                 with cB1:
                     if p.get("entry_low") and p.get("entry_high"):
-                        st.write(f"**進場區間**: ${p['entry_low']} ~ ${p['entry_high']}")
+                        st.write(f"**進場區間**: ${_px(p['entry_low'])} ~ ${_px(p['entry_high'])}")
                     if p.get("stop"):
                         rr = p.get("rr", "—")
-                        st.write(f"**停損**: ${p['stop']} · **R:R**: {rr}")
+                        st.write(f"**停損**: ${_px(p['stop'])} · **R:R**: {rr}")
                     # 3 層目標
                     cur_v = p.get("current") or 0
                     t_s = p.get("target_short")
@@ -3023,9 +3033,9 @@ with tab_us:
                                 return f"+{(t/cur_v-1)*100:.1f}%"
                             return ""
                         tlines = []
-                        if t_s: tlines.append(f"短 ${t_s} ({_gain(t_s)})")
-                        if t_m: tlines.append(f"中 ${t_m} ({_gain(t_m)})")
-                        if t_l: tlines.append(f"長 ${t_l} ({_gain(t_l)})")
+                        if t_s: tlines.append(f"短 ${_px(t_s)} ({_gain(t_s)})")
+                        if t_m: tlines.append(f"中 ${_px(t_m)} ({_gain(t_m)})")
+                        if t_l: tlines.append(f"長 ${_px(t_l)} ({_gain(t_l)})")
                         st.write("🎯 " + " / ".join(tlines))
                     if p.get("win_prob"):
                         st.write(f"**上漲機率**: {p['win_prob']} · 持有 {p.get('hold_period','—')}")
@@ -3499,7 +3509,7 @@ with tab_entry:
 
             st.markdown("#### 📊 個股現況")
             cS1, cS2, cS3, cS4 = st.columns(4)
-            cS1.metric("現價", snap.get("current") if snap.get("current") is not None else "—",
+            cS1.metric("現價", _px(snap.get("current")),
                         _sf(snap.get("today_pct")))
             cS2.metric("量比", snap.get("vol_ratio") if snap.get("vol_ratio") is not None else "—")
             cS3.metric("RSI(14)", snap.get("rsi14") if snap.get("rsi14") is not None else "—")
