@@ -484,8 +484,7 @@ try:
         _miss.append("FinMind (台股資料)")
     if not _dss._secret("GEMINI_API_KEY"):
         _miss.append("Gemini (AI 分析)")
-    if not _dss.get_finnhub_token():
-        _miss.append("Finnhub (美股新聞/籌碼)")
+    # 註: Finnhub 只用於推播端 (8-K 新聞 / 內部人 / IPO), 網頁用不到 → 不在網頁警告 (避免噪音)
     if _miss:
         st.warning(
             "⚠️ 未偵測到金鑰:" + "、".join(_miss)
