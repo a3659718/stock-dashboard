@@ -176,6 +176,94 @@ def check_bare_statements() -> list:
 
 
 # ---------------------------------------------------------------------------
+# [7] 跨模組屬性呼叫符號檢查 — 抓 `alias.attr()` 打錯名字
+# ---------------------------------------------------------------------------
+def _module_has_star_import(path: str) -> bool:
+    try:
+        tree = ast.parse(open(path, encoding="utf-8").read(), filename=path)
+    except Exception:
+        return True  # 解析失敗 → 保守跳過 (視為未知命名空間)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            for a in node.names:
+                if a.name == "*":
+                    return True
+    return False
+
+
+def check_cross_module_attr_calls() -> list:
+    """抓「alias.attr」呼叫本地模組、但該 attr 根本不存在的情況。
+    [1] 只驗 `from mod import name`, 抓不到 `_ai._fetch_recommendation_trends()` 這種
+    (實際叫 _fetch_analyst_recommendations) 屬性呼叫打錯名 → 執行到才 AttributeError。
+
+    為避免誤報, 對以下情況保守跳過: 模組有 __getattr__ / 有 `from x import *` /
+    dunder 屬性 / 非單純 Name.attr (如 pkg.sub.attr)。"""
+    py_files = (glob.glob(os.path.join(ROOT, "*.py")) +
+                glob.glob(os.path.join(ROOT, "scripts", "*.py")))
+    local_mods = {}
+    for f in py_files:
+        base = os.path.splitext(os.path.basename(f))[0]
+        local_mods.setdefault(base, f)
+
+    cache: dict = {}
+
+    def defined(mod: str):
+        if mod not in cache:
+            path = local_mods.get(mod)
+            if not path or _module_has_star_import(path):
+                cache[mod] = None  # 未知命名空間 → 不檢查
+            else:
+                cache[mod] = _module_defined_names(path)
+        return cache[mod]
+
+    problems = []
+    for f in py_files:
+        try:
+            tree = ast.parse(open(f, encoding="utf-8").read(), filename=f)
+        except Exception:
+            continue
+        # 收集 alias → 所有被 import 成的模組 base + 被 `=` 重新賦值的名稱 (降誤報)
+        alias_mods: dict = {}
+        assigned: set = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for a in node.names:
+                    al = a.asname or a.name.split(".")[0]
+                    alias_mods.setdefault(al, set()).add(a.name.split(".")[-1])
+            elif isinstance(node, ast.Assign):
+                for t in node.targets:
+                    if isinstance(t, ast.Name):
+                        assigned.add(t.id)
+            elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+                assigned.add(node.target.id)
+        # 只查: alias 唯一對到「一個本地模組」且未被 `=` 重新綁定 (避開 ds=dict / 同名不同模組)
+        alias2mod = {}
+        for al, mods in alias_mods.items():
+            if al in assigned or len(mods) != 1:
+                continue
+            m = next(iter(mods))
+            if m in local_mods:
+                alias2mod[al] = m
+        if not alias2mod:
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Attribute) or not isinstance(node.value, ast.Name):
+                continue
+            mod = alias2mod.get(node.value.id)
+            if not mod:
+                continue
+            target = defined(mod)
+            if target is None or "__getattr__" in target:
+                continue
+            if node.attr.startswith("__"):
+                continue
+            if node.attr not in target:
+                problems.append((os.path.relpath(f, ROOT), node.lineno,
+                                 f"{node.value.id}.{node.attr}  ← 模組 {mod} 沒有定義 {node.attr}"))
+    return problems
+
+
+# ---------------------------------------------------------------------------
 # [2] 模組匯入
 # ---------------------------------------------------------------------------
 def check_imports() -> list:
@@ -261,6 +349,7 @@ def main() -> int:
     report("[4] 排程 handler 覆蓋", check_schedule_coverage())
     report("[5] 重複貼上手誤 (append/if 區塊)", check_dup_paste())
     report("[6] 裸名稱/死碼語句 (NameError 地雷)", check_bare_statements())
+    report("[7] 跨模組屬性呼叫符號檢查", check_cross_module_attr_calls())
 
     if not static_only:
         report("[2] 模組匯入", check_imports())

@@ -476,6 +476,26 @@ watchlist = parse_watchlist(watchlist_raw)
 # ---------------------------------------------------------------------------
 # Tabs
 # ---------------------------------------------------------------------------
+# 資料源連線狀態提示 (#5 空狀態改善): 缺金鑰時明確告知, 讓使用者知道台股/AI 為何可能空白
+try:
+    import data_sources as _dss
+    _miss = []
+    if not _dss.get_finmind_token():
+        _miss.append("FinMind (台股資料)")
+    if not _dss._secret("GEMINI_API_KEY"):
+        _miss.append("Gemini (AI 分析)")
+    if not _dss.get_finnhub_token():
+        _miss.append("Finnhub (美股新聞/籌碼)")
+    if _miss:
+        st.warning(
+            "⚠️ 未偵測到金鑰:" + "、".join(_miss)
+            + " — 相關頁面可能空白或無 AI 分析。請到 App → Settings → Secrets 補上。"
+            + "(若台股資料持續空白但 token 已設, 多半是 FinMind token 失效, "
+            + "請到 finmindtrade.com 重新產生後更新 secret)"
+        )
+except Exception:
+    pass
+
 # 外層 12 個 tab — 新增「今日總覽」放最前面 (Tab 0)
 (tab_overview, tab_wl, tab_actionable, tab_hold, tab_tw, tab_pulse, tab_growth,
  _tab_stock_outer, tab_us, tab_mood, _tab_bt_outer, tab_health) = st.tabs(
@@ -1306,6 +1326,7 @@ cron 每 30 分執行一次 (24x7)。
 # =============================================================================
 with tab_hold:
     st.subheader("持倉分析 (台股, 上限 15 檔)")
+    st.caption("📌 本頁重點:檢視持倉整體健康度、個股風險與停損位;先在下方輸入持倉。")
     st.caption(
         "管理已持有的台股. 盤後 15:00 cron 會對每檔做完整分析: "
         "技術 + 籌碼 + 新聞 + Gemini 給「持有/加碼/減碼/出清」建議, "
@@ -1534,6 +1555,7 @@ with tab_hold:
 # =============================================================================
 with tab_tw:
     st.subheader("台股盤後條件篩選")
+    st.caption("📌 本頁重點:用自訂條件(投信買超 / 量比 / 投本比 / 融資)篩出台股標的;左側調參數,結果可一鍵推 TG。")
     st.caption("勾選要使用的條件，按重新整理開始掃描。每個條件背後會抓對應的資料集。")
 
     # 台股市場情緒 banner
@@ -1766,6 +1788,7 @@ with tab_tw:
 # =============================================================================
 with tab_pulse:
     st.subheader("台股強勢族群 / 熱門題材")
+    st.caption("📌 本頁重點:看哪些族群 / 題材有資金流入 + 各族群龍頭股;按下方按鈕跑分析。")
     st.caption(
         "兩種視角：① 證交所產業分類；② 熱門題材股池 (無人機 / AI 伺服器 / 低軌衛星 / 重電 / 散熱…)。"
         "盤中即時資料來自 yfinance。"
@@ -2295,6 +2318,7 @@ with tab_pulse:
 # =============================================================================
 with tab_growth:
     st.subheader("🌱 消息面 + 成長動能 Top 10 台股")
+    st.caption("📌 本頁重點:消息面 + 成長動能雙訊號選出的台股 Top 10,適合找剛啟動的成長股。")
     st.caption(
         "從熱門題材股池 (約 100+ 檔) 評估每檔的 K 線健康度：站上月線 / 起漲位 / KD 黃交 / MACD 翻紅 / 量能配合 …"
         "排除已大漲(5d>20%) 與跌破月線者。"
@@ -3131,6 +3155,7 @@ with tab_us:
 # =============================================================================
 with tab_mood:
     st.subheader("Fear & Greed + 板塊輪動 + 市場新聞題材")
+    st.caption("📌 本頁重點:用恐慌貪婪指數 + 板塊輪動 + 新聞題材,快速判斷當下大盤氛圍偏多還偏空。")
 
     # === 🌀 板塊輪動矩陣 (4 象限) ===
     with st.expander("🌀 板塊輪動矩陣 (本週 vs 上週)", expanded=False):

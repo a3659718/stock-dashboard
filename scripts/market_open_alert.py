@@ -1254,13 +1254,20 @@ def main() -> int:
         except Exception as _e:
             print(f"[strong stock alert] check failed (non-fatal): {_e}", flush=True)
 
-        # === 新增: 常態 intraday 強勢個股推播 (帶 timeout 防卡死) ===
-        def _strong_check():
-            import strong_stock_alert as _ssa2
-            return _ssa2.check_and_push_intraday_strong()
-        ssa2_result = _run_with_timeout(_strong_check, "intraday_strong", timeout_sec=60)
-        if ssa2_result:
-            print(f"[intraday strong] {ssa2_result}", flush=True)
+        # === 常態 intraday 強勢個股推播 (帶 timeout 防卡死) ===
+        # 合併重疊: 「大盤大漲警報」本身已含『當下強勢股』。若本 tick 已推大盤大漲,
+        #           就跳過常態強勢股, 避免同一批強勢股在兩封訊息重複出現;
+        #           大盤平淡 (surge 未觸發) 時才推常態強勢股。
+        if ssa_result:
+            print("[intraday strong] 本 tick 已推大盤大漲(含當下強勢股) → 跳過常態強勢股避免重複",
+                  flush=True)
+        else:
+            def _strong_check():
+                import strong_stock_alert as _ssa2
+                return _ssa2.check_and_push_intraday_strong()
+            ssa2_result = _run_with_timeout(_strong_check, "intraday_strong", timeout_sec=60)
+            if ssa2_result:
+                print(f"[intraday strong] {ssa2_result}", flush=True)
 
         # === 新增: 常態 intraday 弱勢個股推播 (短空候選, 多空雙向; 帶 timeout) ===
         def _weak_check():
@@ -1411,6 +1418,17 @@ def main() -> int:
         try:
             import volume_breakout_alert as _vb
             vb_alerts = _vb.check_volume_breakout() or []
+            # 跨類去重: 濾掉本 tick 已被強勢股/大盤大漲等看多推播推過的同一檔 (共用去重命名空間)
+            if vb_alerts:
+                try:
+                    import alert_priority as _apx
+                    _n0 = len(vb_alerts)
+                    vb_alerts = _apx.filter_dedup_picks(vb_alerts, "intraday_strong_stock", "up")
+                    if _n0 != len(vb_alerts):
+                        print(f"[vol_breakout] 跨類去重濾掉 {_n0 - len(vb_alerts)} 檔 (已被看多推播推過)",
+                              flush=True)
+                except Exception:
+                    pass
             if vb_alerts:
                 print(f"[vol_breakout] triggered {len(vb_alerts)}: "
                       + ", ".join(a.get("symbol", "") for a in vb_alerts),
@@ -1425,6 +1443,11 @@ def main() -> int:
                     )
                     if ok_vb:
                         print(f"[vol_breakout] sent ok", flush=True)
+                        try:
+                            import alert_priority as _apx2
+                            _apx2.mark_picks_pushed(vb_alerts, "intraday_strong_stock", "up")
+                        except Exception:
+                            pass
                     else:
                         print(f"[vol_breakout] send fail: {info_vb}", flush=True)
         except Exception as _e:
@@ -1437,6 +1460,17 @@ def main() -> int:
         try:
             import chip_anomaly_alert as _ca
             ca_alerts = _ca.check_chip_anomaly() or []
+            # 跨類去重: 濾掉本 tick 已被強勢股/量爆突破等看多推播推過的同一檔
+            if ca_alerts:
+                try:
+                    import alert_priority as _apc
+                    _nc0 = len(ca_alerts)
+                    ca_alerts = _apc.filter_dedup_picks(ca_alerts, "intraday_strong_stock", "up")
+                    if _nc0 != len(ca_alerts):
+                        print(f"[chip_anomaly] 跨類去重濾掉 {_nc0 - len(ca_alerts)} 檔 (已被看多推播推過)",
+                              flush=True)
+                except Exception:
+                    pass
             if ca_alerts:
                 print(f"[chip_anomaly] triggered {len(ca_alerts)}", flush=True)
                 _ca.mark_alerts_sent(ca_alerts)  # claim 在送出前 → 防併發重複
@@ -1449,6 +1483,11 @@ def main() -> int:
                     )
                     if ok_ca:
                         print("[chip_anomaly] sent ok", flush=True)
+                        try:
+                            import alert_priority as _apc2
+                            _apc2.mark_picks_pushed(ca_alerts, "intraday_strong_stock", "up")
+                        except Exception:
+                            pass
                     else:
                         print(f"[chip_anomaly] send fail: {info_ca}", flush=True)
         except Exception as _e:

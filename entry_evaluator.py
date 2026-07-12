@@ -19,6 +19,8 @@ from __future__ import annotations
 import math
 from typing import Dict, List, Optional
 
+import streamlit as st  # 用於 @st.cache_data (Actions bare mode 也可運作, 同 data_sources 慣例)
+
 import data_sources as ds
 
 
@@ -710,8 +712,10 @@ def _enrich_chip_signal(snap: Dict, symbol: str, market: str) -> Dict:
     return snap
 
 
+@st.cache_data(ttl=180, show_spinner=False)
 def quick_evaluate(symbol, market="TW"):
-    """輕量版 (無 AI). 回 {entry_label, entry_emoji, entry_score, entry_action}."""
+    """輕量版 (無 AI). 回 {entry_label, entry_emoji, entry_score, entry_action}.
+    加 3 分鐘快取: 總覽頁對 5 檔自選股各跑一次, 快取後重開頁不再每次重算 (省 15-30s)。"""
     try:
         m = detect_market(symbol)
         snap = _stock_snapshot(symbol, m)

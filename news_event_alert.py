@@ -67,7 +67,7 @@ KEYWORDS_ZH = [
 
 # 全域 throttle
 NEWS_COOLDOWN_MIN = 30
-NEWS_MAX_PER_BATCH = 5  # 一次推播最多 N 則新聞 (避免暴量)
+NEWS_MAX_PER_BATCH = 3  # 一次推播最多 N 則新聞 (減量: 聚焦最重大幾則, 文字才放得完整不截斷)
 
 
 # === Urgency 分級 (HIGH=急報響鈴 / MED=注意響鈴 / LOW=靜音批次) ===
@@ -135,10 +135,36 @@ def _is_tw_or_us_session() -> bool:
 
 
 def _headline_hash(headline: str) -> str:
-    """新聞標題 hash (前 8 字), 給去重用."""
+    """新聞標題 normalize 後再 hash, 給去重用。
+    大小寫 / 前後空白 / 內部多空白 / 標點符號差異一律視為『同一則新聞』,
+    避免同一則新聞因不同來源用字略異而 hash 不同 → 重複推播。"""
     if not headline:
         return ""
-    return hashlib.md5(headline.encode("utf-8")).hexdigest()[:12]
+    import re as _re
+    norm = _re.sub(r"\s+", " ", str(headline).lower().strip())
+    norm = _re.sub(r"[^\w一-鿿]+", "", norm)  # 去標點/符號, 保留中英數
+    if not norm:
+        norm = str(headline).strip().lower()
+    return hashlib.md5(norm.encode("utf-8")).hexdigest()[:12]
+
+
+def _link_hash(link: str) -> str:
+    """URL 去重 hash: 同一篇文章(同 URL)= 同一張連結預覽小圖, 即使標題略有不同也視為重複。
+    正規化: 去 #fragment、去尾斜線、小寫、去常見追蹤參數。前綴 'L' 避免與標題 hash 相撞。"""
+    if not link:
+        return ""
+    import re as _re
+    u = str(link).split("#")[0].strip().rstrip("/").lower()
+    u = _re.sub(r"[?&](utm_[^=]+|fbclid|gclid)=[^&]*", "", u)  # 去 utm_/fbclid/gclid 追蹤參數
+    if not u:
+        return ""
+    # 防呆: 只有帶「文章路徑」的 URL 才拿來去重; 純網域/首頁 (無路徑或路徑太短) 不去重,
+    #       避免某來源都給首頁連結時把不同文章誤判成同一篇而過度去重。
+    _m = _re.match(r"https?://[^/]+(/.*)?$", u)
+    _path = _m.group(1) if _m else None
+    if not _path or len(_path) < 4:
+        return ""
+    return "L" + hashlib.md5(u.encode("utf-8")).hexdigest()[:11]
 
 
 def _match_keywords(text: str) -> List[str]:
@@ -257,12 +283,16 @@ def _scan_news_for_symbol(item: Dict, alerted_hashes: Set[str]) -> List[Dict]:
             hits = _match_keywords(title) if not force else ["8K-AUTO"]
             if not hits:
                 continue
-            # 去重
+            # 去重 (跨 symbol): 正規化「標題 hash」或「URL hash」任一命中 → 跳過。
+            #   標題 hash 擋「同新聞多來源用字略異」; URL hash 擋「同一篇文章(同小圖)不同標題」。
             h_hash = _headline_hash(title)
-            dedup_key = f"{sym}:{h_hash}"
-            if dedup_key in alerted_hashes:
+            link_hash = _link_hash(link)
+            if (h_hash and h_hash in alerted_hashes) or (link_hash and link_hash in alerted_hashes):
                 continue
-            alerted_hashes.add(dedup_key)
+            if h_hash:
+                alerted_hashes.add(h_hash)
+            if link_hash:
+                alerted_hashes.add(link_hash)
             alert_d = {
                 "symbol": sym,
                 "market": market,
@@ -273,6 +303,7 @@ def _scan_news_for_symbol(item: Dict, alerted_hashes: Set[str]) -> List[Dict]:
                 "source_type": n.get("type", "YAHOO"),  # 8-K / PR / TW_NEWS / YAHOO
                 "keywords_hit": hits[:5],
                 "h_hash": h_hash,
+                "link_hash": link_hash,
             }
             alert_d["urgency"] = classify_urgency(alert_d)
             out.append(alert_d)
@@ -343,7 +374,22 @@ def check_news_events() -> List[Dict]:
         tag_priority.get(x.get("tag", "main"), 9),
     ))
 
-    return all_alerts[:NEWS_MAX_PER_BATCH]
+    # 同批內再去重: 同一則新聞 (normalize 後 h_hash 相同) 只留最高優先那筆,
+    # 避免同新聞命中多檔 → 同一封推播裡出現多次。
+    _seen: Set[str] = set()
+    deduped: List[Dict] = []
+    for a in all_alerts:
+        h = a.get("h_hash", "")
+        lh = a.get("link_hash", "")
+        if (h and h in _seen) or (lh and lh in _seen):
+            continue
+        if h:
+            _seen.add(h)
+        if lh:
+            _seen.add(lh)
+        deduped.append(a)
+
+    return deduped[:NEWS_MAX_PER_BATCH]
 
 
 def unmark_alerts_sent(alerts: List[Dict]) -> None:
@@ -355,7 +401,9 @@ def unmark_alerts_sent(alerts: List[Dict]) -> None:
         ne_state = state.get("news_event_alert") or {}
         alerted = set(ne_state.get("alerted") or [])
         for a in alerts:
-            alerted.discard(f"{a.get('symbol', '')}:{a.get('h_hash', '')}")
+            for _k in (a.get("h_hash", ""), a.get("link_hash", "")):
+                if _k:
+                    alerted.discard(_k)
         ne_state["alerted"] = sorted(alerted)
         state["news_event_alert"] = ne_state
         watchlist_store.save_monitor_state(state)
@@ -376,7 +424,9 @@ def mark_alerts_sent(alerts: List[Dict]) -> None:
             ne_state.update({"date": today_str, "alerted": [], "last_batch_at": None})
         alerted = set(ne_state.get("alerted") or [])
         for a in alerts:
-            alerted.add(f"{a.get('symbol', '')}:{a.get('h_hash', '')}")
+            for _k in (a.get("h_hash", ""), a.get("link_hash", "")):
+                if _k:
+                    alerted.add(_k)
         ne_state["alerted"] = sorted(alerted)
         ne_state["last_batch_at"] = dt.datetime.now(dt.timezone.utc).replace(tzinfo=None).isoformat()
         state["news_event_alert"] = ne_state

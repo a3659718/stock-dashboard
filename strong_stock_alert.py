@@ -308,6 +308,13 @@ def check_and_push_if_surge() -> Optional[Dict]:
         if ok:
             sent_today.append(trigger_key)
             ssa[today_str] = sent_today
+            # 合併重疊: 把大盤大漲已推的強勢股, 標進「常態強勢股」的去重命名空間,
+            # 後續 tick 的 check_and_push_intraday_strong 就不會再重複推同一批 (30min 視窗)。
+            try:
+                import alert_priority as _ap
+                _ap.mark_picks_pushed(picks, "intraday_strong_stock", "up")
+            except Exception as _de:
+                print(f"[strong_stock_alert] 跨類去重標記失敗 (non-fatal): {_de}", flush=True)
             if state is not None:  # state load 失敗時不寫, 避免用空 dict 覆蓋 monitor_state
                 try:
                     watchlist_store.save_monitor_state(state)
