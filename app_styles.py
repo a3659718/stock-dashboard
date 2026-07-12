@@ -15,7 +15,13 @@ import streamlit as st
 _CSS_GLOBAL = """
     <style>
       .block-container { padding-top: 1rem; padding-bottom: 4rem; }
-      .stMetric { background: rgba(255,255,255,0.04); padding: 8px; border-radius: 8px; }
+      /* === #2 統一卡片 / 指標視覺 (淡框卡片, 明暗主題皆適用) === */
+      .stMetric { background: rgba(127,127,127,0.06); padding: 10px 14px;
+                  border-radius: 10px; border: 1px solid rgba(127,127,127,0.18); }
+      .stMetric div[data-testid="stMetricValue"] { font-weight: 600; }
+      .stMetric label { opacity: 0.72; }
+      hr { opacity: 0.5; margin: 0.6rem 0; }
+      [data-testid="stCaptionContainer"] { opacity: 0.82; }
       .pill { display:inline-block; padding:2px 8px; border-radius:999px;
               background:#1f6feb22; color:#1f6feb; font-size:12px; margin:2px; }
       .pill.warn { background:#d2940022; color:#d29400; }

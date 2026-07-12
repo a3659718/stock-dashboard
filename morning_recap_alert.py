@@ -95,36 +95,75 @@ def _summarize_push_history() -> List[str]:
         return []
 
 
+def _battle_tldr(sox_pct, ixic_pct) -> str:
+    """今日台股一句話作戰結論 — 優先用 Gemini 潤飾, 失敗/無 quota 自動退回規則版。"""
+    _rule = _battle_tldr_rule(sox_pct, ixic_pct)
+    try:
+        import ai_analyzer
+        if not ai_analyzer.gemini_available():
+            return _rule
+        _sox = f"費半 {sox_pct:+.1f}%" if sox_pct is not None else "費半資料缺"
+        _ix = f", 那指 {ixic_pct:+.1f}%" if ixic_pct is not None else ""
+        prompt = (
+            f"你是台股策略師。昨夜美股: {_sox}{_ix}。"
+            "用繁體中文寫【一句話】給今日台股定調: 偏多還偏空開、最該留意哪個族群或方向。"
+            "要具體可行動、40 字內、不要開場白或引號、只回那一句。"
+        )
+        from ai_analyzer import _get_model
+        _m = _get_model()
+        if _m is None:
+            return _rule
+        _resp = _m.generate_content(prompt)
+        _txt = (_resp.text or "").strip() if _resp else ""
+        _txt = _txt.replace("\n", " ").strip().strip('「」"\'` ')
+        return _txt if _txt else _rule
+    except Exception as _e:
+        print(f"[morning_recap] gemini tldr fail: {_e}", flush=True)
+        return _rule
+
+
+def _battle_tldr_rule(sox_pct, ixic_pct) -> str:
+    """規則版一句話 (Gemini 後備) — 依費半(台股先行指標)+ 那指 隔夜表現。"""
+    if sox_pct is None:
+        return "費半資料暫缺 → 開盤看量價再決定, 保守為宜"
+    if sox_pct >= 2.0:
+        return f"費半 {sox_pct:+.1f}% 大漲 → 台股半導體今日強力偏多開, 重點看權值(2330 / 2454)與 AI 供應鏈"
+    if sox_pct >= 1.0:
+        return f"費半 {sox_pct:+.1f}% → 台股偏多開, 電子 / 半導體較有表現空間"
+    if sox_pct <= -2.0:
+        return f"費半 {sox_pct:+.1f}% 大跌 → 台股偏空開, 留意權值拖累, 保守 / 減碼優先"
+    if sox_pct <= -1.0:
+        return f"費半 {sox_pct:+.1f}% 走弱 → 台股偏空開, 電子承壓, 觀望為宜"
+    return f"費半 {sox_pct:+.1f}% 近平盤 → 台股方向不明, 開盤看量價與個股表現"
+
+
 def build_morning_recap_msg() -> str:
-    """組裝 morning recap TG HTML."""
-    lines = ["☀️ <b>早安!昨夜美股重點</b>"]
+    """組裝『今日作戰摘要』TG HTML — 一句話定調 + 昨夜美股 + 昨夜推播 + 命中回顧."""
+    lines = ["☀️ <b>今日作戰摘要</b>", ""]
+
+    # 抓美股大盤 (同時記下 pct 供一句話結論用)
+    us_pct: Dict[str, float] = {}
+    snaps: List[str] = []
+    for sym, label in [("SPY", "SPY"), ("QQQ", "QQQ"), ("^SOX", "費半"), ("^IXIC", "那指")]:
+        s = _fetch_us_close(sym)
+        if s and s.get("pct") is not None:
+            us_pct[sym] = s["pct"]
+            tag = "🟢" if s["pct"] >= 0 else "🔴"
+            snaps.append(f"{tag} {label} {s['pct']:+.2f}%")
+
+    # 1. 一句話作戰結論 (置頂, 最醒目)
+    lines.append(f"🧭 <b>一句話</b>:{_battle_tldr(us_pct.get('^SOX'), us_pct.get('^IXIC'))}")
     lines.append("")
 
-    # 1. 美股大盤
-    snaps: List[str] = []
-    fetch_attempted = 0
-    for sym, label, flag in [
-        ("SPY", "SPY", "🇺🇸"),
-        ("QQQ", "QQQ", "🇺🇸"),
-        ("^SOX", "費半", "🟦"),
-        ("^IXIC", "那指", "🟪"),
-    ]:
-        fetch_attempted += 1
-        s = _fetch_us_close(sym)
-        if s:
-            tag = "🟢" if s.get("pct", 0) >= 0 else "🔴"
-            snaps.append(f"{tag} {label} {s['pct']:+.2f}%")
-    lines.append("📊 <b>大盤</b>")
+    # 2. 昨夜美股大盤
+    lines.append("📊 <b>昨夜美股</b>")
     if snaps:
         lines.append("  " + " · ".join(snaps))
     else:
-        # BUG FIX: 之前 yfinance 全 fail 時整段都不顯示 → 用戶以為推播壞了
-        # 改成明確顯示「資料暫時無法取得」+ 建議
-        lines.append("  <i>⚠️ 大盤資料暫時無法取得 (yfinance API 異常或週末)</i>")
-        lines.append("  <i>請從 dashboard 或券商 app 確認</i>")
+        lines.append("  <i>⚠️ 大盤資料暫時無法取得 (yfinance API 異常或週末), 請從 dashboard / 券商 app 確認</i>")
     lines.append("")
 
-    # 2. 推播統計
+    # 3. 昨夜推播統計
     recap_lines = _summarize_push_history()
     if recap_lines:
         lines.append("📱 <b>昨夜推播</b>")
@@ -132,10 +171,23 @@ def build_morning_recap_msg() -> str:
             lines.append(f"  • {r}")
         lines.append("")
 
-    # 3. 今日台股盤前提醒
-    lines.append("🇹🇼 <b>今日台股盤前 (08:30)</b> 會有完整盤前 + BUY Top 5")
+    # 4. 推播命中回顧 (近 30 日勝率 → 建立信任感)
+    try:
+        import signal_tracker as _sig
+        _s = _sig.accuracy_summary(None, lookback_days=30)
+        _n = _s.get("n") or 0
+        _pct = _s.get("pct")
+        if _n >= 10 and _pct is not None:
+            _mark = "🟢" if _pct >= 60 else ("🟡" if _pct >= 40 else "🔴")
+            lines.append(f"🎯 <b>推播近 30 日勝率</b>:{_mark} {_pct:.0f}% (n={_n})")
+            lines.append("")
+    except Exception as _e:
+        print(f"[morning_recap] signal_tracker fail: {_e}", flush=True)
+
+    # 5. 今日台股盤前提醒
+    lines.append("🇹🇼 <b>今日台股</b>:08:30 有完整盤前 (日韓即時 + 對台股影響) + BUY Top 5")
     lines.append("")
-    lines.append("<i>※ 早安推播 — 一封看完昨夜重點. 詳細請翻過往推播.</i>")
+    lines.append("<i>※ 一封定調今日作戰;盤中緊急訊號(反轉 / 大跌 / 急報)仍會即時推.</i>")
 
     return "\n".join(lines)
 

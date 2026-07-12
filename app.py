@@ -615,6 +615,32 @@ with _tab_stock_outer:
         analyze_btn = st.button("🚀 完整分析", use_container_width=True, type="primary",
                                 key="unified_analyze_btn")
     ai_btn = False  # 舊獨立 AI 按鈕已移除 (deep 區塊仍讀此變數)
+
+    # === 🎯 入場結論置頂 (#3): 按「完整分析」後先算入場評估, 頂端先秀結論 + 目標價 + AI ===
+    if analyze_btn and sid_input.strip():
+        try:
+            import entry_evaluator as _ee_top
+            with st.spinner(f"入場評估 {sid_input.strip()} 中…"):
+                st.session_state["entry_result"] = _ee_top.evaluate_entry(
+                    sid_input.strip(), market="auto", with_ai=include_ai)
+        except Exception as _eet:
+            st.error(f"入場評估失敗: {type(_eet).__name__}: {_eet}")
+    _er_top = st.session_state.get("entry_result")
+    if _er_top and not _er_top.get("err") and not _er_top.get("error"):
+        _vt = _er_top.get("verdict", {})
+        st.markdown(
+            f"## {_vt.get('verdict_emoji','')} 入場結論:**{_vt.get('verdict','?')}**"
+            f"  ·  評分 {_vt.get('score', 0)}/100"
+        )
+        _pat = _vt.get("position_action")
+        if _pat:
+            st.caption(f"{_vt.get('position_emoji','')} 持倉建議:{_pat} — {_vt.get('position_detail','')}")
+        _ait = _er_top.get("ai_summary")
+        if _ait:
+            with st.expander("🤖 AI 進出場建議 (含目標價 / 進場 / 停損 / 出場時機)", expanded=True):
+                st.markdown(_ait)
+        st.caption("↓ 完整技術/籌碼分析與個股現況指標見下方")
+        st.divider()
 # 兩個區塊都寫進外層 tab (標準且安全; 不用 container 以免跨 tab 相容性問題)
 tab_entry = _tab_stock_outer
 tab_stock = _tab_stock_outer
@@ -3483,18 +3509,8 @@ with tab_track:
 # Tab — 入場評估 (C: 新)
 # =============================================================================
 with tab_entry:
-    st.markdown("### 🎯 入場評估摘要 (BUY / WAIT / AVOID + 目標價 / 進出場時機)")
-
-    # 共用頁面頂端的輸入與「完整分析」按鈕 (與下方深度分析同一次觸發)
-    if analyze_btn and sid_input.strip():
-        try:
-            import entry_evaluator as ee
-            with st.spinner(f"入場評估 {sid_input.strip()} 中…"):
-                _eres = ee.evaluate_entry(sid_input.strip(), market="auto", with_ai=include_ai)
-            st.session_state["entry_result"] = _eres
-        except Exception as e:
-            st.error(f"入場評估失敗: {type(e).__name__}: {e}")
-
+    st.markdown("### 🔬 入場評估詳情 (個股現況 / 目標價 / 進出場)")
+    # 入場結論 + AI 已在本頁頂端顯示; 這裡只讀取結果呈現詳細指標 (不重算, 避免雙倍 Gemini)
     result = st.session_state.get("entry_result")
     if result:
         if result.get("error"):
@@ -3506,21 +3522,7 @@ with tab_entry:
             fund = result.get("fundamentals", {})
             verdict = result.get("verdict", {})
 
-            # === 結論卡片 ===
-            v_emoji = verdict.get("verdict_emoji", "")
-            v_text = verdict.get("verdict", "?")
-            v_score = verdict.get("score", 0)
-            st.markdown(f"### {v_emoji} 結論: **{v_text}** (評分 {v_score}/100)")
-            pa = verdict.get("position_action")
-            if pa:
-                pa_e = verdict.get("position_emoji", "")
-                pa_d = verdict.get("position_detail", "")
-                st.markdown(f"### {pa_e} 持倉建議: **{pa}**")
-                st.caption(pa_d)
-            for r in verdict.get("reasons", []):
-                st.markdown(f"- {r}")
-
-            st.divider()
+            # (結論卡片 + 持倉建議 + 理由已在本頁頂端顯示, 此處不重複)
 
             # === 個股現況 (safe-format) ===
             def _sf(v, fmt="+.2f", suffix="%"):
@@ -3596,18 +3598,8 @@ with tab_entry:
             cR1.metric("支撐 (MA20)", f"{ma20:,.2f}" if ma20 else "—")
             cR2.metric("阻力 (52w 高)", f"{high52:,.2f}" if high52 else "—")
             cR3.metric("中期目標 / 52w 低", f"{high52:,.2f}" if high52 else (f"{low52:,.2f}" if low52 else "—"))
-            st.caption("※ 技術面參考位 (由均線/區間反推), 非保證目標; 實際進出以下方 AI 分析 + 個人風控為準.")
-
-            # === 🤖 AI 分析 (整合進場評估, 不再另開分頁) ===
-            st.divider()
-            st.markdown("#### 🤖 AI 分析 (Gemini) — 含進場時機 / 目標價 / 出場時機")
-            ai_txt = result.get("ai_summary")
-            if ai_txt:
-                st.markdown(ai_txt)
-            elif not include_ai:
-                st.caption("（未勾選「☑ 含 AI 觀點」→ 已略過 AI 以省 Gemini quota; 勾選後重跑「完整分析」即可）")
-            else:
-                st.caption("（AI 分析未產生 — 可能 Gemini 未設定 (GEMINI_API_KEY) 或本次呼叫失敗）")
+            st.caption("※ 技術面參考位 (由均線/區間反推), 非保證目標; 實際進出以本頁頂端 AI 進出場建議 + 個人風控為準.")
+            # (AI 分析已在本頁頂端顯示, 此處不重複)
 
 
 # ===== 🩺 系統健康 =====

@@ -163,8 +163,53 @@ def _gemini_next_day_advice(twii: Dict, sectors: Dict, breadth: Dict, leaders: L
         return ""
 
 
+def _post_tldr(twii: Dict, breadth: Dict) -> str:
+    """盤後一句話定調 — 優先 Gemini 潤飾, 失敗/無 quota 自動退回規則版。"""
+    _rule = _post_tldr_rule(twii, breadth)
+    try:
+        import ai_analyzer
+        if not ai_analyzer.gemini_available():
+            return _rule
+        _pct = twii.get("pct_vs_prev", 0) if twii else 0
+        _rng = twii.get("range_pct", 0) if twii else 0
+        _ur = breadth.get("up_ratio_pct") if breadth else None
+        _urs = f", 上漲比 {_ur:.0f}%" if _ur is not None else ""
+        prompt = (
+            f"你是台股策略師。今日台股收盤: 加權 {_pct:+.2f}% (振幅 {_rng:.2f}%){_urs}。"
+            "用繁體中文寫【一句話】做今日定調 + 隔日方向: 多空氛圍、隔日偏多偏空、該注意什麼。"
+            "要具體可行動、40 字內、不要開場白或引號、只回那一句。"
+        )
+        from ai_analyzer import _get_model
+        _m = _get_model()
+        if _m is None:
+            return _rule
+        _resp = _m.generate_content(prompt)
+        _txt = (_resp.text or "").strip() if _resp else ""
+        _txt = _txt.replace("\n", " ").strip().strip('「」"\'` ')
+        return _txt if _txt else _rule
+    except Exception as _e:
+        print(f"[post_market] gemini tldr fail: {_e}", flush=True)
+        return _rule
+
+
+def _post_tldr_rule(twii: Dict, breadth: Dict) -> str:
+    """規則版盤後一句話 (Gemini 後備) — 依加權漲跌 + 上漲比。"""
+    pct = twii.get("pct_vs_prev", 0) if twii else 0
+    up_ratio = breadth.get("up_ratio_pct") if breadth else None
+    br = f", 上漲比 {up_ratio:.0f}%" if up_ratio is not None else ""
+    if pct >= 1.0:
+        return f"加權 {pct:+.2f}% 收紅{br} → 多方主導, 隔日偏續強 (留意美股是否同步)"
+    if pct >= 0.3:
+        return f"加權 {pct:+.2f}% 小漲{br} → 偏多但力道普通, 隔日看美股臉色"
+    if pct <= -1.0:
+        return f"加權 {pct:+.2f}% 收黑{br} → 空方主導, 隔日偏弱, 保守 / 減碼優先"
+    if pct <= -0.3:
+        return f"加權 {pct:+.2f}% 小跌{br} → 偏空整理, 隔日觀望"
+    return f"加權 {pct:+.2f}% 近平盤{br} → 盤整待變, 看美股 + 籌碼再決定方向"
+
+
 def build_post_market_msg() -> str:
-    """TPE 16:00 盤後總結 TG 訊息."""
+    """TPE 16:00 台股今日總結 TG 訊息."""
     # Bug fix: 台股假日不該推 (內容會是前一交易日資料但講「今日」)
     try:
         import holiday_check
@@ -184,7 +229,12 @@ def build_post_market_msg() -> str:
     breadth = _market_breadth()
     leaders = _leader_stocks()
 
-    lines = ["📊 <b>台股盤後總結 (16:00)</b>", "━━━━━━━━━━━━━━━━━"]
+    lines = ["📊 <b>台股今日總結 (16:00)</b>", "━━━━━━━━━━━━━━━━━"]
+    # 一句話定調 (置頂, 最醒目)
+    _tldr = _post_tldr(twii, breadth)
+    if _tldr:
+        lines.append(f"🧭 <b>一句話</b>:{_tldr}")
+        lines.append("")
     # 加權
     if twii.get("current"):
         pct = twii.get("pct_vs_prev", 0)
@@ -309,6 +359,17 @@ def build_post_market_msg() -> str:
                 lines.append("")
     except Exception as _pe:
         print(f"[post_market] portfolio_risk fail: {_pe}", flush=True)
+
+    # === 推播命中回顧 (近 30 日各訊號準確率) — 檢視推播準不準, 建立信任感 ===
+    try:
+        import signal_tracker as _sig
+        _acc = _sig.fmt_accuracy_block(lookback_days=30)
+        if _acc:
+            lines.append("━━━━━━━ 🎯 推播命中回顧 (近 30 日) ━━━━━━━")
+            lines.append(_acc)  # 已含 HTML 標記, 不再 _esc
+            lines.append("")
+    except Exception as _se:
+        print(f"[post_market] signal_tracker fail: {_se}", flush=True)
 
     # Gemini advice
     gem = _gemini_next_day_advice(twii, sectors, breadth, leaders)
