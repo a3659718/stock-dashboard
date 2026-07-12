@@ -637,8 +637,8 @@ def _ai_verdict(symbol, snap, peers, rs, fund, verdict):
 
 
 # 主入口
-def evaluate_entry(symbol, market="auto"):
-    """完整評估 (含 AI). 回 dict."""
+def evaluate_entry(symbol, market="auto", with_ai=True):
+    """完整評估. with_ai=False 時跳過 Gemini (省 quota, 由 UI「含 AI 觀點」控制). 回 dict."""
     try:
         m = detect_market(symbol)
         snap = _stock_snapshot(symbol, m)
@@ -647,7 +647,7 @@ def evaluate_entry(symbol, market="auto"):
         rs = _market_rs(snap, m)
         fund = _fundamentals(symbol, m)
         v = _verdict(snap, peers, rs, fund)
-        ai_text = _ai_verdict(symbol, snap, peers, rs, fund, v)
+        ai_text = _ai_verdict(symbol, snap, peers, rs, fund, v) if with_ai else None
         return {
             "symbol": symbol,
             "market": m,

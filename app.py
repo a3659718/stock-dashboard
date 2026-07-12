@@ -563,14 +563,34 @@ with tab_overview:
 
     st.caption("※ 本頁每次打開即時計算, 跑 5 支自選股約需 15-30 秒")
 
-# 不再切子分頁: 用 container 讓「個股入場評估」(已整合 AI + 目標價 + 進出場) 置頂當主內容,
-# 「個股深度分析」(技術/籌碼/K線圖/完整 Gemini) 排在同一頁下方。
-# 註: 深度分析內部有多個 st.expander, 故不能包在 expander 內 (Streamlit 禁止巢狀); 改用 container。
+# 整合: 個股「入場評估」+「深度分析」合成一個功能 — 頁面頂端一個輸入 + 一個按鈕一次跑完:
+#   置頂 (_entry_container): 入場結論 BUY/WAIT/AVOID + 目標價/進出場時機 + AI
+#   下方 (_deep_container):  技術 / 籌碼 / 6 個月 K 線 / 完整 Gemini 深度分析
+# 註: 深度分析內部有多個 st.expander → 用 container 排版 (不能用 expander, Streamlit 禁巢狀)。
 with _tab_stock_outer:
-    _entry_container = st.container()
+    st.subheader("🔍 個股分析 + 入場評估 (台股 / 美股)")
+    st.caption("輸入代號一鍵跑: 入場結論 + 目標價/進出場時機 + AI, 再加技術/籌碼/K線深度分析")
+    _uc1, _uc2, _uc3 = st.columns([3, 1, 1])
+    with _uc1:
+        sid_input = st.text_input(
+            "股票代號 (台股 4 碼 / 美股 ticker)", value="",
+            placeholder="2330 / NVDA / RKLB", key="unified_stock_input",
+        )
+    with _uc2:
+        include_ai = st.checkbox(
+            "☑ 含 AI 觀點", value=ai_analyzer.gemini_available(),
+            disabled=not ai_analyzer.gemini_available(),
+            help=("需先設 GEMINI_API_KEY 並重啟" if not ai_analyzer.gemini_available()
+                  else "多燒 1 次 Gemini quota, 跑時間 +5-15s"),
+            key="unified_include_ai",
+        )
+    with _uc3:
+        analyze_btn = st.button("🚀 完整分析", use_container_width=True, type="primary",
+                                key="unified_analyze_btn")
+    ai_btn = False  # 舊獨立 AI 按鈕已移除 (deep 區塊仍讀此變數)
+    _entry_container = st.container()   # 置頂: 入場評估摘要
     st.divider()
-    st.caption("⬇️ 進階: 個股深度分析 (技術 + 籌碼 + 6 個月 K 線 + 完整 Gemini 解讀)")
-    _deep_container = st.container()
+    _deep_container = st.container()    # 下方: 深度技術/籌碼/K線分析
 tab_entry = _entry_container
 tab_stock = _deep_container
 
@@ -2354,30 +2374,9 @@ with tab_growth:
 # Tab — 個股深度分析
 # =============================================================================
 with tab_stock:
-    st.subheader("🔍 個股深度分析 (台股 / 美股)")
-    cS1, cS2, cS3 = st.columns([3, 1, 1])
-    with cS1:
-        sid_input = st.text_input(
-            "輸入股票代號",
-            value="",
-            placeholder="台股: 2330  /  美股: NVDA, AAPL, TSLA",
-            help="4 位數字 = 台股；含字母 = 美股 (用 yfinance)",
-        )
-    with cS2:
-        include_ai = st.checkbox(
-            "☑ 含 AI 觀點",
-            value=ai_analyzer.gemini_available(),
-            disabled=not ai_analyzer.gemini_available(),
-            help=("需先在 secrets 設 GEMINI_API_KEY 並重啟"
-                  if not ai_analyzer.gemini_available() else
-                  "勾起來會多燒 1 次 Gemini quota, 跑時間 +5-15s"),
-            key="stock_include_ai",
-        )
-    with cS3:
-        analyze_btn = st.button("🚀 完整分析", use_container_width=True, type="primary",
-                                  help="一鍵跑技術 + 籌碼 + 深度(PE/月營收/籌碼變化) + (可選)AI")
-    # 方案 A: 不再用獨立 AI 按鈕, 改 checkbox include_ai
-    ai_btn = False
+    # 輸入(sid_input) / 含AI(include_ai) / 完整分析(analyze_btn) / ai_btn 已由頁面頂端共用區提供,
+    # 此區塊只負責「技術 / 籌碼 / K線」深度分析的呈現, 與上方入場評估共用同一個按鈕。
+    st.markdown("#### 🔬 技術 / 籌碼 / K 線 深度分析")
 
     # 一鍵全跑 — 4 步驟用 st.status + st.progress 雙顯示
     if analyze_btn and sid_input.strip():
@@ -3454,37 +3453,17 @@ with tab_track:
 # Tab — 入場評估 (C: 新)
 # =============================================================================
 with tab_entry:
-    st.subheader("🎯 個股入場評估")
-    st.caption(
-        "輸入股票代號 (台股 4 碼 / 美股 ticker), 系統評估當下個股強度、同族群表現、"
-        "相對大盤、PE/EPS, 給出 BUY/WAIT/AVOID 結論. 適合判斷「現在能不能進場」."
-    )
+    st.markdown("### 🎯 入場評估摘要 (BUY / WAIT / AVOID + 目標價 / 進出場時機)")
 
-    cE1, cE2, cE3 = st.columns([2, 1, 1])
-    with cE1:
-        entry_input = st.text_input(
-            "股票代號 (例: 2330 / NVDA / RKLB)",
-            value="",
-            key="entry_input",
-            placeholder="輸入後按下方分析按鈕",
-        )
-    with cE2:
-        market_choice = st.selectbox(
-            "市場", ["auto", "TW", "US"], index=0, key="entry_market",
-            help="auto 會自動判斷 (4 碼數字=TW, 字母=US)",
-        )
-    with cE3:
-        entry_run = st.button("🔍 分析", use_container_width=True,
-                                key="entry_run", type="primary")
-
-    if entry_run and entry_input.strip():
+    # 共用頁面頂端的輸入與「完整分析」按鈕 (與下方深度分析同一次觸發)
+    if analyze_btn and sid_input.strip():
         try:
             import entry_evaluator as ee
-            with st.spinner(f"分析 {entry_input.strip()} 中…約 10-20 秒"):
-                result = ee.evaluate_entry(entry_input.strip(), market=market_choice)
-            st.session_state["entry_result"] = result
+            with st.spinner(f"入場評估 {sid_input.strip()} 中…"):
+                _eres = ee.evaluate_entry(sid_input.strip(), market="auto", with_ai=include_ai)
+            st.session_state["entry_result"] = _eres
         except Exception as e:
-            st.error(f"分析失敗: {type(e).__name__}: {e}")
+            st.error(f"入場評估失敗: {type(e).__name__}: {e}")
 
     result = st.session_state.get("entry_result")
     if result:
@@ -3595,6 +3574,8 @@ with tab_entry:
             ai_txt = result.get("ai_summary")
             if ai_txt:
                 st.markdown(ai_txt)
+            elif not include_ai:
+                st.caption("（未勾選「☑ 含 AI 觀點」→ 已略過 AI 以省 Gemini quota; 勾選後重跑「完整分析」即可）")
             else:
                 st.caption("（AI 分析未產生 — 可能 Gemini 未設定 (GEMINI_API_KEY) 或本次呼叫失敗）")
 
