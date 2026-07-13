@@ -41,8 +41,21 @@ def _fetch_intraday_pct_vs_open(symbol: str) -> Dict:
         import data_sources as ds
         df = ds.fetch_yf_history(symbol, period="2d", interval="5m")
         if df is None or df.empty:
+            # 代理 fallback: 5m 回空 → 用當地盤中 ETF 5m (日韓尤其常回空 → 之前靜默漏推)
+            try:
+                from index_alerts import INTRADAY_PROXY
+                _proxy = INTRADAY_PROXY.get(symbol)
+            except Exception:
+                _proxy = None
+            if _proxy:
+                _dfp = ds.fetch_yf_history(_proxy, period="2d", interval="5m")
+                if _dfp is not None and not _dfp.empty:
+                    print(f"[asia_leading] {symbol} 5m 回空 → 改用代理 {_proxy}", flush=True)
+                    df = _dfp
+        if df is None or df.empty:
             df = ds.fetch_yf_history(symbol, period="3d", interval="1d")
             if df is None or df.empty:
+                print(f"[asia_leading] {symbol} 盤中資料全空 (含代理) → skip", flush=True)
                 return {}
         c = df["Close"].astype(float)
         cur = float(c.iloc[-1])
@@ -98,9 +111,10 @@ def check_asia_leading() -> List[Dict]:
             direction = "down"
         else:
             continue
-        # per-(sym, direction) dedup
+        # per-(sym, direction) dedup (每指數每方向每天只推 1 次)
         key = f"{sym}:{direction}"
         if key in alerted:
+            print(f"[asia_leading] {sym} {direction} {pct:+.2f}% 今天已推過同方向 → skip", flush=True)
             continue
         alerts.append({
             "symbol": sym,

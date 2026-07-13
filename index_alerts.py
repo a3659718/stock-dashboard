@@ -169,9 +169,12 @@ REVERSAL_MIN_DIP_FOR_REBOUND_PCT = 0.5
 # 註: 代理只在本尊盤中『回空』時才啟用; 啟用時日線也一併改用代理 (見 crash snapshot),
 #     避免「代理盤中價 ÷ 指數昨收」這種不同價格尺度相除 → 垃圾百分比。
 INTRADAY_PROXY = {
-    "^SOX":  "SOXX",     # 費城半導體 → iShares 半導體 ETF
-    "^IXIC": "ONEQ",     # 那斯達克綜合 → Fidelity Nasdaq Composite ETF
-    "^TWII": "0050.TW",  # 台灣加權 → 元大台灣50 ETF (走勢百分比幾近等同大盤)
+    "^SOX":  "SOXX",       # 費城半導體 → iShares 半導體 ETF
+    "^IXIC": "ONEQ",       # 那斯達克綜合 → Fidelity Nasdaq Composite ETF
+    "^TWII": "0050.TW",    # 台灣加權 → 元大台灣50 ETF (走勢百分比幾近等同大盤)
+    # 日韓代理必須用「當地盤中交易」的 ETF (美國 ETF 在日韓盤中沒資料):
+    "^N225": "1321.T",     # 日經 225 → 東證 Nomura Nikkei225 ETF
+    "^KS11": "069500.KS",  # KOSPI → 韓交所 KODEX 200 ETF (追蹤 KOSPI200, 走勢相近)
 }
 
 
@@ -1448,6 +1451,7 @@ def check_systemic_crash() -> Optional[Dict]:
             continue
         snap = _fetch_systemic_snapshot(sym)
         if not snap:
+            print(f"[systemic] {sym} 盤中資料抓不到 (yfinance 5m/日線 + 代理皆空) → skip", flush=True)
             continue
         today_open = snap["today_open"]
         current = snap["current"]
@@ -1503,6 +1507,7 @@ def check_systemic_crash() -> Optional[Dict]:
             try:
                 last_dt = dt.datetime.fromisoformat(last_at)
                 if (now_utc - last_dt).total_seconds() < SYSTEMIC_COOLDOWN_MIN * 60:
+                    print(f"[systemic] {sym} {SYSTEMIC_COOLDOWN_MIN}min 冷卻中 → skip", flush=True)
                     continue
             except Exception:
                 pass
