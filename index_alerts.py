@@ -1467,6 +1467,12 @@ def check_systemic_crash() -> Optional[Dict]:
             pct_vs_prior = (current / prior_close - 1) * 100 if prior_close else 0.0
         except Exception:
             pct_vs_prior = 0.0
+        # 防呆: 指數盤中不可能 ±30% (有漲跌停/熔斷)。算出離譜值幾乎必是壞資料
+        # (代理與指數價格尺度混用 / yfinance 壞 bar) → 跳過不觸發, 避免推 -72% / 破百% 垃圾。
+        if abs(pct_vs_open) > 30 or abs(pct_vs_prior) > 30:
+            print(f"[systemic] {sym} 算出離譜%: vs開 {pct_vs_open:+.1f}% / vs昨收 {pct_vs_prior:+.1f}% "
+                  f"(open={today_open} cur={current} prev={prior_close}) → 判定壞資料, skip", flush=True)
+            continue
         # Fix #3: vs prior_close 包含 gap down. 由 SYSTEMIC_INCLUDE_VS_PRIOR 開關控制.
         if SYSTEMIC_INCLUDE_VS_PRIOR:
             intraday_pct = min(pct_vs_open, pct_vs_prior)
