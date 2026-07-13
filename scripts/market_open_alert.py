@@ -1227,6 +1227,18 @@ def main() -> int:
         # Bug fix (重大): 之前這三類只「偵測 + 標記已推」(reversal 在 1132 行先標保險),
         #   但「組合 + send」整段在某次重構被刪掉 → 費半反轉 / 系統性大跌 / 開盤即弱 全部被
         #   偵測卻從未送出, 而且還被標成已推 → 下次直接被去重濾掉。這裡把缺失的送出補回來。
+        # 反轉 / 開盤即弱強 也接 Gemini: 若 crash 沒觸發 AI 但反轉/開盤即弱強有觸發, 補一份 AI 快評
+        if not crash_ai_text and (reversal_alerts or weak_open_alerts) and ai_analyzer.gemini_available():
+            try:
+                _okr, _rev_ai = ai_analyzer.analyze_reversal_alerts(reversal_alerts, weak_open_alerts)
+                if _okr and _rev_ai:
+                    crash_ai_text = _rev_ai  # 共用同一個 AI 欄位傳給合併格式化
+                    print("[reversal] Gemini 快評已生成", flush=True)
+                else:
+                    print(f"[reversal] Gemini 無回應/失敗: {_rev_ai}", flush=True)
+            except Exception as _re:
+                print(f"[reversal] Gemini exception: {_re}", flush=True)
+
         try:
             if crash_data or reversal_alerts or weak_open_alerts:
                 _combined_parts = notifier.fmt_combined_intraday_super(

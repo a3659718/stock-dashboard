@@ -1852,8 +1852,8 @@ def fmt_combined_intraday_alerts(
 
         lines.append("")
 
-    # === Gemini 分析 — 只在 crash 觸發時放, 放在最後 ===
-    if has_crash and crash_ai_text:
+    # === Gemini 分析 — 有 AI 文字就放 (crash 或 反轉/開盤即弱強 皆可), 放在最後 ===
+    if crash_ai_text:
         lines.append("<b>🤖 Gemini 動作建議</b>")
         lines.append(_md_to_tg_html(crash_ai_text))
         lines.append("")

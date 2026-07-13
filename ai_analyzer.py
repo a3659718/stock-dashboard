@@ -664,6 +664,62 @@ def analyze_systemic_crash(crash_data: Dict, model: str = DEFAULT_MODEL) -> Tupl
         return False, f"Gemini 呼叫失敗: {e}"
 
 
+def analyze_reversal_alerts(reversal_alerts, weak_open_alerts=None,
+                            model: str = DEFAULT_MODEL) -> Tuple[bool, str]:
+    """盤中反轉 / 開盤即弱強 的 Gemini 快評 (給合併推播用, crash 沒觸發時補上 AI)."""
+    api_key = get_gemini_key()
+    if not api_key:
+        return False, "尚未設定 GEMINI_API_KEY"
+    try:
+        import google.generativeai as genai
+    except ImportError:
+        return False, "google-generativeai 未安裝"
+
+    revs = reversal_alerts or []
+    wos = weak_open_alerts or []
+    if not revs and not wos:
+        return False, "no alerts"
+
+    _lines = []
+    for r in revs:
+        _nm = r.get("name", ""); _sy = r.get("symbol", ""); _t = r.get("type", "")
+        if _t == "drawdown":
+            _dd = r.get("drawdown_pct", 0) or 0
+            _vp = r.get("pct_vs_prior")
+            _lines.append(f"{_nm}({_sy}) 從高點回吐 {_dd:+.2f}%"
+                          + (f", 今日 {_vp:+.2f}% vs昨收" if _vp is not None else ""))
+        elif _t == "rebound":
+            _lines.append(f"{_nm}({_sy}) 從低點反彈 {r.get('rebound_pct', 0) or 0:+.2f}%")
+        elif _t == "recover":
+            _lines.append(f"{_nm}({_sy}) 從跌轉漲 (回升 {r.get('recovery_pp', 0) or 0:+.2f}pp)")
+    for w in wos:
+        _nm = w.get("name", ""); _sy = w.get("symbol", ""); _t = w.get("type", "")
+        _lines.append(f"{_nm}({_sy}) 開盤即{'弱' if _t == 'weak' else '強'} "
+                      f"{w.get('pct_vs_open', 0) or 0:+.2f}% vs開盤")
+    _block = "\n".join(_lines) if _lines else "(無)"
+
+    prompt = (
+        "你是台股 / 美股盤中策略師。以下是盤中指數的反轉 / 開盤即弱強訊號:\n"
+        f"{_block}\n\n"
+        "用繁體中文精簡回覆 (全文 ≤ 200 字, 不要列數據, 只給結論):\n"
+        "## 🩺 盤勢\n盤面轉弱 / 轉強 / 震盪? (1-2 句)\n"
+        "## 🎯 動作\n持倉該加碼 / 減碼 / 觀望? (1 句, 可行動)\n"
+        "## ⚠️ 注意\n一個關鍵位或風險 (1 句)"
+    )
+    try:
+        genai.configure(api_key=api_key)
+        m = genai.GenerativeModel(model)
+        resp = m.generate_content(
+            prompt,
+            generation_config={"temperature": 0.3, "max_output_tokens": 700},
+            safety_settings=SAFETY_SETTINGS,
+        )
+        text = (getattr(resp, "text", None) or "").strip()
+        return (bool(text), text or "Gemini 無回應")
+    except Exception as e:
+        return False, f"Gemini 呼叫失敗: {e}"
+
+
 def analyze_chart_image(image_bytes: bytes, extra_note: str = "",
                           fg: dict | None = None, market_news: list | None = None,
                           model: str = DEFAULT_MODEL):
