@@ -320,6 +320,15 @@ def load_monitor_state() -> Dict:
             return loaded
         except Exception:
             pass
+    # 走到這裡 = GSheet 沒設定/失敗, 且本地檔不存在 (GitHub Actions 每次全新容器必然如此)。
+    # 這代表「所有去重 / 冷卻 / 每日上限」的記憶都會歸零 → 同一則新聞每個 tick 重複推。
+    # 以前這裡靜默回空, 完全看不出來 → 大聲警告。
+    print(
+        "[watchlist_store] ⚠️ monitor_state 載入失敗 (GSheet 未設定/失敗, 本地檔不存在) → "
+        "回空 state。後果: 去重/冷卻/每日上限全部失效, 會重複推播。"
+        "請確認 GCP_SERVICE_ACCOUNT_JSON / GOOGLE_SHEETS_ID 這兩個 secret 有設且有傳進 workflow env。",
+        flush=True,
+    )
     default = {"watchlist_alerts": {}, "index_alerts": {}, "crypto_alerts": {}}
     if _BATCH_MODE:
         _BATCH_CACHE = copy.deepcopy(default)
