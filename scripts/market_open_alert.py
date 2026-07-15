@@ -528,7 +528,11 @@ def main() -> int:
                 ok_pm, info_pm = notifier.send_message(
                     pm_msg, disable_preview=True, disable_notification=False
                 )
-                print(f"[pre_market] {slot} sent ok={ok_pm}", flush=True)
+                print(f"[pre_market] {slot} sent ok={ok_pm} info={info_pm}", flush=True)
+            else:
+                # 之前這裡靜默不送、連原因都不印 → 「完全沒收到」卻查不到為什麼。
+                print(f"[pre_market] {slot} 訊息為空 → 不送。可能原因: 台股休市判定 / "
+                      f"美股+日韓資料全抓不到", flush=True)
         except Exception as _e:
             import traceback
             print(f"[pre_market] failed: {_e}", flush=True)

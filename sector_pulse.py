@@ -78,9 +78,16 @@ def _fetch_intraday_metrics_cached(stock_ids_tuple: tuple, market_map_tuple: tup
     market_map = dict(market_map_tuple)
     rows: List[Dict] = []
     for sid in stock_ids_tuple:
-        suffix = ".TWO" if market_map.get(sid) == "tpex" else ".TW"
-        df = ds.fetch_yf_history(f"{sid}{suffix}", period="1mo", interval="1d")
-        if df.empty or len(df) < 2:
+        _t = market_map.get(sid)
+        # 分類未知 (FinMind 額度爆 402 / 失效 → market_map 空) 時「兩個後綴都試」,
+        # 不要只抓 .TW → 上櫃股會靜默抓不到, 整個題材分析縮水。
+        _suffixes = [".TWO"] if _t == "tpex" else ([".TW"] if _t else [".TW", ".TWO"])
+        df = None
+        for _sfx in _suffixes:
+            df = ds.fetch_yf_history(f"{sid}{_sfx}", period="1mo", interval="1d")
+            if df is not None and not df.empty and len(df) >= 2:
+                break
+        if df is None or df.empty or len(df) < 2:
             continue
         try:
             close = df["Close"].astype(float)
@@ -210,18 +217,31 @@ def compute_hot_themes() -> dict:
        - leaders: dict[題材 -> DataFrame (該題材 Top 5 強勢股)]
     FinMind 失敗時 graceful return 空 dict, 不 raise.
     """
+    # FinMind 只用來取「上市/上櫃分類 + 股名」; 價格本來就是 yfinance 抓的。
+    # 修正: 以前 FinMind 失敗 (常見 402 額度爆) 就整個 return 空 → 台股題材/開盤分析全白,
+    #       明明 yfinance 拿得到價。改成 graceful degrade: 沒清單就照樣用 yfinance 直抓
+    #       (兩個後綴都試), 只是少了股名/分類。
+    info = None
     try:
         info = ds.get_taiwan_stock_info()
     except Exception as e:
-        print(f"[sector_pulse] FinMind get_taiwan_stock_info failed: {e}", flush=True)
-        return {"themes": pd.DataFrame(), "leaders": {}}
-    if info is None or info.empty:
-        return {"themes": pd.DataFrame(), "leaders": {}}
-    market_map = info.set_index("stock_id")["type"].to_dict()
-    name_map = info.set_index("stock_id")["stock_name"].to_dict() if "stock_name" in info.columns else {}
+        print(f"[sector_pulse] get_taiwan_stock_info 失敗 ({e}) → 改用 yfinance 直抓題材股", flush=True)
+    if info is not None and not info.empty:
+        market_map = info.set_index("stock_id")["type"].to_dict()
+        name_map = (info.set_index("stock_id")["stock_name"].to_dict()
+                    if "stock_name" in info.columns else {})
+    else:
+        print("[sector_pulse] 台股清單空 (FinMind 額度爆/失效?) → 題材分析改用 yfinance 直抓 (無股名)",
+              flush=True)
+        market_map = {}
+        name_map = {}
 
     # 集合所有題材股，去重後一次抓 quote
-    all_ids = sorted({sid for ids in TW_THEMES.values() for sid in ids if sid in market_map})
+    # 注意: market_map 空時「不可」用 `sid in market_map` 過濾, 否則會濾掉全部 → 空結果。
+    if market_map:
+        all_ids = sorted({sid for ids in TW_THEMES.values() for sid in ids if sid in market_map})
+    else:
+        all_ids = sorted({sid for ids in TW_THEMES.values() for sid in ids})
     quotes = fetch_intraday_metrics(all_ids, market_map)
     if quotes.empty:
         return {"themes": pd.DataFrame(), "leaders": {}}
