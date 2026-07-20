@@ -320,8 +320,12 @@ def check_notifier_fmts() -> list:
                     continue
                 args.append(_arg(p.name))
             res = fn(*args)
-            if res is not None and not isinstance(res, (str, dict)):
-                problems.append((f"notifier.{fname}", 0, f"回傳型別非 str/dict: {type(res)}"))
+            # list 是合法回傳: fmt_combined_intraday_super 這類「多封拆分」formatter
+            # 刻意回 list[str] (每元素 1 封 TG), caller 用迴圈 send。
+            if res is not None and not isinstance(res, (str, dict, list)):
+                problems.append((f"notifier.{fname}", 0, f"回傳型別非 str/dict/list: {type(res)}"))
+            elif isinstance(res, list) and any(not isinstance(x, str) for x in res):
+                problems.append((f"notifier.{fname}", 0, "回傳 list 但元素非 str (caller 會送出壞訊息)"))
         except Exception as e:
             problems.append((f"notifier.{fname}", 0, f"空輸入丟例外: {type(e).__name__}: {e}"))
     return problems

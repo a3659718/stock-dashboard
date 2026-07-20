@@ -161,3 +161,21 @@ def mark_alerts_sent(alerts: List[Dict]) -> None:
         watchlist_store.save_monitor_state(state)
     except Exception as e:
         print(f"[chip_anomaly] mark_sent failed: {e}", flush=True)
+
+
+def unmark_alerts_sent(alerts: List[Dict]) -> None:
+    """回滾 mark_alerts_sent — 送出失敗 / 被 daily cap 擋下時呼叫,
+    把剛 claim 的 (symbol:type) 移除, 讓下個 tick 能重試 (否則會被靜默吞掉永不送出)."""
+    if not alerts:
+        return
+    try:
+        state = watchlist_store.load_monitor_state()
+        ca = state.get("chip_anomaly_alert") or {}
+        a_set = set(ca.get("alerted") or [])
+        for a in alerts:
+            a_set.discard(f"{a.get('symbol','')}:{a.get('type','')}")
+        ca["alerted"] = sorted(a_set)
+        state["chip_anomaly_alert"] = ca
+        watchlist_store.save_monitor_state(state)
+    except Exception as e:
+        print(f"[chip_anomaly] unmark_sent failed: {e}", flush=True)

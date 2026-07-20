@@ -507,10 +507,17 @@ def main() -> int:
             import tw_post_market_summary as _pms
             pms_msg = _pms.build_post_market_msg()
             if pms_msg:
-                ok_pms, info_pms = notifier.send_message(
-                    pms_msg, disable_preview=True, disable_notification=False
-                )
-                print(f"[tw_post_market] sent ok={ok_pms}", flush=True)
+                # 內容豐富 → 超過 TG 4096 就拆多封送 (以前直接截斷, Gemini 隔日策略整段被砍)
+                _pms_parts = notifier._split_tg_msg(pms_msg)
+                for _i, _pp in enumerate(_pms_parts, 1):
+                    ok_pms, info_pms = notifier.send_message(
+                        _pp, disable_preview=True,
+                        disable_notification=(_i > 1),  # 只有第一封響鈴, 後續靜音
+                    )
+                    print(f"[tw_post_market] part {_i}/{len(_pms_parts)} sent ok={ok_pms} "
+                          f"info={info_pms}", flush=True)
+            else:
+                print("[tw_post_market] 訊息為空 → 不送 (台股休市? 或資料全空)", flush=True)
         except Exception as _e:
             import traceback
             print(f"[tw_post_market] failed: {_e}", flush=True)
@@ -1077,7 +1084,7 @@ def main() -> int:
         try:
             import index_alerts as _ia_pre
             import datetime as _dt
-            now_utc = _dt.datetime.now(dt.timezone.utc)
+            now_utc = _dt.datetime.now(_dt.timezone.utc)
             cur_hour = now_utc.hour
             in_any_session = any(
                 _ia_pre._is_market_in_session(c) for c in ["TW", "JP", "KR", "US"]
@@ -1465,7 +1472,18 @@ def main() -> int:
                         except Exception:
                             pass
                     else:
-                        print(f"[vol_breakout] send fail: {info_vb}", flush=True)
+                        # 送失敗 / 被 daily cap 擋 → 回滾 claim, 讓下個 tick 重試 (否則永不送出)
+                        print(f"[vol_breakout] send fail: {info_vb} → 回滾 claim", flush=True)
+                        try:
+                            _vb.unmark_alerts_sent(vb_alerts)
+                        except Exception as _ue:
+                            print(f"[vol_breakout] unmark failed: {_ue}", flush=True)
+                else:
+                    # fmt 回空 → 回滾 claim, 避免靜默吞掉這批 alert
+                    try:
+                        _vb.unmark_alerts_sent(vb_alerts)
+                    except Exception:
+                        pass
         except Exception as _e:
             import traceback
             print(f"[vol_breakout] failed (non-fatal): {_e}", flush=True)
@@ -1505,7 +1523,18 @@ def main() -> int:
                         except Exception:
                             pass
                     else:
-                        print(f"[chip_anomaly] send fail: {info_ca}", flush=True)
+                        # 送失敗 / 被 daily cap 擋 → 回滾 claim, 讓下個 tick 重試 (否則永不送出)
+                        print(f"[chip_anomaly] send fail: {info_ca} → 回滾 claim", flush=True)
+                        try:
+                            _ca.unmark_alerts_sent(ca_alerts)
+                        except Exception as _ue:
+                            print(f"[chip_anomaly] unmark failed: {_ue}", flush=True)
+                else:
+                    # fmt 回空 → 回滾 claim, 避免靜默吞掉這批 alert
+                    try:
+                        _ca.unmark_alerts_sent(ca_alerts)
+                    except Exception:
+                        pass
         except Exception as _e:
             import traceback
             print(f"[chip_anomaly] failed (non-fatal): {_e}", flush=True)
