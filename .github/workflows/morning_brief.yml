@@ -1,0 +1,46 @@
+name: Morning Brief (8AM TPE)
+
+# 與 market_open_alert 共用併發群組: 兩者都寫 monitor_state, 序列化避免併發競態.
+# cancel-in-progress: false → 排隊不取消推播.
+concurrency:
+  group: stock-dashboard-state
+  cancel-in-progress: false
+
+on:
+  schedule:
+    # 平日台北早上 8:00 = UTC 00:00 (Mon-Fri only)
+    # 週末停 — 省 ~12 min/月, 且週末美股休市內容稀
+    - cron: '0 0 * * 1-5'
+  workflow_dispatch:  # 允許手動觸發
+
+jobs:
+  morning_brief:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run morning brief
+        env:
+          FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          # monitor_state 跨 run 保存 (去重/冷卻/上限) — 缺這兩個所有去重都會失效
+          GCP_SERVICE_ACCOUNT_JSON: ${{ secrets.GCP_SERVICE_ACCOUNT_JSON }}
+          GOOGLE_SHEETS_ID: ${{ secrets.GOOGLE_SHEETS_ID }}
+        run: |
+          python scripts/morning_brief.py

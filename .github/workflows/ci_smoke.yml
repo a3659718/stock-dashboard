@@ -1,0 +1,45 @@
+name: CI Smoke
+
+# 每次 push / PR 自動跑的回歸防線:
+#   - compileall: 全專案語法檢查 (抓 SyntaxError / 縮排錯)
+#   - smoke --static: import 符號 / 排程覆蓋 / 重複貼上 (零相依, 秒級)
+#   - full smoke: 裝相依後跑模組匯入 + notifier fmt_* 空輸入
+# 不需要任何 secret (純靜態/本地驗證), 失敗就擋 merge.
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  static:
+    name: 靜態檢查 (快, 零相依)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: py_compile 全專案 (語法/縮排)
+        run: python -m compileall -q . scripts
+      - name: smoke test (靜態三層)
+        run: python scripts/smoke_test_full.py --static
+
+  full:
+    name: 完整 smoke (裝相依)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: requirements.txt
+      - name: 安裝相依
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: 完整 smoke (匯入 + fmt_* 空輸入)
+        run: python scripts/smoke_test_full.py
