@@ -1,11 +1,23 @@
 name: Market Open Alert
 
+# 併發序列化: 防 cron drift 造成兩個 run 同時改 monitor_state (去重/每日上限/push_history).
+# 與 morning_brief 共用同一群組 (兩者都寫 monitor_state). cancel-in-progress: false →
+# 後到的 run 排隊等前一個跑完, 不會中途取消推播; job 有 timeout 不會卡死.
+concurrency:
+  group: stock-dashboard-state
+  cancel-in-progress: false
+
 on:
   schedule:
+    # === 台股盤前 (TPE 08:15 + 08:30) 已移到專屬的 pre_market.yml ===
+    # 原因: 00:15/00:30 UTC 熱門時段 cron drift 會把盤前誤判成 830/monitor → 沒推。
+    #       pre_market.yml 用 github.event.schedule 判 slot, drift-proof。這裡不再放這兩條 cron,
+    #       避免雙重觸發。(market_open_alert.py 仍保留 pre_market_815/830 handler 供手動觸發。)
     # === 台股 (UTC, 無 DST) ===
     - cron: '30 1 * * 1-5'    # 09:30 (開盤+30min) = 01:30 UTC
     - cron: '0 3 * * 1-5'     # 11:00 (中盤更新)   = 03:00 UTC
     - cron: '0 7 * * 1-5'     # 15:00 (盤後+1.5h)  = 07:00 UTC
+    - cron: '0 8 * * 1-5'     # 16:00 TPE 台股盤後總結 = 08:00 UTC
     # === 美股 EDT (3 月第 2 週日 ~ 11 月第 1 週日, UTC-4) ===
     - cron: '0 14 * * 1-5'    # 10:00 EDT = 14:00 UTC
     - cron: '30 15 * * 1-5'   # 11:30 EDT = 15:30 UTC
@@ -16,12 +28,55 @@ on:
     - cron: '0 23 * * 1-5'    # 18:00 EST = 23:00 UTC
     # === 假日重大消息 (22:30 台北 / 14:30 UTC) ===
     - cron: '30 14 * * *'     # 22:30 台北 every day (TW 開盤日會 silent skip)
-    # === 盤中監控 (自選股 / 大盤點數 / 加密貨幣) - 每 15/45 分 (避開其他 cron) ===
-    - cron: '15,45 * * * *'   # 每點 15 分 / 45 分 (24x7)
+    # === 加密貨幣每日 Top 5 (12:00 台北 / 04:00 UTC) — B: 用戶關閉 ===
+    # - cron: '0 4 * * *'       # 12:00 台北 every day (crypto 24/7)
+    # === 盤中監控 — 只在 session 內每小時一次 (節省 GH Actions 額度) ===
+    # 為什麼: 之前 `15 * * * *` 24x7 = 720 runs/month, 但 session 外 monitor 必空跑.
+    #         切成「只在 session 內」: Asia 7/day + US 10/day = 17 runs/weekday vs 舊 24/day.
+    #         月用量從 720 降到 373, ~48% 節省 (~520 min/month). 對 2000 min/month
+    #         免費額度安全邊際從 27% 提升到 53%.
+    # 副作用: session 邊界外移時 (極端 DST / 不規則交易日) 可能漏抓最初/最末 30 min.
+    #         但開盤 / 收盤本來就有專屬 cron (tw_open / us_close 等), 主要警報不受影響.
+    # === 亞股 session 監控: 台股盤中 (TPE 09:15~13:15) 每 30 分一次, 涵蓋 JP/KR/TW ===
+    # 用戶要求降低日韓/台股延遲: 從 3 runs/天 (間隔 ~2hr) 加密到每 30 分 (9 runs/天)。
+    # 延遲從最壞 ~2hr 壓到 ~30-60min。避開 tw_open(01:30)/tw_mid(03:00) slot 用 :15/:45。
+    # 量: 9 runs/weekday × 21 ≈ 189 runs/月 ≈ 378 min (vs 舊 63 runs) — 仍在 2000 min/月 內。
+    # 避開 :00/:15/:30/:45 壅塞點 (GitHub 高負載時會延遲甚至丟棄排程) → 改用 :08/:38
+    - cron: '8,38 1,2,3,4 * * 1-5'   # 09:08,09:38,...,12:38 (UTC 01:08~04:38)
+    - cron: '8 5 * * 1-5'            # 13:08 (UTC 05:08, 近收盤)
+    # === 美股 session 監控: UTC 13:15 ~ 22:15 (=ET 09:15 ~ 18:15 EDT / 08:15 ~ 17:15 EST) ===
+    # 美股 monitor 每小時 (UTC 14-20 = ET 10-16 涵蓋整個盤中) — 補上原本 3 runs 的盤中空窗
+    # 7 runs/weekday × 21 = 147 runs/月, ~294 min — 仍在 GH Actions 2000 min/月 free quota 內
+    # 改善: SOX/那指 急跌的延遲從「2-3 hr」降到「~30-60 min」(因 monitor 每 hr 跑一次)
+    - cron: '15 14,15,16,17,18,19,20 * * 1-5'
+    # M3: 抓「開盤即弱/強」, 美股開盤 +15min. DST 兩季各用一個 cron:
+    #   EDT 季: UTC 13:45 = 09:45 ET ✓ (EST 季此時是盤前 08:45, _is_market_in_session 會 skip)
+    #   EST 季: UTC 14:45 = 09:45 ET ✓ (EDT 季此時是 10:45 ET, 仍 in-session, monitor 多跑一次無害)
+    # 月新增 ~44 runs ≈ 88 min, 仍在 2000 min/月 free quota 內
+    - cron: '45 13 * * 1-5'
+    - cron: '45 14 * * 1-5'
+    # === 週末 crypto 檢查 — B: 用戶關閉 ===
+    # - cron: '15 15 * * 0,6'   # 2 runs/週末 × 4 週 = ~16/month
+    # === 系統健康日報 (UTC 06:30 = TPE 14:30, 台股剛收盤) ===
+    - cron: '30 6 * * *'      # 1 run/day × 30 = 30/month
+    # IPO 週五推播 — 不加新 cron, 附加到週五 us_open 流程 (14:00 UTC = 22:00 TPE)
+    # === 美股盤前 BUY Top 5 (UTC 12:30 = TPE 20:30, 美股 NYSE 開盤前 ~1.5-2hr) ===
+    - cron: '30 12 * * 1-5'   # 5 runs/週 × 4 = 20/month
+    # === 美股新興突破掃描 (平日 19:00 TPE = 11:00 UTC, 池外廣掃 Top10) ===
+    - cron: '0 11 * * 1-5'    # 19:00 TPE = 11:00 UTC
+    # === 早安推播 (UTC 23:30 = TPE 07:30, 隔日起床看昨夜重點) ===
+    # 包含: 美股大盤收盤 + 昨夜推播統計 + 今日台股盤前預告
+    # cron 6 days/week (週日 UTC 23:30 = 週一 07:30 TPE, OK)
+    - cron: '30 23 * * 0-5'   # ~26 runs/月
+    # === 週末重點摘要 (Sat/Sun UTC 14:00 = TPE 22:00, 比 holiday_news 早 30 min, dedup 起來)
+    - cron: '0 14 * * 0,6'    # 2 runs/週末 × 4 = 8/month
+    # === 週末新聞掃描 (8-K / 重大訊息週末也會發) — 每 4hr 跑一次
+    # Sat/Sun UTC 02, 06, 10, 14, 18, 22 (=TPE 10, 14, 18, 22, 02, 06) — 6 runs/day × 2 days × 4 wk ≈ 48/月
+    - cron: '0 2,6,10,18,22 * * 0,6'  # 5 runs/週末日 (14:00 已被 weekend_recap 用)
   workflow_dispatch:
     inputs:
       market:
-        description: '市場 (tw_open / tw_mid / tw_close / us_open / us_mid / us_close / holiday_news / monitor)'
+        description: '市場 (tw_open / tw_mid / tw_close / us_open / us_mid / us_close / holiday_news / crypto_picks / monitor / heartbeat / weekend_recap)'
         required: true
         default: 'tw_open'
         type: choice
@@ -29,11 +84,20 @@ on:
           - tw_open
           - tw_mid
           - tw_close
+          - tw_post_market
+          - pre_market_815
+          - pre_market_830
           - us_open
           - us_mid
           - us_close
           - holiday_news
+          - crypto_picks
           - monitor
+          - heartbeat
+          - weekend_recap
+          - ipo_weekly
+          - us_buy_picks
+          - morning_recap
 
 jobs:
   alert:
@@ -46,6 +110,8 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+          cache: 'pip'                       # 自動 cache pip 套件 (每次省 60-90 秒)
+          cache-dependency-path: requirements.txt
 
       - name: Install dependencies
         run: |
@@ -85,62 +151,210 @@ jobs:
               echo "US is in EST (no DST)"
             fi
 
+            # === Drift-proof 路由: 用 github.event.schedule (觸發的 cron 字串) 直接對應 market ===
+            # 為什麼: cron 字串不受 GitHub Actions 延遲影響, 且每條唯一 → 不會像「實際分鐘分桶」
+            #         在 drift 邊界把推播誤判成別的 mode (這是 23:00/23:30、14:00/14:30、01:15/01:30
+            #         那些碰撞與盤前/各推播「沒跳」的根因)。命中就 routed 並結束; 理論上一定命中,
+            #         沒命中才 fall through 到下方舊的分鐘分桶當安全網 (零回歸風險)。
+            SCHED="${{ github.event.schedule }}"
+            case "$SCHED" in
+              "30 1 * * 1-5")  echo "market=tw_open" >> $GITHUB_OUTPUT;        echo "sched→tw_open";        exit 0 ;;
+              "0 3 * * 1-5")   echo "market=tw_mid" >> $GITHUB_OUTPUT;         echo "sched→tw_mid";         exit 0 ;;
+              "0 7 * * 1-5")   echo "market=tw_close" >> $GITHUB_OUTPUT;       echo "sched→tw_close";       exit 0 ;;
+              "0 8 * * 1-5")   echo "market=tw_post_market" >> $GITHUB_OUTPUT; echo "sched→tw_post_market"; exit 0 ;;
+              "30 12 * * 1-5") echo "market=us_buy_picks" >> $GITHUB_OUTPUT;   echo "sched→us_buy_picks";   exit 0 ;;
+              "0 11 * * 1-5")  echo "market=us_emerging" >> $GITHUB_OUTPUT;    echo "sched→us_emerging";    exit 0 ;;
+              "30 14 * * *")   echo "market=holiday_news" >> $GITHUB_OUTPUT;    echo "sched→holiday_news";   exit 0 ;;
+              "30 6 * * *")    echo "market=heartbeat" >> $GITHUB_OUTPUT;       echo "sched→heartbeat";      exit 0 ;;
+              "30 23 * * 0-5") echo "market=morning_recap" >> $GITHUB_OUTPUT;  echo "sched→morning_recap";  exit 0 ;;
+              "0 14 * * 0,6")  echo "market=weekend_recap" >> $GITHUB_OUTPUT;   echo "sched→weekend_recap";  exit 0 ;;
+              "0 2,6,10,18,22 * * 0,6")          echo "market=monitor" >> $GITHUB_OUTPUT; echo "sched→monitor(weekend)"; exit 0 ;;
+              "8,38 1,2,3,4 * * 1-5")            echo "market=monitor" >> $GITHUB_OUTPUT; echo "sched→monitor(asia)";       exit 0 ;;
+              "8 5 * * 1-5")                     echo "market=monitor" >> $GITHUB_OUTPUT; echo "sched→monitor(asia-close)"; exit 0 ;;
+              "15 14,15,16,17,18,19,20 * * 1-5") echo "market=monitor" >> $GITHUB_OUTPUT; echo "sched→monitor(us)";      exit 0 ;;
+              "45 13 * * 1-5"|"45 14 * * 1-5")   echo "market=monitor" >> $GITHUB_OUTPUT; echo "sched→monitor(M3)";      exit 0 ;;
+              "0 14 * * 1-5")  [ "$US_DST" = "1" ] && echo "market=us_open"  >> $GITHUB_OUTPUT || echo "market=monitor" >> $GITHUB_OUTPUT; echo "sched 0 14 (DST=$US_DST)"; exit 0 ;;
+              "30 15 * * 1-5") [ "$US_DST" = "1" ] && echo "market=us_mid"   >> $GITHUB_OUTPUT || echo "market=monitor" >> $GITHUB_OUTPUT; echo "sched 30 15 (DST=$US_DST)"; exit 0 ;;
+              "0 22 * * 1-5")  [ "$US_DST" = "1" ] && echo "market=us_close" >> $GITHUB_OUTPUT || echo "market=monitor" >> $GITHUB_OUTPUT; echo "sched 0 22 (DST=$US_DST)"; exit 0 ;;
+              "0 15 * * 1-5")  [ "$US_DST" = "0" ] && echo "market=us_open"  >> $GITHUB_OUTPUT || echo "market=monitor" >> $GITHUB_OUTPUT; echo "sched 0 15 (DST=$US_DST)"; exit 0 ;;
+              "30 16 * * 1-5") [ "$US_DST" = "0" ] && echo "market=us_mid"   >> $GITHUB_OUTPUT || echo "market=monitor" >> $GITHUB_OUTPUT; echo "sched 30 16 (DST=$US_DST)"; exit 0 ;;
+              "0 23 * * 1-5")  [ "$US_DST" = "0" ] && echo "market=us_close" >> $GITHUB_OUTPUT || echo "market=monitor" >> $GITHUB_OUTPUT; echo "sched 0 23 (DST=$US_DST)"; exit 0 ;;
+            esac
+
+            # === C1 fix: drift-tolerant dispatch ===
+            # 規則:
+            #   1. exact 匹配 HH_MM 走精確路線 (cron 準時)
+            #   2. 否則 fallback by hour:
+            #      - HH:00 specific cron → 接受 drift 0-14 (cron 通常 forward drift)
+            #      - HH:30 specific cron → 接受 drift 25-44 (留 15-24 給 monitor cron drift)
+            #      - 沒 monitor cron 的 hour (07, 23) → 整 hour 都算 specific
+            #      - 其他 minute 範圍 → monitor
+            # 為什麼: 舊版用 `*_15|*_45 → monitor` 通配 + 寬鬆 hour fallback `[ MIN < 45 ]`,
+            #         導致 monitor cron drift (e.g., 01:24) 誤被 routed 成 tw_open, 一天推 2 封.
             case "${HOUR}_${MIN}" in
-              # === 台股 (固定 UTC) ===
+              # === 精確匹配 (cron 準時 fire) ===
+              00_15) echo "market=pre_market_815" >> $GITHUB_OUTPUT ;;
+              00_30) echo "market=pre_market_830" >> $GITHUB_OUTPUT ;;
               01_30) echo "market=tw_open"      >> $GITHUB_OUTPUT ;;
               03_00) echo "market=tw_mid"       >> $GITHUB_OUTPUT ;;
               07_00) echo "market=tw_close"     >> $GITHUB_OUTPUT ;;
-              # === 假日新聞 (固定) ===
+              08_00) echo "market=tw_post_market" >> $GITHUB_OUTPUT ;;
               14_30) echo "market=holiday_news" >> $GITHUB_OUTPUT ;;
-              # === 美股 EDT (US_DST=1 才生效, EST 期間 silent → monitor) ===
-              14_00) [ "$US_DST" = "1" ] && echo "market=us_open"  >> $GITHUB_OUTPUT || echo "market=monitor" >> $GITHUB_OUTPUT ;;
+              04_00) echo "market=crypto_picks" >> $GITHUB_OUTPUT ;;
+              06_30) echo "market=heartbeat"    >> $GITHUB_OUTPUT ;;
+              12_30) echo "market=us_buy_picks" >> $GITHUB_OUTPUT ;;
+              23_30) echo "market=morning_recap" >> $GITHUB_OUTPUT ;;
+              # 14:00 UTC: 週末 (DOW=0/6) → weekend_recap; 平日 EDT → us_open; EST 平日 → monitor
+              14_00)
+                DOW=$(date -u +%w)
+                if [ "$DOW" = "0" ] || [ "$DOW" = "6" ]; then
+                  echo "market=weekend_recap" >> $GITHUB_OUTPUT
+                elif [ "$US_DST" = "1" ]; then
+                  echo "market=us_open" >> $GITHUB_OUTPUT
+                else
+                  echo "market=monitor" >> $GITHUB_OUTPUT
+                fi
+                ;;
               15_30) [ "$US_DST" = "1" ] && echo "market=us_mid"   >> $GITHUB_OUTPUT || echo "market=monitor" >> $GITHUB_OUTPUT ;;
               22_00) [ "$US_DST" = "1" ] && echo "market=us_close" >> $GITHUB_OUTPUT || echo "market=monitor" >> $GITHUB_OUTPUT ;;
-              # === 美股 EST (US_DST=0 才生效, EDT 期間 silent → monitor) ===
               15_00) [ "$US_DST" = "0" ] && echo "market=us_open"  >> $GITHUB_OUTPUT || echo "market=monitor" >> $GITHUB_OUTPUT ;;
               16_30) [ "$US_DST" = "0" ] && echo "market=us_mid"   >> $GITHUB_OUTPUT || echo "market=monitor" >> $GITHUB_OUTPUT ;;
               23_00) [ "$US_DST" = "0" ] && echo "market=us_close" >> $GITHUB_OUTPUT || echo "market=monitor" >> $GITHUB_OUTPUT ;;
-              # === 監控 cron (15/45 分) ===
-              *_15|*_45) echo "market=monitor" >> $GITHUB_OUTPUT ;;
               *)
-                # 其他時段 (cron 延遲) fallback by hour
+                # cron drift fallback by hour (注意: 不再有 *_15|*_45 通配 short-circuit)
+                # === 週末守衛: Sat/Sun 除 14:00 (weekend_recap) 外, 全部 → monitor (掃新聞/8-K) ===
+                DOW=$(date -u +%w)
+                IS_WEEKEND_NON_RECAP="no"
+                if [ "$DOW" = "0" ] || [ "$DOW" = "6" ]; then
+                  IS_WEEKEND_NON_RECAP="yes"
+                  # 例外 1: 14:00 weekend_recap
+                  if [ "${HOUR}_${MIN}" = "14_00" ]; then IS_WEEKEND_NON_RECAP="no"; fi
+                  # 例外 2: 週日 UTC 23:25+ drift = 週一 07:30 TPE morning_recap
+                  #   (cron 30 23 * * 0-5 含週日 UTC; on-time 由 exact 23_30 接, drift 走這裡)
+                  if [ "$DOW" = "0" ] && [ "$HOUR" = "23" ] && [ "$MIN" -ge 25 ]; then IS_WEEKEND_NON_RECAP="no"; fi
+                fi
+                if [ "$IS_WEEKEND_NON_RECAP" = "yes" ]; then
+                  echo "market=monitor" >> $GITHUB_OUTPUT
+                  echo "Weekend mode: forced monitor (Sat/Sun, scan 8-K/news)"
+                else
                 case "$HOUR" in
-                  01) [ "$MIN" -lt 45 ] && echo "market=tw_open"  >> $GITHUB_OUTPUT || echo "market=monitor" >> $GITHUB_OUTPUT ;;
-                  03) [ "$MIN" -lt 15 ] && echo "market=tw_mid"   >> $GITHUB_OUTPUT || echo "market=monitor" >> $GITHUB_OUTPUT ;;
-                  07) [ "$MIN" -lt 15 ] && echo "market=tw_close" >> $GITHUB_OUTPUT || echo "market=monitor" >> $GITHUB_OUTPUT ;;
-                  14)
-                    if [ "$MIN" -lt 15 ] && [ "$US_DST" = "1" ]; then
-                      echo "market=us_open" >> $GITHUB_OUTPUT
-                    elif [ "$MIN" -ge 15 ] && [ "$MIN" -lt 45 ]; then
-                      echo "market=holiday_news" >> $GITHUB_OUTPUT
+                  00)  # pre_market_815 (00:15) + pre_market_830 (00:30) - 加 drift tolerance
+                    # Bug fix: 原本沒這分支, cron drift > 5min 會 fall through 變 monitor → pre_market 永遠收不到
+                    if [ "$MIN" -lt 25 ]; then
+                      echo "market=pre_market_815" >> $GITHUB_OUTPUT
+                    else
+                      echo "market=pre_market_830" >> $GITHUB_OUTPUT
+                    fi
+                    ;;
+                  01)  # tw_open 01:30 + monitor 01:15
+                    if [ "$MIN" -ge 25 ] && [ "$MIN" -lt 45 ]; then
+                      echo "market=tw_open" >> $GITHUB_OUTPUT
                     else
                       echo "market=monitor" >> $GITHUB_OUTPUT
                     fi
                     ;;
-                  15)
-                    if [ "$MIN" -lt 10 ] && [ "$US_DST" = "0" ]; then
+                  03)  # tw_mid 03:00 + monitor 03:15
+                    if [ "$MIN" -lt 15 ]; then
+                      echo "market=tw_mid" >> $GITHUB_OUTPUT
+                    else
+                      echo "market=monitor" >> $GITHUB_OUTPUT
+                    fi
+                    ;;
+                  04)  # crypto_picks 04:00 + monitor 04:15
+                    if [ "$MIN" -lt 15 ]; then
+                      echo "market=crypto_picks" >> $GITHUB_OUTPUT
+                    else
+                      echo "market=monitor" >> $GITHUB_OUTPUT
+                    fi
+                    ;;
+                  06)  # heartbeat 06:30 + monitor 06:15
+                    if [ "$MIN" -ge 25 ] && [ "$MIN" -lt 45 ]; then
+                      echo "market=heartbeat" >> $GITHUB_OUTPUT
+                    else
+                      echo "market=monitor" >> $GITHUB_OUTPUT
+                    fi
+                    ;;
+                  07)  # tw_close 07:00, hour 7 不在 monitor cron 0-6 內 → 整 hour 都 tw_close
+                    echo "market=tw_close" >> $GITHUB_OUTPUT
+                    ;;
+                  08)  # tw_post_market 08:00 — 整 hour 都 tw_post_market (沒 monitor cron 衝突)
+                    # Bug fix: 原本沒這分支, cron drift > 5min 會 fall through 變 monitor
+                    echo "market=tw_post_market" >> $GITHUB_OUTPUT
+                    ;;
+                  14)  # us_open EDT 14:00 + holiday_news 14:30 + monitor 14:15 + M3 weak_open 14:45 (EST 季)
+                    if [ "$MIN" -lt 15 ] && [ "$US_DST" = "1" ]; then
                       echo "market=us_open" >> $GITHUB_OUTPUT
-                    elif [ "$MIN" -ge 30 ] && [ "$MIN" -lt 45 ] && [ "$US_DST" = "1" ]; then
+                    elif [ "$MIN" -ge 25 ] && [ "$MIN" -lt 45 ]; then
+                      echo "market=holiday_news" >> $GITHUB_OUTPUT
+                    else
+                      # 14:45 (M3 EST 季開盤+15min) 及其他 → monitor
+                      echo "market=monitor" >> $GITHUB_OUTPUT
+                    fi
+                    ;;
+                  15)  # us_open EST 15:00 + us_mid EDT 15:30 + monitor 15:15 (週末 crypto 也走 monitor)
+                    if [ "$MIN" -lt 15 ] && [ "$US_DST" = "0" ]; then
+                      echo "market=us_open" >> $GITHUB_OUTPUT
+                    elif [ "$MIN" -ge 25 ] && [ "$MIN" -lt 45 ] && [ "$US_DST" = "1" ]; then
                       echo "market=us_mid" >> $GITHUB_OUTPUT
                     else
                       echo "market=monitor" >> $GITHUB_OUTPUT
                     fi
                     ;;
-                  16) [ "$MIN" -ge 30 ] && [ "$US_DST" = "0" ] && echo "market=us_mid"   >> $GITHUB_OUTPUT || echo "market=monitor" >> $GITHUB_OUTPUT ;;
-                  22) [ "$MIN" -lt 15 ] && [ "$US_DST" = "1" ] && echo "market=us_close" >> $GITHUB_OUTPUT || echo "market=monitor" >> $GITHUB_OUTPUT ;;
-                  23) [ "$MIN" -lt 15 ] && [ "$US_DST" = "0" ] && echo "market=us_close" >> $GITHUB_OUTPUT || echo "market=monitor" >> $GITHUB_OUTPUT ;;
+                  16)  # us_mid EST 16:30 + monitor 16:15
+                    if [ "$MIN" -ge 25 ] && [ "$MIN" -lt 45 ] && [ "$US_DST" = "0" ]; then
+                      echo "market=us_mid" >> $GITHUB_OUTPUT
+                    else
+                      echo "market=monitor" >> $GITHUB_OUTPUT
+                    fi
+                    ;;
+                  12)  # us_buy_picks 12:30 — 整 hour 都 us_buy_picks (沒 monitor cron 衝突)
+                    echo "market=us_buy_picks" >> $GITHUB_OUTPUT
+                    ;;
+                  13)  # M3: monitor 13:45 (美股開盤 +15min, 抓開盤即弱/強)
+                    echo "market=monitor" >> $GITHUB_OUTPUT
+                    ;;
+                  22)  # us_close EDT 22:00 + monitor 22:15
+                    if [ "$MIN" -lt 15 ] && [ "$US_DST" = "1" ]; then
+                      echo "market=us_close" >> $GITHUB_OUTPUT
+                    else
+                      echo "market=monitor" >> $GITHUB_OUTPUT
+                    fi
+                    ;;
+                  23)  # hour 23 同時有 us_close EST 23:00 + morning_recap 23:30 兩個 cron
+                    # Bug fix: 原本整個 hour 23 都判 us_close/monitor, 害 23:30 morning_recap
+                    #          一旦 cron drift (例 23:33) 沒命中 exact 23_30 → 被吃成 us_close,
+                    #          morning_recap 漏推且 us_close 重複推. 改用 minute 分流保護 :30 slot.
+                    if [ "$MIN" -ge 25 ]; then
+                      echo "market=morning_recap" >> $GITHUB_OUTPUT  # 23:25+ = 晨報 slot (DST 無關)
+                    elif [ "$US_DST" = "0" ]; then
+                      echo "market=us_close" >> $GITHUB_OUTPUT       # EST 季 23:00 美股收盤
+                    else
+                      echo "market=monitor" >> $GITHUB_OUTPUT         # EDT 季 (us_close 在 22:00) → 空跑 monitor
+                    fi
+                    ;;
                   *)  echo "market=monitor" >> $GITHUB_OUTPUT ;;
                 esac
+                fi  # IS_WEEKEND_NON_RECAP guard
                 ;;
             esac
-            echo "Cron trigger: UTC hour=$HOUR min=$MIN US_DST=$US_DST"
+            echo "Cron trigger: UTC hour=$HOUR min=$MIN US_DST=$US_DST DOW=$(date -u +%w)"
           fi
 
-      - name: Run market open analysis
+      - name: Run alert
         env:
           FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
+          FINNHUB_TOKEN: ${{ secrets.FINNHUB_TOKEN }}
+          # 關鍵: monitor_state (去重 / 冷卻 / 每日上限) 靠 Google Sheets 跨 run 保存。
+          # 沒有這兩個 → _get_sheet() 回 None → Actions 每次全新容器又無本地檔 →
+          # state 每次歸零 → 所有去重失效 → 同一則新聞每個 tick 重複推。
+          GCP_SERVICE_ACCOUNT_JSON: ${{ secrets.GCP_SERVICE_ACCOUNT_JSON }}
+          GOOGLE_SHEETS_ID: ${{ secrets.GOOGLE_SHEETS_ID }}
+          # 自訂美股候選池 — 沒傳的話推播端會忽略你的自訂、只用內建預設清單 (與網頁不一致)
+          US_WATCHLIST: ${{ secrets.US_WATCHLIST }}
+          US_EMERGING_UNIVERSE: ${{ secrets.US_EMERGING_UNIVERSE }}
         run: |
-          python scripts/market_open_alert.py ${{ steps.market.outputs.market }}
+          python scripts/market_open_alert.py "${{ steps.market.outputs.market }}"
