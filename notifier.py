@@ -123,6 +123,44 @@ def _truncate_tg_msg(out: str, max_chars: int = 4000) -> str:
     return _balance_html_tags(truncated)
 
 
+def _u16_len(s: str) -> int:
+    """Telegram 長度 = UTF-16 code units."""
+    return len(s.encode("utf-16-le")) // 2 if s else 0
+
+
+def _split_tg_msg(out: str, max_chars: int = 3900) -> List[str]:
+    """把過長訊息以「行」為單位切成多封 — 取代直接 truncate 丟掉內容。
+
+    用於內容豐富的長推播 (如台股盤後總結): 以前超過 4096 就把尾巴砍掉,
+    導致最後面的 Gemini 隔日策略等整段消失。改成切多封, 一個字都不掉。
+    每段各自補平 HTML tag, 避免 parse_mode=HTML 回 400; 多段時加 (i/n) 頁碼。
+    """
+    if not out:
+        return []
+    if _u16_len(out) <= max_chars:
+        return [out]
+    parts: List[str] = []
+    cur: List[str] = []
+    cur_len = 0
+    for line in out.split("\n"):
+        # 單行就超長 (極少見) → 該行自己截斷, 避免無限撐大
+        if _u16_len(line) > max_chars:
+            line = _truncate_tg_msg(line, max_chars - 20)
+        l = _u16_len(line) + 1
+        if cur and cur_len + l > max_chars:
+            parts.append("\n".join(cur))
+            cur, cur_len = [], 0
+        cur.append(line)
+        cur_len += l
+    if cur:
+        parts.append("\n".join(cur))
+    n = len(parts)
+    return [
+        _balance_html_tags(p) + (f"\n<i>({i}/{n})</i>" if n > 1 else "")
+        for i, p in enumerate(parts, 1)
+    ]
+
+
 def _balance_html_tags(s: str) -> str:
     """補齊未閉合的常見 Telegram HTML tag (b/i/code/pre/u/s).
     Telegram HTML 模式要求 tag 成對, 截斷後可能少了 </b> 之類 → 補在尾端.
@@ -3234,11 +3272,71 @@ def fmt_growth_picks(picks_df) -> str:
 
 
 
+def fmt_speculation_picks(picks: list) -> str:
+    """🎲 投機股精選 (週三 us_open 推 1 次/週).
+
+    picks 來自 speculation_screener.compute_speculation_picks(), 每項含:
+      symbol / theme / score / label / emoji / reasons(list) /
+      current / today_pct / range_pct_6mo / atr_pct_30d /
+      rs_3mo_diff_vs_spy / vol_ratio_recent / ma_200d_dist_pct
+    """
+    if not picks:
+        return ""
+    lines = [
+        "<b>🎲 投機股精選 (週報)</b>",
+        "<i>盤整收縮 + 相對強勢 + 量能吸籌 — 高風險高報酬, 務必控制部位</i>",
+        "",
+    ]
+    for i, p in enumerate(picks, 1):
+        if not isinstance(p, dict):
+            continue
+        sym = p.get("symbol", "—")
+        theme = p.get("theme", "")
+        emoji = p.get("emoji", "🟡")
+        score = p.get("score", "—")
+        label = p.get("label", "")
+        lines.append(
+            f"{i}. {emoji} <b><code>{_esc(sym)}</code></b>"
+            + (f"  [{_esc(theme)}]" if theme else "")
+        )
+        lines.append(f"   {_esc(label)} · 評分 {_esc(score)}/100")
+        # 價格 / 今日漲跌 — 一律 2 位小數
+        cur = p.get("current")
+        tpct = p.get("today_pct")
+        if cur is not None:
+            sign = "+" if isinstance(tpct, (int, float)) and tpct > 0 else ""
+            lines.append(
+                f"   現價 {_fmt_num(cur)}"
+                + (f" ({sign}{_fmt_num(tpct, suffix='%')})" if tpct is not None else "")
+            )
+        # 關鍵指標一行帶過
+        metrics = []
+        if p.get("range_pct_6mo") is not None:
+            metrics.append(f"6M區間 {_fmt_num(p.get('range_pct_6mo'), suffix='%')}")
+        if p.get("rs_3mo_diff_vs_spy") is not None:
+            metrics.append(f"RS {_fmt_num(p.get('rs_3mo_diff_vs_spy'))}pp")
+        if p.get("vol_ratio_recent") is not None:
+            metrics.append(f"量比 {_fmt_num(p.get('vol_ratio_recent'))}x")
+        if metrics:
+            lines.append("   " + " · ".join(_esc(m) for m in metrics))
+        # 只印前 3 條理由, 避免整封爆量
+        for r in (p.get("reasons") or [])[:3]:
+            lines.append(f"   {_esc(r)}")
+        lines.append("")
+    lines.append("<i>⚠️ 投機部位建議單檔不超過總資金 2-3%, 並設停損。</i>")
+    return "\n".join(lines)
+
+
 def fmt_watchlist_alert(stock_id: str, name: str, hits: list, latest_date: str,
                          row: dict | None = None) -> str:
     """watchlist 命中通知，含詳細數值。"""
     head = f"<b>🔔 自選股警報 — {_esc(stock_id)} {_esc(name)}</b>\n資料日期: {_esc(latest_date)}"
     body = [head]
+    # 命中的訊號 — 原本 hits 參數收了卻從沒印出來, 等於警報不告訴你「為什麼」。
+    if hits:
+        body.append("")
+        for h in hits:
+            body.append(f"  • {_esc(h)}")
     if row:
         if row.get("現價") is not None:
             arrow = ""
@@ -3258,9 +3356,9 @@ def fmt_watchlist_alert(stock_id: str, name: str, hits: list, latest_date: str,
             inst_parts.append(f"5日累計 {sign}{_fmt_num(v)}張")
             inst_parts.append(f"投本比 {_fmt_num(row.get('投本比%'), suffix='%')}")
         if inst_parts:
-            lines.append("  💰 " + " · ".join(inst_parts))
-        lines.append("")
-    return "\n".join(lines)
+            body.append("  💰 " + " · ".join(inst_parts))
+        body.append("")
+    return "\n".join(body)
 
 
 def fmt_us_fg_alert(fg: dict, threshold_low: int = 25, threshold_high: int = 75) -> Optional[str]:
