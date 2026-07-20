@@ -9,7 +9,7 @@ name: Pre-Market Alert (TPE 08:15 / 08:30)
 
 concurrency:
   # 用「專屬」群組 (不跟 market_open_alert 共用) — 盤前是時效性推播, 不該被忙碌的主 workflow
-  # 排隊或取消。它只有兩條 cron (00:15/00:30) 互不重疊, 自我序列化即可; 與別人的 state 併發
+  # 排隊或取消。它只有兩條 cron (00:17/00:33) 互不重疊, 自我序列化即可; 與別人的 state 併發
   # 寫入由 watchlist_store 的 merge-on-save 緩解 (盤前一天一次, 撞點機率極低)。
   group: pre-market
   cancel-in-progress: false
