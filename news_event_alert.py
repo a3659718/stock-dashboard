@@ -405,6 +405,10 @@ def unmark_alerts_sent(alerts: List[Dict]) -> None:
                 if _k:
                     alerted.discard(_k)
         ne_state["alerted"] = sorted(alerted)
+        # bug fix: mark_alerts_sent 在送出前就把 last_batch_at 設成 now (啟動 30 分冷卻),
+        # 但回滾時原本沒清掉 → 這批沒送成功、下一個 tick 卻被冷卻擋住空掃, 急報最多延遲 30 分。
+        # 回滾即清掉冷卻錨點, 讓下個 tick 能立刻重掃補送。
+        ne_state["last_batch_at"] = None
         state["news_event_alert"] = ne_state
         watchlist_store.save_monitor_state(state)
     except Exception as e:

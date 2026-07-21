@@ -218,6 +218,27 @@ def mark_alerts_sent(alerts: List[Dict]) -> None:
         print(f"[analyst_insider] mark fail: {e}", flush=True)
 
 
+def unmark_alerts_sent(alerts: List[Dict]) -> None:
+    """回滾 mark_alerts_sent — 送出失敗 / 被 daily cap 擋時呼叫, 把剛 claim 的 key 移除,
+    讓下次能重試 (否則這封一天只嘗試一次, 失敗就整天收不到)."""
+    if not alerts:
+        return
+    try:
+        state = watchlist_store.load_monitor_state()
+        ai = state.get("analyst_insider_alert") or {}
+        a_set = set(ai.get("alerted") or [])
+        for a in alerts:
+            if a.get("type") == "analyst_upgrade":
+                a_set.discard(f"analyst:{a.get('symbol','')}")
+            elif a.get("type") == "insider_buy":
+                a_set.discard(f"insider:{a.get('symbol','')}:{a.get('filing_date','')}")
+        ai["alerted"] = sorted(a_set)
+        state["analyst_insider_alert"] = ai
+        watchlist_store.save_monitor_state(state)
+    except Exception as _ue:
+        print(f"[analyst_insider] unmark fail: {_ue}", flush=True)
+
+
 def analyze_with_gemini(alerts: List[Dict]) -> str:
     """對 alert 用 Gemini 分析「為什麼 + 該不該跟」. 失敗回空字串."""
     if not alerts:

@@ -740,7 +740,8 @@ def _fmt_asia_markets_block(asia: dict) -> list:
             except (TypeError, ValueError):
                 dp = 0.0
             arrow = "+" if dp > 0 else ("-" if dp < 0 else "▪")
-            out.append(f"  {country} {name}: {last:,.0f}  {arrow}{dp:+.2f}%")
+            # bug fix: arrow 已帶 +/- 號, dp 再用 :+.2f 會變成 "++1.23%"/"--0.85%" → 改用 abs
+            out.append(f"  {country} {name}: {last:,.0f}  {arrow}{abs(dp):.2f}%")
 
     if events:
         out.append("")
@@ -1404,7 +1405,7 @@ def fmt_us_close_analysis(data: dict) -> str:
             r1_raw = r.get("1d_%")
             r1 = r1_raw if isinstance(r1_raw, (int, float)) else 0
             sign = "+" if r1 >= 0 else ""
-            lines.append(f"  {_esc(sym)} {_esc(name)}: {sign}{r1}%")
+            lines.append(f"  {_esc(sym)} {_esc(name)}: {sign}{r1:.2f}%")  # bug fix: 原本印未四捨五入的長浮點
 
     # 5 支台股潛力股 + 目標價
     lines.extend(_fmt_potential_picks_block(data.get("potential_picks") or []))
@@ -3457,6 +3458,7 @@ def fmt_chip_anomaly_alerts(alerts: list) -> str:
         lines.append("<b>🔴 法人連賣 (警示)</b>")
         for a in sells:
             sym = _esc(a.get("symbol", ""))
+            sd = a.get("streak_days", 0)  # bug fix: sd 原本只在 buys 迴圈定義, sell-only 日會 NameError 炸整封
             pct = float(a.get("pct_of_outstanding", 0) or 0)
             cum = a.get("cum_5d_lots", 0)
             lines.append(

@@ -409,6 +409,18 @@ def main() -> int:
                         category="analyst_insider",
                     )
                     print(f"[analyst_insider] sent ok={ok_a}", flush=True)
+                    if not ok_a:
+                        # 送失敗 / 被 daily cap 擋 → 回滾 claim, 讓下次能重試 (否則整天收不到)
+                        try:
+                            _ai.unmark_alerts_sent(ai_alerts)
+                        except Exception:
+                            pass
+                else:
+                    # fmt 回空 → 回滾 claim, 避免靜默吞掉
+                    try:
+                        _ai.unmark_alerts_sent(ai_alerts)
+                    except Exception:
+                        pass
         except Exception as _e:
             import traceback
             print(f"[analyst_insider] failed: {_e}", flush=True)
@@ -495,6 +507,17 @@ def main() -> int:
                     ok_bc, info_bc = notifier.send_message(
                         bc_msg, disable_preview=True, disable_notification=False
                     )
+                    if not ok_bc:
+                        # 送失敗 / 被 daily cap 擋 → 回滾 claim, 讓下個 tick 重試
+                        try:
+                            _bc.unmark_alerts_sent(bc_alerts)
+                        except Exception:
+                            pass
+                else:
+                    try:
+                        _bc.unmark_alerts_sent(bc_alerts)
+                    except Exception:
+                        pass
         except Exception as _e:
             import traceback
             print(f"[breakout] failed (non-fatal): {_e}", flush=True)

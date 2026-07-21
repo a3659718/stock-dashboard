@@ -185,3 +185,21 @@ def mark_alerts_sent(alerts: List[Dict]) -> None:
         watchlist_store.save_monitor_state(state)
     except Exception as e:
         print(f"[breakout] mark_sent fail: {e}", flush=True)
+
+
+def unmark_alerts_sent(alerts: List[Dict]) -> None:
+    """回滾 mark_alerts_sent — 送出失敗 / 被 daily cap 擋時呼叫, 把剛 claim 的 symbol 移除,
+    讓下個 tick 能重試 (否則被靜默吞掉永不送出)."""
+    if not alerts:
+        return
+    try:
+        state = watchlist_store.load_monitor_state()
+        bo = state.get("breakout_consolidation_alert") or {}
+        a_set = set(bo.get("alerted") or [])
+        for a in alerts:
+            a_set.discard(a.get("symbol", ""))
+        bo["alerted"] = sorted(a_set)
+        state["breakout_consolidation_alert"] = bo
+        watchlist_store.save_monitor_state(state)
+    except Exception as _ue:
+        print(f"[breakout] unmark_sent fail: {_ue}", flush=True)
