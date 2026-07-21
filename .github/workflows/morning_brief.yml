@@ -8,9 +8,10 @@ concurrency:
 
 on:
   schedule:
-    # 平日台北早上 8:00 = UTC 00:00 (Mon-Fri only)
+    # 平日台北早上 8:07 = UTC 00:07 (Mon-Fri only)
+    # 改到冷門分鐘 :07 — 避開 UTC 00:00 (全球最壅塞的整點+午夜) 造成的延遲
     # 週末停 — 省 ~12 min/月, 且週末美股休市內容稀
-    - cron: '0 0 * * 1-5'
+    - cron: '7 0 * * 1-5'
   workflow_dispatch:  # 允許手動觸發
 
 jobs:

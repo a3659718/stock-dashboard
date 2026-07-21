@@ -9,7 +9,7 @@ name: Pre-Market Alert (TPE 08:15 / 08:30)
 
 concurrency:
   # 用「專屬」群組 (不跟 market_open_alert 共用) — 盤前是時效性推播, 不該被忙碌的主 workflow
-  # 排隊或取消。它只有兩條 cron (00:17/00:33) 互不重疊, 自我序列化即可; 與別人的 state 併發
+  # 排隊或取消。它只有兩條 cron (00:15/00:30) 互不重疊, 自我序列化即可; 與別人的 state 併發
   # 寫入由 watchlist_store 的 merge-on-save 緩解 (盤前一天一次, 撞點機率極低)。
   group: pre-market
   cancel-in-progress: false
@@ -19,8 +19,8 @@ on:
     # 重要: 避開 :00/:15/:30/:45 這些全球最壅塞的 cron 分鐘點。
     # GitHub 官方明示排程 workflow 在高負載時「可能延遲、甚至不執行」, 而 00:15/00:30 UTC
     # 正是最糟的時段 → 盤前推播長期「完全沒收到」的主因。改到冷門分鐘大幅提高執行率。
-    - cron: '17 0 * * 1-5'   # 08:17 TPE = 00:17 UTC (日韓開盤 +17min)
-    - cron: '33 0 * * 1-5'   # 08:33 TPE = 00:33 UTC (日韓 +33min, 含 TL;DR + 外資籌碼)
+    - cron: '22 0 * * 1-5'   # 08:22 TPE = 00:22 UTC (日韓開盤 +22min; 冷門分鐘, 遠離 :15/:30 壅塞點)
+    - cron: '37 0 * * 1-5'   # 08:37 TPE = 00:37 UTC (日韓 +37min, 含 TL;DR + 外資籌碼; 台指 08:45 / 台股 09:00 開盤前)
   workflow_dispatch:
     inputs:
       slot:
@@ -51,12 +51,12 @@ jobs:
           if [ -n "${{ github.event.inputs.slot }}" ]; then
             echo "market=${{ github.event.inputs.slot }}" >> $GITHUB_OUTPUT
             echo "manual: ${{ github.event.inputs.slot }}"
-          elif [ "${{ github.event.schedule }}" = "33 0 * * 1-5" ]; then
+          elif [ "${{ github.event.schedule }}" = "37 0 * * 1-5" ]; then
             echo "market=pre_market_830" >> $GITHUB_OUTPUT
-            echo "cron 33 0 → pre_market_830"
+            echo "cron 37 0 → pre_market_830"
           else
             echo "market=pre_market_815" >> $GITHUB_OUTPUT
-            echo "cron 17 0 (或其他) → pre_market_815"
+            echo "cron 22 0 (或其他) → pre_market_815"
           fi
 
       - name: Run pre-market alert

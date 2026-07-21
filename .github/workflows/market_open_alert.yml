@@ -17,7 +17,7 @@ on:
     - cron: '30 1 * * 1-5'    # 09:30 (開盤+30min) = 01:30 UTC
     - cron: '0 3 * * 1-5'     # 11:00 (中盤更新)   = 03:00 UTC
     - cron: '0 7 * * 1-5'     # 15:00 (盤後+1.5h)  = 07:00 UTC
-    - cron: '0 8 * * 1-5'     # 16:00 TPE 台股盤後總結 = 08:00 UTC
+    - cron: '7 8 * * 1-5'     # 16:07 TPE 台股盤後總結 = 08:07 UTC (冷門分鐘, 避開 :00 整點壅塞)
     # === 美股 EDT (3 月第 2 週日 ~ 11 月第 1 週日, UTC-4) ===
     - cron: '0 14 * * 1-5'    # 10:00 EDT = 14:00 UTC
     - cron: '30 15 * * 1-5'   # 11:30 EDT = 15:30 UTC
@@ -161,7 +161,7 @@ jobs:
               "30 1 * * 1-5")  echo "market=tw_open" >> $GITHUB_OUTPUT;        echo "sched→tw_open";        exit 0 ;;
               "0 3 * * 1-5")   echo "market=tw_mid" >> $GITHUB_OUTPUT;         echo "sched→tw_mid";         exit 0 ;;
               "0 7 * * 1-5")   echo "market=tw_close" >> $GITHUB_OUTPUT;       echo "sched→tw_close";       exit 0 ;;
-              "0 8 * * 1-5")   echo "market=tw_post_market" >> $GITHUB_OUTPUT; echo "sched→tw_post_market"; exit 0 ;;
+              "7 8 * * 1-5")   echo "market=tw_post_market" >> $GITHUB_OUTPUT; echo "sched→tw_post_market"; exit 0 ;;
               "30 12 * * 1-5") echo "market=us_buy_picks" >> $GITHUB_OUTPUT;   echo "sched→us_buy_picks";   exit 0 ;;
               "0 11 * * 1-5")  echo "market=us_emerging" >> $GITHUB_OUTPUT;    echo "sched→us_emerging";    exit 0 ;;
               "30 14 * * *")   echo "market=holiday_news" >> $GITHUB_OUTPUT;    echo "sched→holiday_news";   exit 0 ;;
