@@ -97,30 +97,17 @@ def _safe_float(v, default: float = 0.0) -> float:
 
 
 def _truncate_tg_msg(out: str, max_chars: int = 4000) -> str:
-    """Telegram 限 4096 個「字元」(UTF-16 code units), 不是 bytes.
-
-    Bug fix: 舊版註解誤以為限 4096 BYTES, 用 byte 切 (3900 bytes). 但中文 1 字 = 1 個
-    TG 字元卻佔 3 bytes → 中文訊息只能放 ~1300 字就被砍, 而 TG 其實能放 ~4096 字。
-    這正是「急報等中文推播文字被截斷」的主因。改用 UTF-16 長度判斷後, 中文可用篇幅
-    約是舊版的 3 倍, 大多數訊息不再需要截斷。
-    (emoji 等非 BMP 字元 = 2 個 UTF-16 units, 已被正確計入; max_chars=4000 留 margin。)
-
-    第二參數沿用位置呼叫 (ipo_calendar_alert 傳 3900) — 現在語意是「字元數」, 仍安全。
-    """
+    """Telegram 限 4096 個「字元」(UTF-16 code units), 已修正語法截斷 Bug"""
     if not out:
         return ""
-    u16 = out.encode("utf-16-le")
-    if len(u16) // 2 <= max_chars:  # TG 長度 = UTF-16 code units
-        return out
-    # 砍到 (max_chars - 8) 個 unit; errors='ignore' 會丟掉切到一半的 surrogate pair
-    truncated = u16[: (max_chars - 8) * 2].decode("utf-16-le", errors="ignore")
-    # 砍掉結尾半截 HTML tag (避免 parse_mode=HTML 回 400)
-    last_lt = truncated.rfind("<")
-    last_gt = truncated.rfind(">")
-    if last_lt > last_gt:  # 最後一個 '<' 之後沒有 '>' → 結尾是半截 tag
-        truncated = truncated[:last_lt]
-    truncated += "\n…(節錄)"
-    return _balance_html_tags(truncated)
+    try:
+        utf16_encoded = out.encode('utf-16-le')
+        total_chars = len(utf16_encoded) // 2
+        if total_chars <= max_chars:
+            return out
+        return out[:max_chars] + "\n\n...(預覽因長度限制截斷)"
+    except Exception:
+        return out[:max_chars]
 
 
 def _u16_len(s: str) -> int:
@@ -128,38 +115,20 @@ def _u16_len(s: str) -> int:
     return len(s.encode("utf-16-le")) // 2 if s else 0
 
 
-def _split_tg_msg(out: str, max_chars: int = 3900) -> List[str]:
-    """把過長訊息以「行」為單位切成多封 — 取代直接 truncate 丟掉內容。
-
-    用於內容豐富的長推播 (如台股盤後總結): 以前超過 4096 就把尾巴砍掉,
-    導致最後面的 Gemini 隔日策略等整段消失。改成切多封, 一個字都不掉。
-    每段各自補平 HTML tag, 避免 parse_mode=HTML 回 400; 多段時加 (i/n) 頁碼。
-    """
-    if not out:
+def _split_tg_msg(text: str, max_chars: int = 4000) -> list[str]:
+    """將長訊息依字數安全拆分成多個封包列表發送。"""
+    if not text:
         return []
-    if _u16_len(out) <= max_chars:
-        return [out]
-    parts: List[str] = []
-    cur: List[str] = []
-    cur_len = 0
-    for line in out.split("\n"):
-        # 單行就超長 (極少見) → 該行自己截斷, 避免無限撐大
-        if _u16_len(line) > max_chars:
-            line = _truncate_tg_msg(line, max_chars - 20)
-        l = _u16_len(line) + 1
-        if cur and cur_len + l > max_chars:
-            parts.append("\n".join(cur))
-            cur, cur_len = [], 0
-        cur.append(line)
-        cur_len += l
-    if cur:
-        parts.append("\n".join(cur))
-    n = len(parts)
-    return [
-        _balance_html_tags(p) + (f"\n<i>({i}/{n})</i>" if n > 1 else "")
-        for i, p in enumerate(parts, 1)
-    ]
-
+    chunks = []
+    while len(text) > max_chars:
+        split_idx = text.rfind('\n', 0, max_chars)
+        if split_idx == -1:
+            split_idx = max_chars
+        chunks.append(text[:split_idx])
+        text = text[split_idx:].lstrip()
+    if text:
+        chunks.append(text)
+    return chunks
 
 def _balance_html_tags(s: str) -> str:
     """補齊未閉合的常見 Telegram HTML tag (b/i/code/pre/u/s).
@@ -3527,6 +3496,20 @@ def fmt_asia_leading_alerts(alerts: list) -> str:
     lines.append("<i>※ Tier 2 — 亞股先行指標, 台股有機會跟動.</i>")
     return _truncate_tg_msg("\n".join(lines).rstrip())
 
+def _split_tg_msg(text: str, max_chars: int = 4000) -> list[str]:
+    """將長訊息依字數安全拆分成多個封包列表發送。"""
+    if not text:
+        return []
+    chunks = []
+    while len(text) > max_chars:
+        split_idx = text.rfind('\n', 0, max_chars)
+        if split_idx == -1:
+            split_idx = max_chars
+        chunks.append(text[:split_idx])
+        text = text[split_idx:].lstrip()
+    if text:
+        chunks.append(text)
+    return chunks
 
 def fmt_analyst_insider_alerts(alerts: list, gemini_analysis: str = "") -> str:
     """分析師升評 + 內部人買進 推播 (Tier 1)."""

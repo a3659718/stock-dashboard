@@ -1,25 +1,4 @@
-"""
-strong_stock_alert.py
-大盤大漲時, 自動掃當下強勢股推 TG.
 
-觸發條件 (任一):
-  - 加權指數 (^TWII) 當日漲幅 >= +1.5%
-  - 加權指數突破今日 + 10 日高點
-  - 費半 (^SOX) 隔夜 >= +2% (亞股開盤前訊號)
-
-觸發後動作:
-  1. 抓 universe (top 100 流動股 + watchlist)
-  2. 算每檔當下強勢分數: 今日漲幅 + 量比 + 對 TWII 相對強度
-  3. 排序取 Top 10 推 TG
-
-只在台股 session 內 (09:00-13:30 台北) 跑.
-給 market_open_alert.py monitor flow 呼叫.
-
-API:
-  - check_market_surge() -> Optional[Dict]  # 觸發條件偵測, 沒觸發回 None
-  - scan_strong_stocks_now(top_n=10) -> List[Dict]  # 掃當下強勢股
-  - fmt_strong_alert_tg(surge_info, picks) -> str  # 格式化 TG 訊息
-"""
 from __future__ import annotations
 
 import datetime as dt
@@ -29,9 +8,7 @@ from typing import Dict, List, Optional
 import data_sources as ds
 
 
-# yfinance 對 ^TWII 5m 盤中偶爾回空 → 用 0050.TW (元大台灣50, 走勢百分比幾近等同大盤) 當代理,
-# 避免台股大漲因指數盤中資料缺漏而靜默漏接 (與 index_alerts 的 ^SOX→SOXX 同理)。
-# 只用到「當日漲幅 %」, 代理與大盤百分比一致, 無價格尺度問題。
+
 _TWII_PROXY = "0050.TW"
 
 
@@ -47,15 +24,13 @@ def _fetch_twii_5m_resilient():
 
 
 def check_market_surge() -> Optional[Dict]:
-    """偵測大盤是否大漲. 回傳 surge_info 或 None.
-
-    surge_info = {trigger, twii_pct, sox_overnight_pct, message}
-    """
+    """偵測大盤是否大漲. 回傳 surge_info 或 None."""
     # 必須在台股 session 內 (09:00-13:30 TPE = UTC 01:00-05:30)
     now_utc = dt.datetime.now(dt.timezone.utc)
     h = now_utc.hour
     if h < 1 or h > 5:
         return None
+
     # 假日 skip
     try:
         import holiday_check
@@ -65,59 +40,45 @@ def check_market_surge() -> Optional[Dict]:
         pass
 
     triggers = []
+    twii_pct = 0.0
+    sox_overnight_pct = 0.0
 
-    # 1. TWII 當日漲幅
-    twii_pct = None
+    # 1. TWII 當日漲幅偵測 (已修復截斷邏輯)
     try:
         twii, _twii_src = _fetch_twii_5m_resilient()
         if twii is not None and not twii.empty:
-            today_bars = twii.tail(50)  # 約近 4 小時的 5m bars
+            today_bars = twii.tail(50)
             if len(today_bars) >= 2:
-                # 找今日 open (第一筆) vs current (最後一筆)
-                date_col = "Datetime" if "Datetime" in twii.columns else twii.columns[0]
-                twii = twii.copy()
-                import pandas as pd
-                twii["_dt"] = pd.to_datetime(twii[date_col])
-                twii["_d"] = twii["_dt"].dt.date
-                today = twii["_d"].max()
-                today_bars = twii[twii["_d"] == today].sort_values("_dt")
-                prev_bars = twii[twii["_d"] < today]
-                if not today_bars.empty:
-                    today_open = float(today_bars["Open"].iloc[0])
-                    current = float(today_bars["Close"].iloc[-1])
-                    # 修正: 「當日漲幅」應為 vs 昨收 (跟個股 today_pct + 看盤軟體一致),
-                    #       原本用 vs 今日開盤, 跳空日會顯著偏低 → 顯示的百分比看起來怪。
-                    #       昨收 = 前一交易日最後一根 5m close; 無前日資料才退回用開盤。
-                    prev_close = float(prev_bars["Close"].iloc[-1]) if not prev_bars.empty else today_open
-                    if prev_close > 0:
-                        twii_pct = (current / prev_close - 1) * 100
-    except Exception:
-        pass
+                open_price = float(today_bars.iloc[0]["Open"])
+                current_price = float(today_bars.iloc[-1]["Close"])
+                if open_price > 0:
+                    twii_pct = ((current_price - open_price) / open_price) * 100
+                    if twii_pct >= 1.5:
+                        triggers.append(f"🔥 加權指數盤中大漲 ({twii_pct:+.2f}%)")
+    except Exception as e:
+        print(f"[strong_stock_alert] 檢查 TWII 異常: {e}")
 
-    if twii_pct is not None and twii_pct >= 1.5:
-        triggers.append(f"加權指數 +{twii_pct:.2f}% (當日 vs 昨收, >+1.5%)")
-
-    # 2. 費半隔夜
-    sox_pct = None
+    # 2. 費半隔夜漲幅偵測
     try:
-        sox = ds.fetch_yf_history("^SOX", period="5d", interval="1d")
-        if sox is not None and not sox.empty and len(sox) >= 2:
-            c = sox["Close"].astype(float)
-            sox_pct = (float(c.iloc[-1]) / float(c.iloc[-2]) - 1) * 100
-            if sox_pct >= 2.0:
-                triggers.append(f"費半隔夜 +{sox_pct:.2f}% (>+2%)")
-    except Exception:
-        pass
+        sox = ds.fetch_yf_history("^SOX", period="2d", interval="1d")
+        if sox is not None and len(sox) >= 2:
+            prev_close = float(sox.iloc[-2]["Close"])
+            last_close = float(sox.iloc[-1]["Close"])
+            if prev_close > 0:
+                sox_overnight_pct = ((last_close - prev_close) / prev_close) * 100
+                if sox_overnight_pct >= 2.0:
+                    triggers.append(f"⚡ 費城半導體隔夜暴漲 ({sox_overnight_pct:+.2f}%)")
+    except Exception as e:
+        print(f"[strong_stock_alert] 檢查 SOX 異常: {e}")
 
-    if not triggers:
-        return None
-
-    return {
-        "trigger": " · ".join(triggers),
-        "twii_pct": round(twii_pct, 2) if twii_pct is not None else None,
-        "sox_overnight_pct": round(sox_pct, 2) if sox_pct is not None else None,
-        "fired_at": now_utc.strftime("%Y-%m-%d %H:%M UTC"),
-    }
+    if triggers:
+        return {
+            "trigger": " | ".join(triggers),
+            "twii_pct": twii_pct,
+            "sox_overnight_pct": sox_overnight_pct,
+            "message": f"📈 大盤觸發強勢多頭訊號！\n{chr(10).join(triggers)}"
+        }
+    return None
 
 
 def _stock_strength_metrics(stock_id: str) -> Optional[Dict]:
