@@ -226,14 +226,21 @@ def get_tw_open_picks(top_themes_n: int = 3, picks_per_theme: int = 3) -> Dict:
     seen_sids: set = set()  # 跨題材去重
 
     info = ds.get_taiwan_stock_info()
-    name_map = info.set_index("stock_id")["stock_name"].to_dict() if "stock_name" in info.columns else {}
+    # 韌性: FinMind token 失效/額度爆 + 本地快取空時, info 會是「無欄位空 df」。
+    # 舊寫法直接 info.set_index("stock_id") → KeyError "None of ['stock_id'] are in the columns"
+    # → 整個台股盤前推播 fatal exit 1, 一則都不發。改成先驗證欄位存在, 缺就退成空 map,
+    # fetch_intraday_metrics 的 market_map 空時會自動 .TW/.TWO 兩種都試 (sector_pulse 已處理)。
+    _has_info = info is not None and not info.empty and "stock_id" in info.columns
+    name_map = (info.set_index("stock_id")["stock_name"].to_dict()
+                if _has_info and "stock_name" in info.columns else {})
+    market_map_full = (info.set_index("stock_id")["type"].to_dict()
+                       if _has_info and "type" in info.columns else {})
 
     for theme in top_themes:
         df = leaders_map.get(theme, pd.DataFrame())
         if df is None or df.empty:
             stock_ids = sector_pulse.TW_THEMES.get(theme, [])
-            market_map = info.set_index("stock_id")["type"].to_dict()
-            df = sector_pulse.fetch_intraday_metrics(stock_ids, market_map)
+            df = sector_pulse.fetch_intraday_metrics(stock_ids, market_map_full)
         if df is None or df.empty:
             picks.append({"theme": theme, "stocks": pd.DataFrame()})
             continue
@@ -453,6 +460,38 @@ def _gemini_close_reasoning(tw_themes: pd.DataFrame, jp_pct: float, kr_pct: floa
         return f"(Gemini 推理失敗: {e})"
 
 
+def _scalar(x) -> float:
+    """把可能是 Series/ndarray/np scalar 的東西安全轉成 float。
+    yfinance 偶爾回 MultiIndex 欄 → df['Close'].iloc[-1] 變 Series → 直接 float() 會炸
+    'cannot convert the series to <class float>'。這裡取最後一個元素再轉, 徹底防呆。"""
+    try:
+        if hasattr(x, "iloc"):        # pandas Series
+            x = x.iloc[-1]
+        elif hasattr(x, "item"):      # numpy scalar / 0-d array
+            try:
+                return float(x.item())
+            except Exception:
+                pass
+        return float(x)
+    except Exception:
+        return float("nan")
+
+
+def _index_day_pct(df) -> float:
+    """從日線 df 算「最後一日 vs 前一日」漲跌% — 全程防呆, 壞資料回 0.0 不炸。"""
+    try:
+        if df is None or df.empty or len(df) < 2:
+            return 0.0
+        c = df["Close"]
+        last = _scalar(c.iloc[-1])
+        prev = _scalar(c.iloc[-2])
+        if prev and prev == prev and last == last:   # 非 0 且非 NaN
+            return (last / prev - 1) * 100
+    except Exception as e:
+        print(f"[market_open_picks] _index_day_pct 失敗: {e}", flush=True)
+    return 0.0
+
+
 def get_tw_close_analysis() -> Dict:
     """台股盤後 15:00 分析 — 全日表現 + 日韓比對 + AI 推理結論."""
     # TW 各族群全日表現 (sector_pulse 用 yfinance, 收盤後就是當日完整漲跌)
@@ -462,14 +501,8 @@ def get_tw_close_analysis() -> Dict:
     # 日韓大盤
     jp_df = ds.fetch_yf_history("^N225", period="5d", interval="1d")
     kr_df = ds.fetch_yf_history("^KS11", period="5d", interval="1d")
-    jp_pct = 0.0
-    kr_pct = 0.0
-    if not jp_df.empty and len(jp_df) >= 2:
-        c = jp_df["Close"].astype(float)
-        jp_pct = (float(c.iloc[-1]) / float(c.iloc[-2]) - 1) * 100
-    if not kr_df.empty and len(kr_df) >= 2:
-        c = kr_df["Close"].astype(float)
-        kr_pct = (float(c.iloc[-1]) / float(c.iloc[-2]) - 1) * 100
+    jp_pct = _index_day_pct(jp_df)
+    kr_pct = _index_day_pct(kr_df)
 
     # 日韓對應產業表現
     jp_kr_sectors = _compute_jp_kr_sector_pcts()
@@ -484,11 +517,11 @@ def get_tw_close_analysis() -> Dict:
     # 加權指數收盤
     twii_df = ds.fetch_yf_history("^TWII", period="5d", interval="1d")
     twii_close = 0.0
-    twii_pct = 0.0
-    if not twii_df.empty and len(twii_df) >= 2:
-        c = twii_df["Close"].astype(float)
-        twii_close = float(c.iloc[-1])
-        twii_pct = (float(c.iloc[-1]) / float(c.iloc[-2]) - 1) * 100
+    twii_pct = _index_day_pct(twii_df)
+    if twii_df is not None and not twii_df.empty:
+        twii_close = _scalar(twii_df["Close"].iloc[-1])
+        if twii_close != twii_close:  # NaN 保護
+            twii_close = 0.0
 
     # 盤後新增: 外資出貨嫌疑 + 隔日上漲機率高 top 3 + 避開訊號
     foreign_dumping = []

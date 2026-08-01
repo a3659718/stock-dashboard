@@ -166,3 +166,21 @@ def mark_alerts_sent(alerts: List[Dict]) -> None:
         watchlist_store.save_monitor_state(state)
     except Exception as e:
         print(f"[asia_leading] mark_sent failed: {e}", flush=True)
+
+
+def unmark_alerts_sent(alerts: List[Dict]) -> None:
+    """回滾 mark_alerts_sent — 送出失敗時呼叫, 把剛 claim 的 (sym:direction) 移除,
+    讓下個 monitor tick 能重試 (否則日韓 leading 一天每方向只嘗試一次, 送失敗就整天漏掉)."""
+    if not alerts:
+        return
+    try:
+        state = watchlist_store.load_monitor_state()
+        al = state.get("asia_leading_alert") or {}
+        a_set = set(al.get("alerted") or [])
+        for a in alerts:
+            a_set.discard(f"{a.get('symbol','')}:{a.get('direction','')}")
+        al["alerted"] = sorted(a_set)
+        state["asia_leading_alert"] = al
+        watchlist_store.save_monitor_state(state)
+    except Exception as e:
+        print(f"[asia_leading] unmark_sent failed: {e}", flush=True)

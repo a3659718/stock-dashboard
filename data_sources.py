@@ -424,7 +424,26 @@ def fetch_yf_history(symbol: str, period: str = "6mo", interval: str = "1d",
                 result_df = pd.DataFrame()
                 break
             df = df.reset_index()
-            df.columns = [c if isinstance(c, str) else c[0] for c in df.columns]
+            # === 欄位攤平 — 防 float(Series) 崩潰的根因處理 ===
+            # yfinance 對單一 symbol 有時回 MultiIndex 欄 (Price, Ticker), 有時 group_by='ticker'
+            # 會把 Ticker 放前面 → 舊寫法 c[0] 會取到 ticker (如 '^N225') 而不是 'Close'。
+            # 攤平時挑「OHLCV 那一層」而非固定 c[0]; 攤平後再去重複欄, 確保 df['Close'] 是 1-D Series
+            # (若有重複 'Close' 欄, df['Close'] 會回 DataFrame → .iloc[-1] 變 Series → float() 崩)。
+            _ohlcv = {"open", "high", "low", "close", "adj close", "volume"}
+            def _flatten_col(c):
+                if isinstance(c, str):
+                    return c
+                # tuple/MultiIndex: 找出屬於 OHLCV 的那一層, 找不到就取第一個非空
+                for part in c:
+                    if isinstance(part, str) and part.strip().lower() in _ohlcv:
+                        return part
+                for part in c:
+                    if isinstance(part, str) and part.strip():
+                        return part
+                return str(c[0])
+            df.columns = [_flatten_col(c) for c in df.columns]
+            # 去重複欄 (保留第一個) — 保證 df['Close'] 等取到的是 Series 不是 DataFrame
+            df = df.loc[:, ~df.columns.duplicated()]
             result_df = df
             break
         except Exception as e:

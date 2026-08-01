@@ -126,6 +126,20 @@ def _flush_state(state: Dict) -> None:
         if isinstance(persisted, dict) and persisted:
             merged = dict(persisted)
             merged.update(state)  # 我們的 top-level key 覆蓋, 其餘 (別人寫的) 保留
+            # 併發安全 (slot_dedup): 這個 key 只會「新增 claim + prune 舊的」, 沒有語意刪除,
+            # 所以兩個 runner 的 claim 用 union 合併 (同 slot 取較新 ISO 時間) → 不會因 last-writer-wins
+            # 丟掉對方剛寫的 dedup claim (那會導致同一 slot 被重複推播)。其餘 key 維持 shallow merge。
+            try:
+                _pd_a = persisted.get("slot_dedup") or {}
+                _pd_b = state.get("slot_dedup") or {}
+                if isinstance(_pd_a, dict) and isinstance(_pd_b, dict) and (_pd_a or _pd_b):
+                    _u = dict(_pd_a)
+                    for _k, _v in _pd_b.items():
+                        if _k not in _u or str(_v) > str(_u[_k]):  # 同格式 ISO 字串比大小 = 比時間
+                            _u[_k] = _v
+                    merged["slot_dedup"] = _u
+            except Exception:
+                pass
             state = merged
     except Exception as _me:
         print(f"[watchlist_store] monitor_state merge skip (non-fatal): {_me}", flush=True)
