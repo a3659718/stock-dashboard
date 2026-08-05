@@ -1,4 +1,10 @@
 streamlit>=1.36.0,<2.0.0
+# 關鍵: Starlette 1.4.0 給 GZipResponder.__init__ 加了「必填」關鍵字參數 thread_minimum_size,
+# 但 Streamlit(含最新 1.61)的 gzip 子類別沒傳它 → 每個 HTTP request 在中介層就 500,
+# 網頁顯示「Oh no. Error running app」。程式碼本身沒問題, 純粹是相依版本不相容。
+# Streamlit 只寫 starlette<2,>=0.46, 沒卡上限 → Cloud 重新部署時抓到 1.4.0 就爆。
+# 釘在最後一個可用版本 1.3.x (1.3.1 為 thread_minimum_size 之前的最後一版)。
+starlette>=1.3.0,<1.4.0
 pandas>=2.2.3,<3.0.0
 numpy>=1.26.0,<3.0.0
 requests>=2.31.0,<3.0.0
