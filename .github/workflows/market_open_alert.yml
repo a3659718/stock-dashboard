@@ -102,6 +102,11 @@ on:
 jobs:
   alert:
     runs-on: ubuntu-latest
+    # 關鍵: 沒設 timeout 會用 GitHub 預設 6 小時。一旦某次 run 卡住 (FinMind/Gemini/網路 hang),
+    # 因為和 morning_brief 共用序列化群組 (stock-dashboard-state, cancel-in-progress: false),
+    # 後面每一封排程推播都會排隊等它, 最久被卡 6 小時 → 這是「時間對不上/不穩」的主因之一。
+    # 設 15 分鐘: 正常 run 幾分鐘內結束; 真的 hang 就 15 分被砍, 不再拖垮整個佇列。
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@v4
