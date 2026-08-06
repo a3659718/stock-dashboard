@@ -153,20 +153,34 @@ def get_taiwan_stock_info() -> pd.DataFrame:
     MED fix: 成功路徑走 @cache_data (快取 1hr); 失敗路徑「不」被快取,
     所以額度恢復後下次呼叫立即重試, 不會卡 1 小時空結果.
     """
+    # 關鍵韌性: 失敗時「絕不」回無欄位的空 df。
+    # 全 codebase 有 ~15 處直接 info.set_index("stock_id")["type"/"stock_name"],
+    # 若拿到無欄位空 df 會丟 KeyError "None of ['stock_id'] are in the columns" → 該推播
+    # fatal exit 1 (get_tw_open_picks / laggard_finder / index_alerts ... 全中招)。
+    # 統一在此保證：回傳的 df 一定含 stock_id / stock_name / type 三欄 (空也帶欄位),
+    # 這樣所有 set_index("stock_id") 都能安全跑出空 dict, 而非炸掉整個 run。
+    def _ensure_cols(df: pd.DataFrame) -> pd.DataFrame:
+        if df is None:
+            df = pd.DataFrame()
+        for col in ("stock_id", "stock_name", "type"):
+            if col not in df.columns:
+                df[col] = pd.Series(dtype="object")
+        return df
+
     try:
-        return _get_taiwan_stock_info_cached()
+        return _ensure_cols(_get_taiwan_stock_info_cached())
     except Exception as e:
         print(
             f"[data_sources] get_taiwan_stock_info FinMind 失敗 ({e}), 改用本地快取",
             flush=True,
         )
         fallback = _load_stock_info_cache()
-        if not fallback.empty:
+        if fallback is not None and not fallback.empty and "stock_id" in fallback.columns:
             fallback = fallback[
                 fallback["stock_id"].astype(str).str.fullmatch(r"\d{4}")
             ]
-            return fallback.reset_index(drop=True)
-        return pd.DataFrame()
+            return _ensure_cols(fallback.reset_index(drop=True))
+        return _ensure_cols(pd.DataFrame())
 
 
 def list_universe(market: str = "all") -> List[str]:
