@@ -465,8 +465,10 @@ def main() -> int:
             traceback.print_exc()
 
 
-    # === 🎯 美股走勢預測 (us_open 前 30 min, daily_outlook_advisor) ===
-    if market == "us_open":
+    # === 🎯 美股走勢預測 (真正盤前: 跟 us_buy_picks 同時, 開盤前 ~1hr) ===
+    # 原本掛在 us_open (開盤+30min) → 預測卻在開盤後才推, 名實不符。改掛 us_buy_picks,
+    # 該 slot 已改為跟美股夏冬令連動、固定落在開盤前約 1 小時, 名副其實的盤前預測。
+    if market == "us_buy_picks":
         try:
             import daily_outlook_advisor as _doa_us
             us_outlook = _doa_us.predict_us_outlook()
@@ -557,6 +559,32 @@ def main() -> int:
             print(f"[tw_post_market] failed: {_e}", flush=True)
             traceback.print_exc()
         print("=== Post-market done ===")
+        return 0
+
+    # === 🏦 台股外資出貨嫌疑 (TPE 16:32, 等三大法人買賣超出齊才推) ===
+    # 從 tw_close(15:03) 移出: 15:03 時今日三大法人還沒釋出, 只能拿到昨日的 5 日累計;
+    # 16:32 三大法人已出齊 → 含今日外資動向, 名副其實。
+    if market == "tw_foreign_chips":
+        try:
+            import holiday_check as _hc
+            if _hc.is_market_closed_today("TW"):
+                print("[tw_foreign_chips] TW 今日休市, skip", flush=True)
+                return 0
+        except Exception as _hce:
+            print(f"[tw_foreign_chips] holiday check fail (continue anyway): {_hce}", flush=True)
+        try:
+            import closing_analyzer as _ca
+            dumping = _ca.analyze_foreign_dumping(top_n=5, max_scan=80) or []
+            fc_msg = notifier.fmt_foreign_dumping_alert(dumping)
+            if fc_msg:
+                ok_fc, info_fc = notifier.send_message(fc_msg, disable_preview=True)
+                print(f"[tw_foreign_chips] sent {len(dumping)} 檔 ok={ok_fc} info={info_fc}", flush=True)
+            else:
+                print("[tw_foreign_chips] 今日無外資出貨嫌疑 → 不送", flush=True)
+        except Exception as _e:
+            import traceback
+            print(f"[tw_foreign_chips] failed (non-fatal): {_e}", flush=True)
+            traceback.print_exc()
         return 0
 
     # === 🌅 pre_market_morning 推播 (TPE 08:15 / 08:30) ===
@@ -884,7 +912,7 @@ def main() -> int:
             return 1
         return 0
 
-    # 美股盤前 BUY Top 5 (UTC 12:30 = TPE 20:30, NYSE 開盤前 ~1.5-2hr)
+    # 美股盤前 BUY Top 5 (跟美股夏冬令連動, NYSE 開盤前 ~1hr; EDT 20:32 / EST 21:32 台北)
     # 只推 entry_label=BUY + score≥70 的; 沒符合就明確說「無高品質 BUY」
     if market == "us_buy_picks":
         # BUG #2 fix: 美股假日 (7/4, Thanksgiving, Christmas) 跳過, 避免推過時資料
@@ -909,7 +937,7 @@ def main() -> int:
             def _esc(s):
                 return _html.escape(str(s) if s is not None else "", quote=False)
 
-            lines = ["🇺🇸 <b>美股盤前 BUY Top 5</b> (TPE 20:30 / NYSE 開盤前 ~1.5hr)"]
+            lines = ["🇺🇸 <b>美股盤前 BUY Top 5</b> (NYSE 開盤前 ~1hr)"]
             lines.append("━━━━━━━━━━━━━━━━━")
             if not buy_picks:
                 lines.append("🎯 <i>今日無高品質 BUY (entry_label=BUY + 分數 ≥70), 觀望為主</i>")

@@ -1457,6 +1457,33 @@ def fmt_us_close_analysis(data: dict) -> str:
     return _truncate_tg_msg("\n".join(lines))
 
 
+def fmt_foreign_dumping_alert(dumping: list) -> str:
+    """🏦 台股外資出貨嫌疑 (盤後 16:32 專屬推播).
+
+    放在 16:32 而非 15:03 tw_close 的原因: 台股三大法人買賣超約 15:30-16:00 才出齊,
+    16:32 推才含「今日」外資動向, 而不是只有到昨日的 5 日累計。
+    無嫌疑標的回 "" → caller 不送 (不洗版)。
+    """
+    if not dumping:
+        return ""
+    lines = [
+        "<b>🏦 台股外資出貨嫌疑 (盤後 16:30)</b>",
+        "<i>三大法人已出齊 · 含今日外資買賣超</i>",
+        "━━━━━━━━━━━━━━━━━",
+    ]
+    for d in dumping[:5]:
+        sid = d.get("stock_id", "")
+        name = d.get("name", "")
+        conf = d.get("confidence", 0)
+        reason = d.get("reason", "")
+        lines.append(f"  <b><code>{_esc(sid)}</code></b> {_esc(name)}  信心 {_esc(conf)}%")
+        if reason:
+            lines.append(f"     {_esc(reason)}")
+    lines.append("")
+    lines.append("<i>※ 外資調節不等於必跌; 留意隔日量價是否確認。</i>")
+    return "\n".join(lines)
+
+
 def fmt_tw_close_analysis(data: dict) -> str:
     """台股盤後 15:00 推播 — 全日表現 + 日韓比對 + AI 推理."""
     if not data:
@@ -1529,21 +1556,11 @@ def fmt_tw_close_analysis(data: dict) -> str:
             else:
                 lines.append(_esc(ln))
 
-    # 外資出貨嫌疑 top 5
-    foreign_dumping = data.get("foreign_dumping") or []
-    if foreign_dumping:
-        lines.append("")
-        lines.append("------ 盤後外資出貨嫌疑 (Top 5) ------")
-        for d in foreign_dumping[:5]:
-            sid = d.get("stock_id", "")
-            name = d.get("name", "")
-            conf = d.get("confidence", 0)
-            reason = d.get("reason", "")
-            lines.append(f"  <b><code>{_esc(sid)}</code></b> {_esc(name)}  信心 {conf}%")
-            if reason:
-                lines.append(f"     {_esc(reason)}")
+    # 外資出貨嫌疑已移到專屬的 tw_foreign_chips (16:32) 推播 —
+    # 因為台股三大法人買賣超約 15:30-16:00 才出齊, 15:03 這個 slot 拿不到今日資料。
+    # 這裡不再顯示 (避免用到昨日的過時籌碼)。
 
-    # 避開訊號 — 跟外資出貨互補, 涵蓋跌破月線 / 散戶接刀 / 放量下跌等
+    # 避開訊號 — 價量基礎, 15:03 就是最終值, 保留在此
     avoid_picks = data.get("avoid_picks") or []
     if avoid_picks:
         lines.append("")
