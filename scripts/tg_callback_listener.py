@@ -1,30 +1,4 @@
-"""
-tg_callback_listener.py — Telegram inline-button callback 處理器.
 
-背景
-----
-notifier.build_stock_action_keyboard() 會在個股推播下方掛 inline 按鈕:
-    ➕ 加自選 (wl)   🤖 AI 分析 (ai)   🛡️ 設停損 (sl)   📊 看圖 (url)
-其中 wl / ai / sl 是 callback button — Telegram 不會自己處理, 必須有一個程式
-long-poll getUpdates 收 callback_query 並回 answerCallbackQuery, 否則用戶按下去
-會一直轉圈。本檔就是那個處理器。
-
-callback_data 格式
-------------------
-    <action>:<market>:<sid>     e.g. wl:TW:2330 / ai:US:AAPL / sl:TW:2330
-    舊格式 <action>:<sid>        向後相容 (market 由 sid 是否純數字推斷)
-
-執行方式
---------
-  常駐 (建議, 配合一直開著的 Streamlit app 旁邊跑):
-      TELEGRAM_BOT_TOKEN=... TELEGRAM_CHAT_ID=... python scripts/tg_callback_listener.py
-  單次清空 (排程/測試用, drain 一次就退出):
-      python scripts/tg_callback_listener.py --once
-  乾跑 (只解析不真的呼叫 Telegram, 自我測試):
-      python scripts/tg_callback_listener.py --selftest
-
-offset (避免重複處理) 存在 watchlist_store 的 monitor_state["tg_update_offset"].
-"""
 from __future__ import annotations
 
 import sys
@@ -32,6 +6,7 @@ import time
 import traceback
 
 import requests
+import html as _html
 
 # 專案根目錄加進 path (讓 scripts/ 底下能 import 上層模組)
 import os
@@ -83,13 +58,20 @@ def _reply(chat_id, text: str) -> None:
         import notifier
         notifier.send_message(text)
     except Exception:
-        # 退路: 直接打 API (純文字)
         _api("sendMessage", {"chat_id": chat_id, "text": text[:4000]})
 
+def _reply(chat_id, text: str) -> None:
+    try:
+        import notifier
+        notifier.send_message(text, chat_id=chat_id)
+    except Exception:
+        # 退路: 直接打 API，但使用 html.escape 防止包含特殊符號導致 HTTP 400 錯誤
+        safe_text = _html.escape(text[:4000], quote=False)
+        _api("sendMessage", {"chat_id": chat_id, "text": safe_text})
 
-# ---------------------------------------------------------------------------
-# offset 持久化 (避免重啟後重放歷史 callback)
-# ---------------------------------------------------------------------------
+
+
+    
 def _load_offset() -> int:
     try:
         import watchlist_store
@@ -137,9 +119,6 @@ def parse_callback(data: str):
     return action, market, sid
 
 
-# ---------------------------------------------------------------------------
-# 個別 action handler — 每個都自我吞例外, 回 (toast_text, follow_up_text|None)
-# ---------------------------------------------------------------------------
 def _handle_wl(market: str, sid: str):
     try:
         import watchlist_store

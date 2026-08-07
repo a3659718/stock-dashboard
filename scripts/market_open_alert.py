@@ -388,6 +388,17 @@ def main() -> int:
                         al_msg, disable_preview=True, disable_notification=False
                     )
                     print(f"[asia_leading] sent ok={ok_al}", flush=True)
+                    if not ok_al:
+                        # 送失敗 → 回滾 claim, 讓下個 tick 重試 (否則整天漏掉這個日韓 leading)
+                        try:
+                            _al.unmark_alerts_sent(al_alerts)
+                        except Exception:
+                            pass
+                else:
+                    try:
+                        _al.unmark_alerts_sent(al_alerts)
+                    except Exception:
+                        pass
         except Exception as _e:
             import traceback
             print(f"[asia_leading] failed: {_e}", flush=True)
@@ -695,10 +706,15 @@ def main() -> int:
                 ai_text = ""
         else:
             print("Gemini not available - skipping AI section")
-        msg = notifier.fmt_tw_open_picks(data, ai_text=ai_text)
-        # 中盤版本標題改一下
-        if market == "tw_mid":
-            msg = msg.replace("台股開盤後 30 分鐘 · 資金流向", "台股中盤更新 11:00 · 資金流向")
+        # 包 try: formatter 若在 FinMind 降級資料上炸, 不該讓整個 run exit 1 (下方 807 送出區已能處理空 msg)
+        try:
+            msg = notifier.fmt_tw_open_picks(data, ai_text=ai_text)
+            # 中盤版本標題改一下
+            if market == "tw_mid":
+                msg = msg.replace("台股開盤後 30 分鐘 · 資金流向", "台股中盤更新 11:00 · 資金流向")
+        except Exception as _fe:
+            print(f"[{market}] fmt_tw_open_picks 失敗 (non-fatal), 不送主分析: {_fe}", flush=True)
+            msg = ""
     elif market == "tw_close":
         print("Running TW market close analysis (15:00)...")
         try:
@@ -716,7 +732,11 @@ def main() -> int:
             return 1
         if data.get("ai_text"):
             print(f"Gemini reasoning: {len(data['ai_text'])} chars")
-        msg = notifier.fmt_tw_close_analysis(data)
+        try:
+            msg = notifier.fmt_tw_close_analysis(data)
+        except Exception as _fe:
+            print(f"[tw_close] fmt_tw_close_analysis 失敗 (non-fatal), 不送主分析: {_fe}", flush=True)
+            msg = ""
 
         # 盤後籌碼-價量 12 模式分析 — 額外推一封 (極強看好/警示/看壞 標的)
         try:
@@ -962,10 +982,14 @@ def main() -> int:
                 ai_text = ""
         else:
             print("Gemini not available - skipping AI section")
-        msg = notifier.fmt_us_open_picks(data, ai_text=ai_text)
-        if market == "us_mid":
-            msg = msg.replace("美股開盤後 30 分鐘 · 資金流向",
-                               "美股開盤後 2 小時 · 中盤更新 · 資金流向")
+        try:
+            msg = notifier.fmt_us_open_picks(data, ai_text=ai_text)
+            if market == "us_mid":
+                msg = msg.replace("美股開盤後 30 分鐘 · 資金流向",
+                                   "美股開盤後 2 小時 · 中盤更新 · 資金流向")
+        except Exception as _fe:
+            print(f"[{market}] fmt_us_open_picks 失敗 (non-fatal), 不送主分析: {_fe}", flush=True)
+            msg = ""
         # BUG FIX (CRITICAL): 之前缺 send_message → us_open / us_mid 整封都沒推
         if msg:
             ok_uo, info_uo = notifier.send_message(msg, disable_preview=True)
@@ -1292,6 +1316,11 @@ def main() -> int:
             traceback.print_exc()
 
         # === 新增: 大盤大漲 → 強勢股推播 (跨 tick 去重, 每天每 trigger 只推一次) ===
+        # 關鍵: 先初始化 ssa_result。否則 check_and_push_if_surge() 一旦 raise (FinMind 掛時很常見),
+        # except 雖吞掉原例外, 但 ssa_result 從未綁定 → 下方 line 1318 `if ssa_result:` 會 NameError
+        # 且「不在 try 內」→ 整個 monitor run exit 1, 後面所有 monitor 推播 (強弱勢股/台指期/自選股/
+        # 持倉/新聞事件/量爆/籌碼異常) 全部被連坐掉。
+        ssa_result = None
         try:
             import strong_stock_alert as _ssa
             ssa_result = _ssa.check_and_push_if_surge()
