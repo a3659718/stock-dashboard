@@ -784,7 +784,7 @@ with tab_actionable:
                             st.caption(f"族群: {p.get('theme')} · R:R {rr} {rr_emoji} · 綜合分數 {score}")
                         # E: 標註屬於哪個強勢族群
                         if p.get("sector_label"):
-                            sap = p.get("sector_avg_pct", 0)
+                            sap = p.get("sector_avg_pct") or 0  # or 0: explicit None → {sap:.2f} 會崩
                             st.caption(f"📊 屬於強勢族群「{p['sector_label']}」(均漲 +{sap:.2f}%)")
                         if p.get("entry_score") is not None:
                             st.caption(f"入場評分 {p['entry_score']}/100 → {p.get('entry_action', '—')}")
@@ -1505,7 +1505,7 @@ with tab_hold:
             tech = h.get("tech", {}) or {}
             adv = h.get("advice", {}) or {}
             ep = h.get("entry_price")
-            cur = tech.get("current", 0)
+            cur = tech.get("current") or 0  # or 0: 防 analyzer 回 explicit None → 下游 f"{None:+.2f}" 崩
             roi = ((cur / ep - 1) * 100) if (ep and ep > 0) else None
             rows.append({
                 "代號": h["stock_id"],
@@ -1527,8 +1527,8 @@ with tab_hold:
                 chip = h.get("chip", {}) or {}
                 adv = h.get("advice", {}) or {}
                 news = h.get("news", []) or []
-                cur = tech.get("current", 0)
-                today = tech.get("today_pct", 0)
+                cur = tech.get("current") or 0  # or 0: 防 analyzer 回 explicit None → 下游 f"{None:+.2f}" 崩
+                today = tech.get("today_pct") or 0  # 同上: explicit None 會讓 {today:+.2f} 崩
                 action = adv.get("action", "持有")
                 action_color = {
                     "持有": "#888",
@@ -1932,8 +1932,8 @@ with tab_pulse:
             _show_table(themes_df, market="TW")
         catalysts_tw = tw_open.get("catalysts", {})
         for p in tw_open.get("picks", []):
-            theme = p["theme"]
-            stocks = p["stocks"]
+            theme = p.get("theme", "")     # .get 防某筆 pick 缺欄 → KeyError 整頁空白
+            stocks = p.get("stocks")
             if stocks is None or stocks.empty:
                 continue
             with st.expander(f"[{theme}] 動能潛在股 (3 檔)", expanded=True):
@@ -1950,17 +1950,21 @@ with tab_pulse:
         # AI 觀點 + 推送
         if ai_analyzer.gemini_available():
             if st.button("🤖 加 Gemini 觀點", key="tw_open_ai", use_container_width=True):
-                with st.spinner("Gemini 分析中…"):
-                    from scripts.market_open_alert import _summarize_tw_for_ai
-                    ok, ai_text = ai_analyzer.analyze_open_picks("TW", _summarize_tw_for_ai(tw_open))
-                if ok:
-                    st.markdown("##### 🤖 Gemini 觀點")
-                    st.markdown(ai_text)
-                    # Bug fix: 不能寫 st.session_state["tw_open_ai"] — 那個 key 已被上面
-                    #          key="tw_open_ai" 的 button 佔用, 再賦值會丟 StreamlitAPIException.
-                    st.session_state["tw_open_ai_text"] = ai_text
-                else:
-                    st.error(ai_text)
+                try:
+                    with st.spinner("Gemini 分析中…"):
+                        from scripts.market_open_alert import _summarize_tw_for_ai
+                        ok, ai_text = ai_analyzer.analyze_open_picks("TW", _summarize_tw_for_ai(tw_open))
+                    if ok:
+                        st.markdown("##### 🤖 Gemini 觀點")
+                        st.markdown(ai_text)
+                        # Bug fix: 不能寫 st.session_state["tw_open_ai"] — 那個 key 已被上面
+                        #          key="tw_open_ai" 的 button 佔用, 再賦值會丟 StreamlitAPIException.
+                        st.session_state["tw_open_ai_text"] = ai_text
+                    else:
+                        st.error(ai_text)
+                except Exception as _ge:
+                    # _summarize_tw_for_ai 對畸形 pick/theme 資料可能 raise → 不該炸掉整頁
+                    st.error(f"Gemini 觀點產生失敗: {_ge}")
         if st.button("✈️ Send 台股開盤分析 to TG", key="tw_open_send",
                       disabled=not notifier.is_configured(), use_container_width=True):
             ai_text = st.session_state.get("tw_open_ai_text", "")
@@ -2013,16 +2017,19 @@ with tab_pulse:
 
         if ai_analyzer.gemini_available():
             if st.button("🤖 加 Gemini 觀點", key="us_open_ai", use_container_width=True):
-                with st.spinner("Gemini 分析中…"):
-                    from scripts.market_open_alert import _summarize_us_for_ai
-                    ok, ai_text = ai_analyzer.analyze_open_picks("US", _summarize_us_for_ai(us_open))
-                if ok:
-                    st.markdown("##### 🤖 Gemini 觀點")
-                    st.markdown(ai_text)
-                    # Bug fix: 同 tw_open_ai — 改寫到非 widget key, 避免 StreamlitAPIException.
-                    st.session_state["us_open_ai_text"] = ai_text
-                else:
-                    st.error(ai_text)
+                try:
+                    with st.spinner("Gemini 分析中…"):
+                        from scripts.market_open_alert import _summarize_us_for_ai
+                        ok, ai_text = ai_analyzer.analyze_open_picks("US", _summarize_us_for_ai(us_open))
+                    if ok:
+                        st.markdown("##### 🤖 Gemini 觀點")
+                        st.markdown(ai_text)
+                        # Bug fix: 同 tw_open_ai — 改寫到非 widget key, 避免 StreamlitAPIException.
+                        st.session_state["us_open_ai_text"] = ai_text
+                    else:
+                        st.error(ai_text)
+                except Exception as _ge:
+                    st.error(f"Gemini 觀點產生失敗: {_ge}")
         if st.button("✈️ Send 美股開盤分析 to TG", key="us_open_send",
                       disabled=not notifier.is_configured(), use_container_width=True):
             ai_text = st.session_state.get("us_open_ai_text", "")
@@ -2826,11 +2833,19 @@ with tab_stock:
 
         st.markdown("---")
 
-        # K 線圖
+        # K 線圖 — 欄位防呆: 短天期/新股時 MA60 等欄位可能不存在, 直接 [[...]] 會 KeyError 炸掉整個網頁
         with st.expander("📈 6 個月 K 線 + MA + 量能", expanded=True):
-            chart_df = ind.tail(120).set_index("date")[["close", "MA20", "MA60"]]
-            st.line_chart(chart_df)
-            st.bar_chart(ind.tail(120).set_index("date")["Trading_Volume"])
+            try:
+                if "date" in ind.columns:
+                    _price_cols = [c for c in ["close", "MA20", "MA60"] if c in ind.columns]
+                    if _price_cols:
+                        st.line_chart(ind.tail(120).set_index("date")[_price_cols])
+                    if "Trading_Volume" in ind.columns:
+                        st.bar_chart(ind.tail(120).set_index("date")["Trading_Volume"])
+                else:
+                    st.caption("(缺 date 欄, 無法繪圖)")
+            except Exception as _ce:
+                st.caption(f"K 線圖無法顯示: {_ce}")
 
         with st.expander("📊 KD 與 MACD"):
             if "K" in ind.columns:
@@ -2927,21 +2942,24 @@ with tab_stock:
         st.image(uploaded, caption="上傳的圖片", use_column_width=True)
 
     if analyze_image_btn and uploaded is not None and not image_too_big:
-        # 抓最新市場 context
-        fg = ds.fetch_fear_greed()
-        market_news = ds.fetch_market_news_themes()
-        with st.spinner("🤖 Gemini 看圖思考中…約 10–20 秒"):
-            ok, ai_text = ai_analyzer.analyze_chart_image(
-                uploaded.getvalue(), extra_note=extra_note,
-                fg=fg, market_news=market_news,
-            )
-        if ok:
-            st.session_state["last_image_ai"] = ai_text
-            st.markdown("---")
-            st.markdown("### 🤖 Gemini 圖片分析")
-            st.markdown(ai_text)
-        else:
-            st.error(f"分析失敗：{ai_text}")
+        try:
+            # 抓最新市場 context (fetch 若 raise 不該炸掉整頁)
+            fg = ds.fetch_fear_greed()
+            market_news = ds.fetch_market_news_themes()
+            with st.spinner("🤖 Gemini 看圖思考中…約 10–20 秒"):
+                ok, ai_text = ai_analyzer.analyze_chart_image(
+                    uploaded.getvalue(), extra_note=extra_note,
+                    fg=fg, market_news=market_news,
+                )
+            if ok:
+                st.session_state["last_image_ai"] = ai_text
+                st.markdown("---")
+                st.markdown("### 🤖 Gemini 圖片分析")
+                st.markdown(ai_text)
+            else:
+                st.error(f"分析失敗：{ai_text}")
+        except Exception as _ie:
+            st.error(f"圖片分析失敗: {_ie}")
 
     last_img = st.session_state.get("last_image_ai")
     if last_img and not analyze_image_btn:
@@ -3459,10 +3477,17 @@ with tab_track:
         track_btn = st.button("🔄 計算追蹤表現", use_container_width=True, type="primary",
                                key="track_run_btn")
     with cT3:
+        # csv_for_download() 每次 render 都會跑 (讀 CSV/GSheet); 失敗不該炸掉整個分頁 → 包 try
+        try:
+            _csv_data = tracker.csv_for_download()
+        except Exception as _cse:
+            _csv_data = ""
+            st.caption(f"(歷史 CSV 暫時無法讀取: {_cse})")
         st.download_button(
-            "💾 下載歷史 CSV", data=tracker.csv_for_download(),
+            "💾 下載歷史 CSV", data=_csv_data,
             file_name=f"tracking_history_{dt.date.today().strftime('%Y%m%d')}.csv",
             use_container_width=True, key="track_download",
+            disabled=(not _csv_data),
         )
 
     upload = st.file_uploader("📤 還原之前下載的歷史 CSV (可選)", type=["csv"], key="track_upload")
