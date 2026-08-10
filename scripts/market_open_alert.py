@@ -183,6 +183,51 @@ def _summarize_us_for_ai(data: dict) -> str:
     return "\n".join(lines)
 
 
+def _run_us_open_main(market: str) -> bool:
+    """美股開盤/中盤「主分析」(開盤後半小時) — 抽成獨立函式, 讓它在 handler 最前面優先送出。
+    原本它排在 analyst/insider、利率週期、突破掃描等次要 alert 之後, 那些慢工 (各自抓網路)
+    會把「開盤後半小時」主推延遲一小時級; 且配上 20 分 job timeout, 慢工吃光額度時主推會被
+    整個砍掉、一則都收不到。改成「先送主推, 再跑次要 alert」→ 主推準時、且一定送得出去。
+    回傳是否有送出。"""
+    label = "開盤後 30 分鐘 (10:00 EDT)" if market == "us_open" else "開盤後 2 小時 (11:30 EDT)"
+    print(f"Running US {label} (主分析優先送出)...", flush=True)
+    try:
+        data = market_open_picks.get_us_open_picks()
+    except Exception as e:
+        print(f"get_us_open_picks fatal failure: {e}", flush=True)
+        try:
+            notifier.send_message(
+                f"<b>美股 {label} 推播失敗</b>\n\n原因: <code>{type(e).__name__}: {str(e)[:200]}</code>"
+            )
+        except Exception:
+            pass
+        return False
+    if data.get("error"):
+        print(f"data error: {data['error']}", flush=True)
+    ai_text = ""
+    if ai_analyzer.gemini_available():
+        try:
+            ok, ai_text = ai_analyzer.analyze_open_picks("US", _summarize_us_for_ai(data))
+            if not ok:
+                ai_text = ""
+        except Exception as e:
+            print(f"Gemini exception: {e}", flush=True)
+            ai_text = ""
+    try:
+        msg = notifier.fmt_us_open_picks(data, ai_text=ai_text)
+        if market == "us_mid":
+            msg = msg.replace("美股開盤後 30 分鐘 · 資金流向",
+                               "美股開盤後 2 小時 · 中盤更新 · 資金流向")
+    except Exception as _fe:
+        print(f"[{market}] fmt_us_open_picks 失敗 (non-fatal): {_fe}", flush=True)
+        msg = ""
+    if msg:
+        ok_uo, info_uo = notifier.send_message(msg, disable_preview=True)
+        print(f"[us_{('mid' if market == 'us_mid' else 'open')}] 主分析 TG send: ok={ok_uo}, info={info_uo}", flush=True)
+        return True
+    return False
+
+
 def main() -> int:
     market = (sys.argv[1] if len(sys.argv) > 1 else "tw_open").lower()
     # 舊參數相容
@@ -405,6 +450,12 @@ def main() -> int:
             traceback.print_exc()
 
     # === 🏛 美股機構/內部人動向 (us_open 跑一次/天) ===
+    # === 美股開盤/中盤『主分析』優先送出 (開盤後半小時) ===
+    # 先送主推, 再跑下面的 analyst/insider、利率週期、突破掃描等次要 alert →
+    # 「開盤後半小時」不再被那些慢工拖到一小時後, 也確保 timeout 內主推一定先出去。
+    if market in ("us_open", "us_mid"):
+        _run_us_open_main(market)
+
     if market == "us_open":
         try:
             import analyst_insider_alert as _ai
@@ -980,59 +1031,8 @@ def main() -> int:
         return 0
 
     if market in ("us_open", "us_mid"):
-        label = "開盤後 30 分鐘 (10:00 EDT)" if market == "us_open" else "開盤後 2 小時 (11:30 EDT)"
-        print(f"Running US {label}...")
-        try:
-            data = market_open_picks.get_us_open_picks()
-        except Exception as e:
-            print(f"get_us_open_picks fatal failure: {e}", flush=True)
-            # 發一個簡訊告知失敗, 至少不要 silent
-            err_msg = (
-                f"<b>美股 {label} 推播失敗</b>\n\n"
-                f"原因: <code>{type(e).__name__}: {str(e)[:200]}</code>\n\n"
-                f"建議檢查:\n"
-                f"  • FinMind Token 是否有效 (常見: 過期/重新生成)\n"
-                f"  • Yahoo Finance 是否被 rate-limit\n"
-                f"  • GitHub Actions log 看詳細 stack trace"
-            )
-            try:
-                notifier.send_message(err_msg)
-            except Exception:
-                pass
-            return 1
-        if data.get("error"):
-            print(f"data error: {data['error']}")
-        else:
-            print(f"Got {len(data.get('sector_picks', []))} sectors with picks")
-            print(f"Prediction: {data.get('prediction', {}).get('pattern', 'N/A')}")
-        ai_text = ""
-        if ai_analyzer.gemini_available():
-            print("Calling Gemini...")
-            try:
-                ok, ai_text = ai_analyzer.analyze_open_picks("US", _summarize_us_for_ai(data))
-                if not ok:
-                    print(f"AI failed: {ai_text}")
-                    ai_text = ""
-                else:
-                    print(f"Gemini returned {len(ai_text)} chars")
-            except Exception as e:
-                print(f"Gemini exception: {e}")
-                ai_text = ""
-        else:
-            print("Gemini not available - skipping AI section")
-        try:
-            msg = notifier.fmt_us_open_picks(data, ai_text=ai_text)
-            if market == "us_mid":
-                msg = msg.replace("美股開盤後 30 分鐘 · 資金流向",
-                                   "美股開盤後 2 小時 · 中盤更新 · 資金流向")
-        except Exception as _fe:
-            print(f"[{market}] fmt_us_open_picks 失敗 (non-fatal), 不送主分析: {_fe}", flush=True)
-            msg = ""
-        # BUG FIX (CRITICAL): 之前缺 send_message → us_open / us_mid 整封都沒推
-        if msg:
-            ok_uo, info_uo = notifier.send_message(msg, disable_preview=True)
-            print(f"[us_{('mid' if market == 'us_mid' else 'open')}] TG send: ok={ok_uo}, info={info_uo}")
-        return 0 if msg else 0
+        # 主分析已在 handler 最前面 _run_us_open_main() 優先送出; 這裡的次要 alert 跑完就結束。
+        return 0
 
     elif market == "us_close":
         print("Running US market close analysis (+2h, 18:00 EDT)...")
