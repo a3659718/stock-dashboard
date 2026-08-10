@@ -229,7 +229,8 @@ def build_post_market_msg() -> str:
     breadth = _market_breadth()
     leaders = _leader_stocks()
 
-    lines = ["📊 <b>台股今日總結 (16:00)</b>", "━━━━━━━━━━━━━━━━━"]
+    # 註: 此段已併入 15:00 台股盤後總結推播 (tw_close), 作為「今日總結 + 隔日策略」區塊。
+    lines = ["📊 <b>今日總結 + 隔日策略</b>", "━━━━━━━━━━━━━━━━━"]
     # 一句話定調 (置頂, 最醒目)
     _tldr = _post_tldr(twii, breadth)
     if _tldr:
@@ -378,7 +379,10 @@ def build_post_market_msg() -> str:
         lines.append(_esc(gem))
         lines.append("")
     lines.append("<i>※ 盤後總結, 用於規劃隔日策略. 留意美股隔夜變化.</i>")
-    return _truncate_tg_msg("\n".join(lines).rstrip())
+    # 不再自己 truncate: 這封內容很豐富 (定調/族群/龍頭/決策/持倉/命中回顧/Gemini 隔日策略),
+    # 超過 4096 會把最後面的 Gemini 整段砍掉。改回傳完整內容, 由 caller 用
+    # notifier._split_tg_msg() 拆成多封送出 → 一個字都不掉。
+    return "\n".join(lines).rstrip()
 
 
 def _html_esc(s) -> str:

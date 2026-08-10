@@ -96,16 +96,20 @@ def _safe_float(v, default: float = 0.0) -> float:
     return f
 
 
-def _truncate_tg_msg(out: str, max_chars: int = 4000) -> str:
-    """Telegram 限 4096 個「字元」(UTF-16 code units), 已修正語法截斷 Bug"""
+def _truncate_tg_msg(out: str, max_chars: int = 20000) -> str:
+    """以前這裡把訊息硬砍到 4000 字 → 內容尾巴 (常是 Gemini 結論/隔日策略) 被截掉,
+    就是用戶看到「被字數擋到」的原因。
+
+    改法: send_message() 現在會自動把超過 TG 4096 上限的訊息「拆成多封」送出 (不丟內容),
+    所以這裡不再需要在 fmt 階段截斷。保留一個很高的上限 (20000) 只當「跑飛」的安全網,
+    正常內容一律原封不動回傳, 交給 send_message 分段。"""
     if not out:
         return ""
     try:
-        utf16_encoded = out.encode('utf-16-le')
-        total_chars = len(utf16_encoded) // 2
+        total_chars = len(out.encode('utf-16-le')) // 2
         if total_chars <= max_chars:
             return out
-        return out[:max_chars] + "\n\n...(預覽因長度限制截斷)"
+        return out[:max_chars] + "\n\n...(內容異常過長已截斷)"
     except Exception:
         return out[:max_chars]
 
@@ -113,6 +117,14 @@ def _truncate_tg_msg(out: str, max_chars: int = 4000) -> str:
 def _u16_len(s: str) -> int:
     """Telegram 長度 = UTF-16 code units."""
     return len(s.encode("utf-16-le")) // 2 if s else 0
+
+
+def _tpe_now_str() -> str:
+    """現在的台北時間 HH:MM — 給推播標題用「實際產生時間」而非寫死的排程時刻。
+    因為 GitHub Actions 排程常延遲, 寫死「16:00」但 17:32 才送達會對不上;
+    改用實際時間, 標題永遠跟收到的時間一致。"""
+    import datetime as _dt
+    return (_dt.datetime.utcnow() + _dt.timedelta(hours=8)).strftime("%H:%M")
 
 
 def _split_tg_msg(text: str, max_chars: int = 4000) -> list[str]:
@@ -228,6 +240,23 @@ def send_message(text: str, disable_preview: bool = True,
       7. disable_notification=True → silent push (不響鈴, 用於普通新聞分流)
       8. category: 若有傳 (e.g. "volume_breakout"), 算 daily cap; 沒傳 = 主推不算 cap
     """
+    # === 自動分段: 超過 TG 4096 上限就拆多封送出, 不再硬截斷丟內容 ===
+    # (取代舊的 fmt 階段 _truncate 硬砍。長內容 → 多封, 重點不會被字數擋掉。)
+    if text and _u16_len(text) > 4000:
+        parts = _split_tg_msg(text, max_chars=3800)  # 3800 留 emoji (surrogate) 餘裕
+        ok_all, infos = True, []
+        for _i, _part in enumerate(parts):
+            ok_p, info_p = send_message(
+                _part,
+                disable_preview=disable_preview,
+                reply_markup=(reply_markup if _i == len(parts) - 1 else None),  # 鍵盤只掛最後一封
+                disable_notification=(disable_notification or _i > 0),          # 只有第一封響鈴
+                category=(category if _i == 0 else None),                      # daily cap 只算一次
+            )
+            ok_all = ok_all and ok_p
+            infos.append(f"part{_i+1}:{info_p}")
+        return ok_all, f"split×{len(parts)} | " + " | ".join(infos)
+
     # === 深夜靜音 (TPE 02:00-06:00) — 用戶要求: 推但不響鈴, 不中斷睡眠 ===
     try:
         import datetime as _dt_q
@@ -1506,7 +1535,7 @@ def fmt_tw_close_analysis(data: dict) -> str:
     why_summary = data.get("why_summary", "") or ""
 
     lines = [
-        f"<b>台股盤後 (15:00) · 全日綜合分析</b>",
+        f"<b>台股盤後總結 (15:00) · 全日綜合分析</b>",
     ]
     # 一句話 why summary (最重要, 放最前面)
     if why_summary:
@@ -2462,16 +2491,20 @@ def fmt_news_event_alerts(alerts: list, impact_analysis: str = "") -> str:
     }
 
     # 按 urgency 區塊輸出 (急報/注意/普通)
+    # 用戶要求「少給一點新聞連結, 主要留內容」→ 每區塊設上限, 只列最重要的幾則,
+    # 其餘用「…還有 N 則」帶過。急報(HIGH)較寬鬆, 注意/一般收緊。Gemini 影響分析照留。
     section_alerts = [
-        ("🚨 急報", high_alerts),
-        ("⚠️ 注意", med_alerts),
-        ("📰 一般", low_alerts),
+        ("🚨 急報", high_alerts, 5),
+        ("⚠️ 注意", med_alerts, 3),
+        ("📰 一般", low_alerts, 2),
     ]
-    for sect_title, sect_list in section_alerts:
+    for sect_title, sect_list, _cap in section_alerts:
         if not sect_list:
             continue
-        lines.append(f"<b>{sect_title}</b>")
-        for a in sect_list:
+        _shown = sect_list[:_cap]
+        _extra = len(sect_list) - len(_shown)
+        lines.append(f"<b>{sect_title}</b>" + (f"（僅列 {len(_shown)}/{len(sect_list)} 則）" if _extra > 0 else ""))
+        for a in _shown:
             sym = _esc(a.get("symbol", ""))
             market = _esc(a.get("market", ""))
             tag = a.get("tag", "main")
@@ -2496,6 +2529,9 @@ def fmt_news_event_alerts(alerts: list, impact_analysis: str = "") -> str:
                 lines.append(f'  <a href="{_esc_attr(link)}">{_esc(title)}</a>')
             else:
                 lines.append(f"  {_esc(title)}")
+            lines.append("")
+        if _extra > 0:
+            lines.append(f"<i>…同級另有 {_extra} 則未列出（點上方連結看主要幾則即可）</i>")
             lines.append("")
     # 接 Gemini 影響分析 (若有)
     if impact_analysis:

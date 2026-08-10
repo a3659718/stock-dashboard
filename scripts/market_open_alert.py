@@ -739,7 +739,7 @@ def main() -> int:
             msg = notifier.fmt_tw_open_picks(data, ai_text=ai_text)
             # 中盤版本標題改一下
             if market == "tw_mid":
-                msg = msg.replace("台股開盤後 30 分鐘 · 資金流向", "台股中盤更新 11:00 · 資金流向")
+                msg = msg.replace("台股開盤後 30 分鐘 · 資金流向", "台股中盤更新 (11:00) · 資金流向")
         except Exception as _fe:
             print(f"[{market}] fmt_tw_open_picks 失敗 (non-fatal), 不送主分析: {_fe}", flush=True)
             msg = ""
@@ -765,6 +765,16 @@ def main() -> int:
         except Exception as _fe:
             print(f"[tw_close] fmt_tw_close_analysis 失敗 (non-fatal), 不送主分析: {_fe}", flush=True)
             msg = ""
+
+        # === 合併 16:00「今日總結 + 隔日策略」進這封 15:00 盤後 (用戶要求 15:00+16:00 整合成一個) ===
+        # 兩者資料 15:00 都已就緒 (加權/日韓已收盤); 過長會由 send_message 自動分段, 不截斷。
+        try:
+            import tw_post_market_summary as _pms
+            _pm_msg = _pms.build_post_market_msg()
+            if _pm_msg:
+                msg = (msg + "\n\n━━━━━━━━━━━━━━━━━\n\n" + _pm_msg) if msg else _pm_msg
+        except Exception as _pme:
+            print(f"[tw_close] 併入今日總結 (non-fatal) 失敗: {_pme}", flush=True)
 
         # 盤後籌碼-價量 12 模式分析 — 額外推一封 (極強看好/警示/看壞 標的)
         try:
