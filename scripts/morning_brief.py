@@ -294,6 +294,23 @@ def _section_chip_price_pattern() -> str:
 
 
 # ---------------------------------------------------------------------------
+# 重大事件預告 (FOMC / 非農 / CPI + 重要財報) — 週一推整週, 其他日推今明
+# ---------------------------------------------------------------------------
+def _section_events() -> str:
+    try:
+        import os
+        import econ_calendar
+        # 用戶自訂美股池 (US_WATCHLIST) 也納入財報涵蓋範圍
+        us_wl = [s.strip().upper() for s in
+                 os.environ.get("US_WATCHLIST", "").replace(",", " ").split() if s.strip()]
+        mode = "week" if dt.datetime.utcnow().weekday() == 0 else "today"
+        return econ_calendar.build_events_digest(mode=mode, watchlist=us_wl)
+    except Exception as e:
+        print(f"[morning_brief] events section failed: {e}", flush=True)
+        return ""
+
+
+# ---------------------------------------------------------------------------
 # 組裝 + 推播
 # ---------------------------------------------------------------------------
 def compose_brief() -> str:
@@ -301,6 +318,7 @@ def compose_brief() -> str:
     now = dt.datetime.now()
     header = f"☀️ <b>晨報</b> · {now.strftime('%m/%d %H:%M')}"
     sections = []
+    sections.append(_safe("events", _section_events))  # 重大事件預告放最前面 (高優先)
     sections.append(_safe("us_overnight", _section_us_overnight))
     sections.append(_safe("sector_rotation", _section_sector_rotation))
     sections.append(_safe("ai_news", _section_ai_news))
