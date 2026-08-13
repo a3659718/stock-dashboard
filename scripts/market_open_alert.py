@@ -660,6 +660,9 @@ def main() -> int:
         print("=== Pre-market done ===")
         return 0
 
+    # 台股主推是否已「優先送出」(tw_close 會在下面合併後立刻送, 不等 chip_div/holdings 慢工)
+    _tw_main_sent = False
+
     if market in ("tw_open", "tw_mid"):
         label = "開盤後 30 分鐘 (09:30)" if market == "tw_open" else "中盤更新 (11:00)"
         print(f"Running TW {label}...")
@@ -827,6 +830,12 @@ def main() -> int:
         except Exception as _pme:
             print(f"[tw_close] 併入今日總結 (non-fatal) 失敗: {_pme}", flush=True)
 
+        # 主推優先送出 — 不等下面 chip_div (掃 80 檔) / holdings 慢工, 也確保 timeout 內先送出。
+        if msg:
+            ok_c, info_c = notifier.send_message(msg, disable_preview=True)
+            print(f"[tw_close] 盤後總結(合併)優先送出: ok={ok_c} {info_c}", flush=True)
+            _tw_main_sent = True
+
         # 盤後籌碼-價量 12 模式分析 — 額外推一封 (極強看好/警示/看壞 標的)
         try:
             import chip_price_divergence as _cpd
@@ -902,7 +911,10 @@ def main() -> int:
     #   market 跑完都沒有 return → 一路 fall through 到結尾的 "Unknown market" → exit 2。
     #   結果台股開盤後30分 / 中盤更新 / 盤後分析三封主推播長期都沒送出還報錯。補上送出 + return。
     if market in ("tw_open", "tw_mid", "tw_close"):
-        if msg:
+        if _tw_main_sent:
+            # tw_close 已在上面優先送出 (先送主推再跑 chip_div/holdings), 這裡不重送。
+            print(f"[{market}] 主分析已優先送出, 略過重送", flush=True)
+        elif msg:
             ok_tw, info_tw = notifier.send_message(msg, disable_preview=True)
             print(f"[{market}] 主分析 TG send: ok={ok_tw} {info_tw}", flush=True)
         else:

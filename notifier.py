@@ -859,15 +859,7 @@ def fmt_tw_open_picks(data: dict, ai_text: str = "") -> str:
                 parts.append(f"DIA {dia['pct']:+.2f}%")
             if parts:
                 lines.append("  " + " · ".join(parts))
-            us_sectors = us_overnight.get("sectors")
-            if us_sectors is not None and not us_sectors.empty:
-                top3 = us_sectors.head(3)
-                bot1 = us_sectors.tail(1)
-                # 防 None — fetch_sector_rotation 資料不足時 1d_% 是 None
-                top_str = "、".join(f"{_esc(r['symbol'])} {_safe_pct(r.get('1d_%'))}" for _, r in top3.iterrows())
-                bot_str = ", ".join(f"{_esc(r['symbol'])} {_safe_pct(r.get('1d_%'))}" for _, r in bot1.iterrows())
-                lines.append(f"  領漲: {top_str}")
-                lines.append(f"  落後: {bot_str}")
+            # 精簡: 移除美股各產業領漲/落後細節 (台股盤前參考價值低, 三大指數已足夠)
     # 亞洲鄰近市場
     lines.extend(_fmt_asia_markets_block(data.get("asia") or {}))
     # 國際訊號
@@ -875,8 +867,10 @@ def fmt_tw_open_picks(data: dict, ai_text: str = "") -> str:
     themes_df = data.get("themes")
     if themes_df is not None and not themes_df.empty:
         lines.append("")
-        lines.append("<b>熱門題材</b>")
-        for _, row in themes_df.iterrows():
+        # 精簡: 只列前 8 強題材 (已依平均% 排序), 其餘用一行帶過
+        _n_all = len(themes_df)
+        lines.append("<b>熱門題材</b>" + (f"（前 8/{_n_all}）" if _n_all > 8 else ""))
+        for _, row in themes_df.head(8).iterrows():
             name = row.get("題材")
             avg = row.get("平均%")
             up = int(row.get("上漲家數", 0))
