@@ -106,6 +106,36 @@
       "type": "DASHBOARD_PING",
       "ok": true,
       "err": null
+    },
+    {
+      "ts": "2026-08-05T09:48:51.848375",
+      "type": "DASHBOARD_PING",
+      "ok": true,
+      "err": null
+    },
+    {
+      "ts": "2026-08-15T12:00:42.239164",
+      "type": "台股測試內容一行",
+      "ok": true,
+      "err": null
+    },
+    {
+      "ts": "2026-08-15T12:00:42.365573",
+      "type": "第0行內容ABCDEFG",
+      "ok": true,
+      "err": null
+    },
+    {
+      "ts": "2026-08-15T12:00:42.528905",
+      "type": "第260行內容ABCDEFG",
+      "ok": true,
+      "err": null
+    },
+    {
+      "ts": "2026-08-15T12:00:43.110599",
+      "type": "第513行內容ABCDEFG",
+      "ok": true,
+      "err": null
     }
   ],
   "cron_runs": [

@@ -227,6 +227,7 @@ def send_message(text: str, disable_preview: bool = True,
                   reply_markup: Optional[dict] = None,
                   disable_notification: bool = False,
                   category: Optional[str] = None,
+                  _stamped: bool = False,
                   **_kwargs) -> tuple[bool, str]:
     """直接呼叫 Bot API。回傳 (成功, 訊息).
 
@@ -240,6 +241,17 @@ def send_message(text: str, disable_preview: bool = True,
       7. disable_notification=True → silent push (不響鈴, 用於普通新聞分流)
       8. category: 若有傳 (e.g. "volume_breakout"), 算 daily cap; 沒傳 = 主推不算 cap
     """
+    # === 統一在「所有推播的共同出口」加上實際送出時間戳 ===
+    # 為什麼放這裡: 每一筆推播 (不論哪個 fmt_*) 都經過 send_message, 在此加一次 → 全部一致、
+    # 不遺漏、也不用改幾十個格式函式。GitHub 排程延遲不可控, 這行讓「通知上的時間」永遠等於
+    # 你實際收到的時間。_stamped 旗標防止分段遞迴 (下方) 重複加。
+    if text and not _stamped:
+        try:
+            text = text.rstrip() + f"\n\n🕐 <i>{_tpe_now_str()} 送出</i>"
+        except Exception:
+            pass
+        _stamped = True
+
     # === 自動分段: 超過 TG 4096 上限就拆多封送出, 不再硬截斷丟內容 ===
     # (取代舊的 fmt 階段 _truncate 硬砍。長內容 → 多封, 重點不會被字數擋掉。)
     if text and _u16_len(text) > 4000:
@@ -252,6 +264,7 @@ def send_message(text: str, disable_preview: bool = True,
                 reply_markup=(reply_markup if _i == len(parts) - 1 else None),  # 鍵盤只掛最後一封
                 disable_notification=(disable_notification or _i > 0),          # 只有第一封響鈴
                 category=(category if _i == 0 else None),                      # daily cap 只算一次
+                _stamped=True,                                                  # 已戳過, 分段不重複加
             )
             ok_all = ok_all and ok_p
             infos.append(f"part{_i+1}:{info_p}")
@@ -798,7 +811,7 @@ def fmt_tw_open_picks(data: dict, ai_text: str = "") -> str:
     """台股開盤後 30 分推播."""
     if data.get("error"):
         return f"台股開盤分析：{_esc(data['error'])}"
-    lines = [f"<b>台股開盤後 30 分鐘 · 資金流向</b>"]
+    lines = [f"<b>台股開盤 · 資金流向</b>"]
 
     # Regime banner (最頂部, 空頭時警告)
     regime = data.get("regime") or {}
@@ -1529,7 +1542,7 @@ def fmt_tw_close_analysis(data: dict) -> str:
     why_summary = data.get("why_summary", "") or ""
 
     lines = [
-        f"<b>台股盤後總結 (15:00) · 全日綜合分析</b>",
+        f"<b>台股盤後總結 · 全日綜合分析</b>",
     ]
     # 一句話 why summary (最重要, 放最前面)
     if why_summary:
@@ -3128,7 +3141,7 @@ def fmt_us_open_picks(data: dict, ai_text: str = "") -> str:
     """美股開盤後 30 分推播."""
     if data.get("error"):
         return f"美股開盤分析：{_esc(data['error'])}"
-    lines = [f"<b>美股開盤後 30 分鐘 · 資金流向</b>"]
+    lines = [f"<b>美股開盤 · 資金流向</b>"]
     # Regime banner
     regime = data.get("regime") or {}
     if regime:
