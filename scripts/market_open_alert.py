@@ -216,8 +216,7 @@ def _run_us_open_main(market: str) -> bool:
     try:
         msg = notifier.fmt_us_open_picks(data, ai_text=ai_text)
         if market == "us_mid":
-            msg = msg.replace("美股開盤後 30 分鐘 · 資金流向",
-                               "美股開盤後 2 小時 · 中盤更新 · 資金流向")
+            msg = msg.replace("美股開盤 · 資金流向", "美股中盤更新 · 資金流向")
     except Exception as _fe:
         print(f"[{market}] fmt_us_open_picks 失敗 (non-fatal): {_fe}", flush=True)
         msg = ""
@@ -791,9 +790,9 @@ def main() -> int:
         # 包 try: formatter 若在 FinMind 降級資料上炸, 不該讓整個 run exit 1 (下方 807 送出區已能處理空 msg)
         try:
             msg = notifier.fmt_tw_open_picks(data, ai_text=ai_text)
-            # 中盤版本標題改一下
+            # 中盤版本標題改一下 (時間戳由 fmt 動態帶入, 這裡只換描述詞)
             if market == "tw_mid":
-                msg = msg.replace("台股開盤後 30 分鐘 · 資金流向", "台股中盤更新 (11:00) · 資金流向")
+                msg = msg.replace("台股開盤 · 資金流向", "台股中盤更新 · 資金流向")
         except Exception as _fe:
             print(f"[{market}] fmt_tw_open_picks 失敗 (non-fatal), 不送主分析: {_fe}", flush=True)
             msg = ""
