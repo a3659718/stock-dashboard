@@ -1060,7 +1060,7 @@ def get_holiday_news_summary() -> Dict:
         # macro_context 給 Gemini 一些前提資料 (美股漲跌 + 油價 + 重大新聞)
         macro_ctx = (
             f"美股: SPY {spy_pct:+.2f}%, QQQ {qqq_pct:+.2f}%, DIA {dia_pct:+.2f}%. "
-            f"WTI 油價 ${oil.get('price', '—')} ({oil.get('pct_5d', 0):+.1f}% 5d). "
+            f"WTI 油價 ${oil.get('price', '—')} ({(oil.get('pct_5d') or 0):+.1f}% 5d). "
             f"重大新聞: " + "; ".join(n.get("title", "")[:60] for n in (news or [])[:3])
         )
         potential_picks = potential_picker.find_picks_for_holiday(
