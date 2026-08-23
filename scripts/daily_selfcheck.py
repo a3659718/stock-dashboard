@@ -120,13 +120,19 @@ def main() -> int:
     msg = build_message(result)
     has_anomaly = bool(result["anomalies"])
     print(msg)
-    try:
-        import notifier
-        # 有異常 → 響鈴; 沒異常 → 安靜推 (silent)
-        ok, infostr = notifier.send_message(msg, disable_notification=not has_anomaly)
-        print(f"[daily_selfcheck] TG sent: ok={ok} {infostr}", flush=True)
-    except Exception as e:
-        print(f"[daily_selfcheck] TG 推送失敗: {e}", flush=True)
+    # 使用者反饋: 這支腳本每次執行都會真的推一封 TG (健康時靜音、異常時響鈴),
+    # 等於每天多一封「一切正常」的背景推播 — 沒有資訊價值, 只有異常時才需要
+    # 主動打擾使用者。改成: 沒異常只印 console log (排程執行紀錄仍可查), 有
+    # 異常才真的推播。
+    if has_anomaly:
+        try:
+            import notifier
+            ok, infostr = notifier.send_message(msg)
+            print(f"[daily_selfcheck] TG sent: ok={ok} {infostr}", flush=True)
+        except Exception as e:
+            print(f"[daily_selfcheck] TG 推送失敗: {e}", flush=True)
+    else:
+        print("[daily_selfcheck] 全部正常, 略過推播 (只留 console log)", flush=True)
     # 有異常回非 0 (方便 CI / 排程辨識)
     return 1 if has_anomaly else 0
 

@@ -49,6 +49,41 @@ def _safe(label: str, fn, default=""):
 
 
 # ---------------------------------------------------------------------------
+# Section 0: 一句話定調 + 昨夜推播統計 + 30 日勝率
+# (併自原本獨立的 07:32 morning_recap_alert 推播 — 使用者反映 07:32/08:02/08:17/
+#  08:33 四封推播集中在 1 小時內、內容高度重疊, 都在講美股隔夜收盤. 把
+#  morning_recap 的獨有內容 (一句話結論 / 推播統計 / 命中回顧) 併進這封晨報,
+#  07:32 那個獨立排程改成 no-op 不再推播 (見 morning_recap_alert.check_and_push),
+#  使用者從 4 封減為 3 封, 資訊不流失.)
+# ---------------------------------------------------------------------------
+def _section_recap_and_tldr() -> str:
+    try:
+        import morning_recap_alert as _mr
+        lines = []
+        sox = _mr._fetch_us_close("^SOX")
+        ixic = _mr._fetch_us_close("^IXIC")
+        tldr = _mr._battle_tldr(sox.get("pct"), ixic.get("pct"))
+        lines.append(f"🧭 <b>一句話</b>:{tldr}")
+        recap_lines = _mr._summarize_push_history()
+        if recap_lines and recap_lines != ["(過去 14 小時無推播)"]:
+            lines.append("📱 <b>昨夜推播</b>: " + " / ".join(recap_lines[:6]))
+        try:
+            import signal_tracker as _sig
+            s = _sig.accuracy_summary(None, lookback_days=30)
+            n = s.get("n") or 0
+            pct = s.get("pct")
+            if n >= 10 and pct is not None:
+                mark = "🟢" if pct >= 60 else ("🟡" if pct >= 40 else "🔴")
+                lines.append(f"🎯 <b>推播近 30 日勝率</b>:{mark} {pct:.0f}% (n={n})")
+        except Exception:
+            pass
+        return "\n".join(lines)
+    except Exception as e:
+        print(f"[morning_brief] recap_and_tldr section failed: {e}", flush=True)
+        return ""
+
+
+# ---------------------------------------------------------------------------
 # Section 1: 美股隔夜總結
 # ---------------------------------------------------------------------------
 def _section_us_overnight() -> str:
@@ -318,6 +353,7 @@ def compose_brief() -> str:
     now = dt.datetime.now()
     header = f"☀️ <b>晨報</b> · {now.strftime('%m/%d %H:%M')}"
     sections = []
+    sections.append(_safe("recap_tldr", _section_recap_and_tldr))  # 併入原 07:32 morning_recap 內容, 放最前
     sections.append(_safe("events", _section_events))  # 重大事件預告放最前面 (高優先)
     sections.append(_safe("us_overnight", _section_us_overnight))
     sections.append(_safe("sector_rotation", _section_sector_rotation))

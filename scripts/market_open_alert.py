@@ -214,6 +214,15 @@ def _run_us_open_main(market: str) -> bool:
             print(f"Gemini exception: {e}", flush=True)
             ai_text = ""
     try:
+        # BUG FIX (稽核發現): fmt_us_open_picks 內部的國際訊號區塊 (油價/DXY/10Y/VIX/
+        # Trump) 原本是格式化當下才自己序列現抓 7 次外部連線, 跟這支函式最上面
+        # 「主推要優先且準時送出, 不能被慢工卡住」的設計互相矛盾。這裡改成有界時間
+        # (5 秒) 平行預抓, 抓不完就跳過不等, 讓主推的準時性不會被外部訊號來源拖累。
+        try:
+            import news_sources as _ns
+            data["external_signals"] = _ns.fetch_external_signals_bounded(timeout_sec=5.0)
+        except Exception as _ext_e:
+            print(f"[{market}] external_signals 預抓失敗 (non-fatal, 主推照常送出): {_ext_e}", flush=True)
         msg = notifier.fmt_us_open_picks(data, ai_text=ai_text)
         if market == "us_mid":
             msg = msg.replace("美股開盤 · 資金流向", "美股中盤更新 · 資金流向")
@@ -409,8 +418,11 @@ def main() -> int:
                 gem = _tp.analyze_with_gemini(tp_alerts)
                 tp_msg = notifier.fmt_trump_policy_alerts(tp_alerts, gem)
                 if tp_msg:
+                    # Bug fix: 之前沒傳 category → 繞過 push_cap 每日 6 封次要 alert 共用上限,
+                    # 只靠自己的 360min 冷卻 + 每日上限 3 把關, 標準不一致. 補上 category。
                     ok_tp, info_tp = notifier.send_message(
-                        tp_msg, disable_preview=False, disable_notification=False
+                        tp_msg, disable_preview=False, disable_notification=False,
+                        category="trump_policy",
                     )
                     print(f"[trump_policy] sent ok={ok_tp}", flush=True)
         except Exception as _e:
@@ -428,8 +440,10 @@ def main() -> int:
                 _al.mark_alerts_sent(al_alerts)  # claim 在送出前 → 防併發重複
                 al_msg = notifier.fmt_asia_leading_alerts(al_alerts)
                 if al_msg:
+                    # Bug fix: 之前沒傳 category → 繞過 push_cap 每日共用上限, 補上。
                     ok_al, info_al = notifier.send_message(
-                        al_msg, disable_preview=True, disable_notification=False
+                        al_msg, disable_preview=True, disable_notification=False,
+                        category="asia_leading",
                     )
                     print(f"[asia_leading] sent ok={ok_al}", flush=True)
                     if not ok_al:
@@ -560,6 +574,16 @@ def main() -> int:
         try:
             import breakout_consolidation_alert as _bc
             bc_alerts = _bc.check_breakout_consolidation(top_n=5) or []
+            # Bug fix: breakout_consolidation 之前是唯一沒接進 "intraday_strong_stock"
+            # 跨模組去重命名空間的多方訊號模組 — 同一檔美股若同時滿足「20日盤整突破」
+            # 和「大漲爆量」, 會被這裡跟 strong_stock/volume_breakout/chip_anomaly
+            # 各自獨立推播一次, 講的其實是同一件事. 補上跟其他三個模組一致的去重。
+            if bc_alerts:
+                try:
+                    import alert_priority as _apbc
+                    bc_alerts = _apbc.filter_dedup_picks(bc_alerts, "intraday_strong_stock", "up")
+                except Exception:
+                    pass
             if bc_alerts:
                 print(f"[breakout] triggered {len(bc_alerts)}: "
                       + ", ".join(a.get("symbol", "") for a in bc_alerts),
@@ -567,9 +591,16 @@ def main() -> int:
                 _bc.mark_alerts_sent(bc_alerts)  # claim 在送出前 → 防併發重複
                 bc_msg = notifier.fmt_breakout_consolidation_alerts(bc_alerts)
                 if bc_msg:
+                    # Bug fix: 之前沒傳 category → 繞過 push_cap 每日共用上限, 補上。
                     ok_bc, info_bc = notifier.send_message(
-                        bc_msg, disable_preview=True, disable_notification=False
+                        bc_msg, disable_preview=True, disable_notification=False,
+                        category="breakout_consolidation",
                     )
+                    if ok_bc:
+                        try:
+                            _apbc.mark_picks_pushed(bc_alerts, "intraday_strong_stock", "up")
+                        except Exception:
+                            pass
                     if not ok_bc:
                         # 送失敗 / 被 daily cap 擋 → 回滾 claim, 讓下個 tick 重試
                         try:
@@ -789,6 +820,14 @@ def main() -> int:
             print("Gemini not available - skipping AI section")
         # 包 try: formatter 若在 FinMind 降級資料上炸, 不該讓整個 run exit 1 (下方 807 送出區已能處理空 msg)
         try:
+            # BUG FIX (稽核發現): 同 us_open — fmt_tw_open_picks 的國際訊號區塊原本會
+            # 在格式化當下自己序列現抓 7 次外部連線, 這裡改成有界時間 (5 秒) 平行預抓,
+            # 抓不完就跳過, 避免拖累「開盤 30 分」主推的準時送出。
+            try:
+                import news_sources as _ns
+                data["external_signals"] = _ns.fetch_external_signals_bounded(timeout_sec=5.0)
+            except Exception as _ext_e:
+                print(f"[{market}] external_signals 預抓失敗 (non-fatal, 主推照常送出): {_ext_e}", flush=True)
             msg = notifier.fmt_tw_open_picks(data, ai_text=ai_text)
             # 中盤版本標題改一下 (時間戳由 fmt 動態帶入, 這裡只換描述詞)
             if market == "tw_mid":
@@ -999,11 +1038,16 @@ def main() -> int:
             import us_actionable as _ua
             import html as _html
             picks = _ua.compute_us_actionable_picks(top_n=10) or []
+            # Bug fix: 原本 `entry_score is None or ... >= 70` 讓「沒有分數」的股票
+            # 直接視為通過 ≥70 高品質門檻 (而非被排除), 可能把系統根本評不出分數的
+            # 股票當「高品質 BUY」推播出去。改成沒有分數就排除, 只有真的評出
+            # ≥70 分才算高品質。
             buy_picks = [
                 p for p in picks
                 if p.get("symbol")
                 and p.get("entry_label") == "BUY"
-                and (p.get("entry_score") is None or float(p.get("entry_score") or 0) >= 70)
+                and p.get("entry_score") is not None
+                and float(p.get("entry_score")) >= 70
             ][:5]
 
             def _esc(s):
@@ -1416,32 +1460,48 @@ def main() -> int:
             import watchlist_triggers as _wt
             fired = _wt.check_triggers() or []
             if fired:
-                print(f"[watchlist_triggers] {len(fired)} fired (queued for 16:00 summary)", flush=True)
-                # mark 觸發 → 累積到 state, 給 16:00 盤後拉
+                print(f"[watchlist_triggers] {len(fired)} fired (queued for 15:00 summary)", flush=True)
+                # 累積到 state, 給 15:00 tw_close 併入的 tw_post_market_summary 讀取
+                # (tw_post_market_summary.build_post_market_msg() 讀的 key 是
+                # "trigger_type", 見該檔案第 333 行).
+                # Bug fix: 這裡原本用 f.get("trigger_type") 當來源值, 但 check_triggers()
+                # 回傳的 dict 裡這個欄位其實叫 "type" (見 watchlist_triggers.py) —
+                # "trigger_type" 這個 key 在 fired dict 裡根本不存在, 所以存進去的值
+                # 永遠是 None。後果: (1) 去重比對變成「只要同一檔股票就視為重複」,
+                # 同股不同條件類型的第二個觸發會被誤判成已存在而漏記; (2)
+                # tw_post_market_summary 彙總訊息裡這個欄位永遠顯示空白, 使用者看不出
+                # 到底是哪種條件觸發的。改成從實際存在的 "type" 欄位取值, 但儲存的 key
+                # 名稱維持 "trigger_type" 不變 (跟 tw_post_market_summary 的讀取端一致)。
+                # 同時只有在這裡的 state 保存確認成功後, 才呼叫 mark_triggers_fired()
+                # 真正解除警戒 — 保存失敗的話這批 fired 保持 armed, 下次 monitor
+                # tick 還會再抓到, 不會讓使用者的警報悄悄消失。
                 try:
                     import watchlist_store
                     state = watchlist_store.load_monitor_state()
                     wt_today = state.setdefault("watchlist_triggers_today", [])
                     import datetime as _dt
-                    today_str = _dt.date.today().strftime("%Y-%m-%d")
+                    today_str = (_dt.datetime.utcnow() + _dt.timedelta(hours=8)).date().strftime("%Y-%m-%d")
                     # 過濾掉舊日的, 只留今天
                     wt_today = [t for t in wt_today if t.get("date") == today_str]
                     # 加入新觸發
                     for f in fired:
                         if not any(t.get("stock_id") == f.get("stock_id") and
-                                   t.get("trigger_type") == f.get("trigger_type")
+                                   t.get("trigger_type") == f.get("type")
                                    for t in wt_today):
                             wt_today.append({
                                 "date": today_str,
                                 "stock_id": f.get("stock_id"),
-                                "trigger_type": f.get("trigger_type"),
+                                "trigger_type": f.get("type"),
+                                "type_label": f.get("type_label"),
                                 "current": f.get("current"),
                                 "value": f.get("value"),
                             })
                     state["watchlist_triggers_today"] = wt_today
                     watchlist_store.save_monitor_state(state)
-                except Exception:
-                    pass
+                    _wt.mark_triggers_fired(fired)
+                except Exception as _save_e:
+                    print(f"[watchlist_triggers] queue-for-summary save failed, "
+                          f"NOT disarming — will retry next check: {_save_e}", flush=True)
         except Exception as _wte:
             print(f"[watchlist_triggers] check failed (non-fatal): {_wte}", flush=True)
 
