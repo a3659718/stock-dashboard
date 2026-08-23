@@ -85,7 +85,10 @@ def _momentum_metrics(df: pd.DataFrame, spy_df: pd.DataFrame) -> Dict:
     if not spy_df.empty and len(spy_df) >= 22:
         spy_close = spy_df["Close"].astype(float)
         spy_20 = (spy_close.iloc[-1] / spy_close.iloc[-21] - 1) * 100
-        if twenty_pct is not None and spy_20 != 0:
+        # Bug fix: `spy_20 != 0` 是多餘且錯誤的防呆 — 下面是減法不是除法, 沒有除
+        # 以 spy_20 的風險。若大盤 20 日漲跌幅剛好是 0% (盤整), 這個條件會讓 RS
+        # 整個被丟掉變成 None, 而不是正確算出 twenty_pct - 0。拿掉這個多餘檢查。
+        if twenty_pct is not None:
             rs = round(twenty_pct - spy_20, 2)
 
     return {

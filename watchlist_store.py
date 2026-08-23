@@ -210,6 +210,29 @@ def load_watchlist() -> List[Dict]:
     return []
 
 
+def _write_sheet_grid(sheet, cols: List[str], items: List[Dict], max_rows: int) -> None:
+    """單次 update() 覆寫整張表 (含 header), 完全不呼叫 clear().
+
+    Bug fix (race condition): 原本 save_watchlist/save_holdings 是 sheet.clear()
+    後逐列 append_row() — clear 跟寫完之間有空窗, 若這時另一個 Streamlit session
+    或 cron 剛好 load_watchlist()/load_holdings(), 會讀到清空後、尚未寫完的表,
+    把使用者的自選股/持倉當成空清單; 若 append_row 迴圈中途因網路逾時 / API
+    額度失敗而中斷, 表上會永久留下清空且不完整的資料, 直到下次成功儲存為止。
+    改法: 把資料 pad 到固定的 max_rows (含 header), 一次 update() 整個範圍覆寫,
+    跟 monitor_state._flush_state 的修法一致 — 沒有任何「先清空」的中間狀態,
+    舊資料多出的列也會被這次的空白列一起蓋掉, 不會殘留。
+    """
+    header = list(cols)
+    rows = [header] + [[str(d.get(c, "")) for c in cols] for d in items]
+    n_cols = len(cols)
+    total_rows = max_rows + 1  # +1 for header row
+    while len(rows) < total_rows:
+        rows.append([""] * n_cols)
+    last_col = chr(ord("A") + n_cols - 1)
+    range_name = f"A1:{last_col}{total_rows}"
+    sheet.update(values=rows, range_name=range_name)
+
+
 def save_watchlist(items: List[Dict]) -> bool:
     """儲存自選股. 同步到 Sheets + local."""
     items = items[:MAX_WATCHLIST]
@@ -228,11 +251,8 @@ def save_watchlist(items: List[Dict]) -> bool:
     sheet = _get_sheet("watchlist")
     if sheet is not None:
         try:
-            sheet.clear()
             cols = ["stock_id", "name", "market", "entry_price", "added_date"]
-            sheet.append_row(cols)
-            for d in items:
-                sheet.append_row([str(d.get(c, "")) for c in cols])
+            _write_sheet_grid(sheet, cols, items, MAX_WATCHLIST)
             return True
         except Exception as _e:
             print(f"[watchlist_store] gsheets save_watchlist failed: {_e}", flush=True)

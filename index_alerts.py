@@ -313,6 +313,35 @@ def _fetch_intraday_anchor_data(symbol: str) -> Optional[Dict]:
         return None
 
 
+def _build_all_index_snaps(closed_markets: set) -> Dict[str, Dict]:
+    """預抓全部指數的 intraday anchor snapshot, 建立 cross_market 對照表.
+
+    這段邏輯原本一字不差地被複製貼上在 check_intraday_reversal() 跟
+    check_weak_open_alerts() 兩處 (smoke test 的重複區塊偵測抓到) — 抽成共用
+    函式, 之後只要改一次, 兩個呼叫端不會再有「改一邊忘記改另一邊」的風險。
+    """
+    all_snaps: Dict[str, Dict] = {}
+    for sym, cfg in INDEX_CONFIG.items():
+        country = cfg.get("country")
+        if country in closed_markets:
+            continue
+        if not _is_market_in_session(country):
+            continue
+        snap = _fetch_intraday_anchor_data(sym)
+        if not snap:
+            continue
+        try:
+            pct_vs_open_ = (snap["current"] / snap["today_open"] - 1) * 100 \
+                           if snap["today_open"] > 0 else 0.0
+        except Exception:
+            pct_vs_open_ = 0.0
+        snap["_pct_vs_open"] = pct_vs_open_
+        snap["_country"] = country
+        snap["_name"] = cfg.get("name", sym)
+        all_snaps[sym] = snap
+    return all_snaps
+
+
 # ---------------------------------------------------------------------------
 # Enrichment helpers (M2: severity / market_state / speed)
 # ---------------------------------------------------------------------------
@@ -759,25 +788,7 @@ def check_intraday_reversal() -> List[Dict]:
 
     # M2: 預抓所有指數 snapshot, 建立 cross_market 對照表
     # 同時跑也讓「同向轉弱個股」掃描有依據 (TWII 觸發 drawdown 才掃)
-    all_snaps: Dict[str, Dict] = {}
-    for sym, cfg in INDEX_CONFIG.items():
-        country = cfg.get("country")
-        if country in closed_markets:
-            continue
-        if not _is_market_in_session(country):
-            continue
-        snap = _fetch_intraday_anchor_data(sym)
-        if not snap:
-            continue
-        try:
-            pct_vs_open_ = (snap["current"] / snap["today_open"] - 1) * 100 \
-                           if snap["today_open"] > 0 else 0.0
-        except Exception:
-            pct_vs_open_ = 0.0
-        snap["_pct_vs_open"] = pct_vs_open_
-        snap["_country"] = country
-        snap["_name"] = cfg.get("name", sym)
-        all_snaps[sym] = snap
+    all_snaps: Dict[str, Dict] = _build_all_index_snaps(closed_markets)
 
     for sym, cfg in INDEX_CONFIG.items():
         if sym not in all_snaps:
@@ -1141,25 +1152,7 @@ def check_weak_open_alerts() -> List[Dict]:
         pass
 
     # 預抓所有 snap (給 cross_market 用)
-    all_snaps: Dict[str, Dict] = {}
-    for sym, cfg in INDEX_CONFIG.items():
-        country = cfg.get("country")
-        if country in closed_markets:
-            continue
-        if not _is_market_in_session(country):
-            continue
-        snap = _fetch_intraday_anchor_data(sym)
-        if not snap:
-            continue
-        try:
-            pct_vs_open_ = (snap["current"] / snap["today_open"] - 1) * 100 \
-                           if snap["today_open"] > 0 else 0.0
-        except Exception:
-            pct_vs_open_ = 0.0
-        snap["_pct_vs_open"] = pct_vs_open_
-        snap["_country"] = country
-        snap["_name"] = cfg.get("name", sym)
-        all_snaps[sym] = snap
+    all_snaps: Dict[str, Dict] = _build_all_index_snaps(closed_markets)
 
     alerts: List[Dict] = []
 

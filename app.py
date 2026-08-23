@@ -765,8 +765,14 @@ with tab_actionable:
                 )
         else:
             for i, p in enumerate(picks, 1):
-                rr = p.get("rr") or 0
-                rr_emoji = "⭐⭐" if rr >= 3 else ("⭐" if rr >= 2 else "")
+                # Bug fix: 原本 `p.get("rr") or 0` 會讓「算不出 R:R」跟「R:R 真的是
+                # 0」顯示成同一個數字 0, 使用者無法分辨; 且跟推播端 fmt_actionable_
+                # picks_tg 顯示的字面 "None" 不一致 (同一筆 pick, 兩個管道呈現不同)。
+                # 分開: 星等判斷用 0 當安全預設值, 但畫面顯示改用 "—" 明確表示無資料。
+                rr = p.get("rr")
+                rr_for_cmp = rr if rr is not None else 0
+                rr_emoji = "⭐⭐" if rr_for_cmp >= 3 else ("⭐" if rr_for_cmp >= 2 else "")
+                rr_display = rr if rr is not None else "—"
                 score = p.get("score", 0)
                 score_color = "🟢" if score >= 6 else ("🟡" if score >= 4 else "🔴")
                 with st.container(border=True):
@@ -781,7 +787,7 @@ with tab_actionable:
                             f"{score_color}{label_str}"
                         )
                         if p.get("theme"):
-                            st.caption(f"族群: {p.get('theme')} · R:R {rr} {rr_emoji} · 綜合分數 {score}")
+                            st.caption(f"族群: {p.get('theme')} · R:R {rr_display} {rr_emoji} · 綜合分數 {score}")
                         # E: 標註屬於哪個強勢族群
                         if p.get("sector_label"):
                             sap = p.get("sector_avg_pct") or 0  # or 0: explicit None → {sap:.2f} 會崩
@@ -795,8 +801,15 @@ with tab_actionable:
                         if t_mid or t_long:
                             cur_v = p.get("current") or 0
                             def _gain(t):
-                                if t and cur_v:
-                                    return f"+{(t/cur_v-1)*100:.1f}%"
+                                # Bug fix: t/cur_v 若 t 是非數值型別 (e.g. AI 產生
+                                # 的價位若混入字串) 會直接 TypeError 讓整個「今日
+                                # 可行動」分頁崩潰空白. 加 try/except 防護, 算不出
+                                # 就顯示空字串而不是讓整頁掛掉.
+                                try:
+                                    if t and cur_v:
+                                        return f"+{(float(t)/float(cur_v)-1)*100:.1f}%"
+                                except (TypeError, ValueError, ZeroDivisionError):
+                                    pass
                                 return ""
                             tlines = []
                             if t_short:
@@ -1307,7 +1320,12 @@ with tab_wl:
   - 那斯達克 IXIC 每 ±200 點 (~1%)
 - 連續同方向觸發 → 加上 [連續警示]，提醒台股可能要減碼
 
-cron 每 30 分執行一次 (24x7)。
+⚠️ Bug fix 說明: 這裡原本寫「cron 每 30 分執行一次 (24x7)」, 但實際檢查
+scripts/market_open_alert.py 全部排程後發現 check_watchlist_alerts() /
+index_alerts.check_index_alerts() 從來沒有被任何自動排程呼叫過 — 目前只有
+下面這顆「立即手動檢查」按鈕會執行, 沒有真正的背景自動監控。如果你需要真的
+24/7 自動監控, 這是一個之後可以再討論怎麼接上排程的項目 (需要考慮會不會
+增加推播量)。
 """)
 
     if st.button("🔍 立即手動檢查警報", use_container_width=True, key="manual_check_alerts"):
@@ -1819,7 +1837,7 @@ with tab_pulse:
         "盤中即時資料來自 yfinance。"
     )
 
-    cA, cB, cC, cD, cE = st.columns([1, 1, 1, 1, 1])
+    cA, cB, cC, cD, cE, cF = st.columns([1, 1, 1, 1, 1, 1])
     with cA:
         pulse_btn = st.button("📊 產業分類", use_container_width=True, type="primary")
     with cB:
@@ -1830,6 +1848,9 @@ with tab_pulse:
         smart_btn = st.button("🕵️ 大戶偷進場", use_container_width=True, type="primary",
                                help="量比≥2x + 沒大漲 + 籌碼/族群配合, 含進出場價")
     with cE:
+        limit_up_btn = st.button("🎯 漲停前兆", use_container_width=True, type="primary",
+                                  help="不限定題材要先熱, 全題材池掃「安靜吸籌」的價量+籌碼型態, 含進出場價")
+    with cF:
         send_pulse_tg = st.button("✈️ Send to TG", use_container_width=True,
                                   disabled=not notifier.is_configured(),
                                   key="send_pulse_tg")
@@ -1843,6 +1864,14 @@ with tab_pulse:
                 st.session_state["hot_patterns"] = _htv2.find_all_patterns(top_themes=3)
         except Exception as e:
             st.error(f"智慧潛伏股分析失敗: {e}")
+
+    if limit_up_btn:
+        try:
+            with st.spinner("掃描漲停前兆 / 潛伏吸籌標的 (全題材池 ~110 檔, 約 60-90s)..."):
+                import limit_up_precursor as _lup
+                st.session_state["limit_up_precursor"] = _lup.scan_limit_up_precursor(top_n=8)
+        except Exception as e:
+            st.error(f"漲停前兆分析失敗: {e}")
 
     if pulse_btn:
         try:
@@ -2042,8 +2071,9 @@ with tab_pulse:
         if not smart_picks:
             st.info(
                 "📭 **目前無「大戶偷進場」訊號**\n\n"
-                "嚴條件: 量比≥2x + 今日≤+1.5% + 在 20MA±5% + 籌碼配合 + 族群熱.\n"
-                "可能原因: 主流股都已大漲 / 大盤偏弱無題材 / 籌碼資料不足.\n"
+                "條件: 量比≥1.6x + 今日≤+2.0% + 在 20MA±5% + 籌碼配合 + 族群熱"
+                "(已從掃「題材前5名」改成掃「題材全部成分股」, 池子變大很多).\n"
+                "可能原因: 大盤偏弱無題材 / 族群成分股確實都已大漲或籌碼資料不足.\n"
                 "建議改點「🔥 熱門題材」或「🌱 潛伏題材股」"
             )
         else:
@@ -2061,8 +2091,55 @@ with tab_pulse:
                         f"**停損** {_f2(p.get('stop_loss'))} | "
                         f"**短目標** {_f2(p.get('target_short'))} | "
                         f"**中目標** {_f2(p.get('target_mid'))} | "
-                        f"**R:R** {p.get('rr', 0):.2f}"
+                        # Bug fix: p.get('rr', 0) 的 default 只在 key 不存在時生效, 若 rr
+                        # 這個 key 存在但值是 None (常見, 見 notifier._compute_rr 回傳
+                        # Optional[float]) → .get() 仍拿到 None, :.2f 直接 TypeError,
+                        # 讓整個「大戶偷偷進場」區塊崩潰. 跟其他欄位一樣改用 _f2() 防護.
+                        f"**R:R** {_f2(p.get('rr'))}"
                     )
+
+    # === 🎯 漲停前兆 / 潛伏吸籌 (limit_up_precursor) ===
+    if "limit_up_precursor" in st.session_state:
+        st.markdown("### 🎯 漲停前兆 / 潛伏吸籌")
+        lup_picks = st.session_state.get("limit_up_precursor", [])
+        st.caption(
+            "⚠️ 台股漲停常受消息面/短線資金主導, 這裡只是用「價格收斂 + 量價背離向上"
+            "(悄悄吸籌) + 籌碼配合 + 偏好小型股」提高命中機率, 不是漲停保證, 務必"
+            "分批進場 + 嚴設停損。"
+        )
+        if not lup_picks:
+            st.info(
+                "📭 **目前無「漲停前兆」訊號**\n\n"
+                "條件: 近 20 日窄幅整理或 BB 收斂 + (VPT 量價背離向上 或 溫和量增) + "
+                "5 日漲幅未超過 15% + 今日未噴出 (含籌碼/小型股加分項)。\n"
+                "已掃全部題材成分股 (~110 檔), 不篩「題材要先熱」— 若仍無結果, 代表"
+                "目前確實沒有股票同時符合這些安靜吸籌的條件。"
+            )
+        else:
+            for p in lup_picks:
+                sid = p.get("stock_id", ""); name = p.get("name", "")
+                def _f2lup(v):
+                    return f"{v:.2f}" if isinstance(v, (int, float)) else "—"
+                today_pct_v = p.get("today_pct")
+                today_pct_str = f"{today_pct_v:+.2f}%" if isinstance(today_pct_v, (int, float)) else "—"
+                with st.expander(
+                    f"🎯 {sid} {name} · {_f2lup(p.get('current'))} ({today_pct_str}) · "
+                    f"分數 {p.get('score', 0)} · {p.get('theme', '')}",
+                    expanded=True,
+                ):
+                    for r in p.get("reasons", []):
+                        st.markdown(f"- {r}")
+                    for w in p.get("warnings", []):
+                        st.markdown(f"- ⚠️ {w}")
+                    st.markdown(
+                        f"**進場區** {_f2lup(p.get('entry_low'))}-{_f2lup(p.get('entry_high'))} | "
+                        f"**停損** {_f2lup(p.get('stop_loss'))} | "
+                        f"**目標** {_f2lup(p.get('target'))} | "
+                        f"**R:R** {_f2lup(p.get('rr'))}"
+                    )
+                    mc = p.get("market_cap_est")
+                    if mc is not None:
+                        st.caption(f"估計市值約 {mc/1e8:.0f} 億 · 週轉率 {_f2lup(p.get('turnover_pct'))}%")
 
     if "hot_patterns" in st.session_state:
         st.markdown("### 🔥 熱門題材 3 型態")
@@ -2079,11 +2156,19 @@ with tab_pulse:
             else:
                 for p in picks[:3]:
                     sid = p.get("stock_id", ""); name = p.get("name", "")
+                    # Bug fix: 原本對 current/today_pct/vol_ratio/entry/stop_loss/
+                    # target_short 全部用未防護的 :.2f — 目前上游 hot_theme_v2.py
+                    # 保證這些欄位一定有值所以還不會崩潰, 但寫法脆弱, 一旦上游改成
+                    # 可選欄位就會重演「大戶偷偷進場」那個 R:R 崩潰. 一律加防護。
+                    def _f2p(v):
+                        return f"{v:.2f}" if isinstance(v, (int, float)) else "—"
+                    def _f2pct(v):
+                        return f"{v:+.2f}%" if isinstance(v, (int, float)) else "—"
                     st.markdown(
-                        f"- `{sid}` {name} · {p.get('current', 0):.2f} "
-                        f"({p.get('today_pct', 0):+.2f}%) · 量比 {p.get('vol_ratio', 0):.2f}x · "
-                        f"進場 {p.get('entry', 0):.2f} · 停損 {p.get('stop_loss', 0):.2f} · "
-                        f"目標 {p.get('target_short', 0):.2f}"
+                        f"- `{sid}` {name} · {_f2p(p.get('current'))} "
+                        f"({_f2pct(p.get('today_pct'))}) · 量比 {_f2p(p.get('vol_ratio'))}x · "
+                        f"進場 {_f2p(p.get('entry'))} · 停損 {_f2p(p.get('stop_loss'))} · "
+                        f"目標 {_f2p(p.get('target_short'))}"
                     )
                     st.caption(f"  💡 {p.get('reasoning', '')}")
 
@@ -2980,6 +3065,13 @@ with tab_us:
         "卡片含 3 層目標 / 進場區間 / 停損 / 財報日警示 / 同類股 ETF 強度. "
         "候選池可在 Streamlit secrets 加入 `US_WATCHLIST=AAPL,MSFT,...` 自訂。"
     )
+    _us_act_ts = st.session_state.get("us_actionable_ts")
+    if _us_act_ts:
+        st.caption(f"上次更新: {_us_act_ts}")
+    st.caption(
+        "⚠️ 這裡的價位是你按按鈕當下即時重新運算的, 跟排程自動推播 (盤前 BUY Top 5) "
+        "是各自獨立抓價 — 兩者時間點不同, 數字可能不完全一樣, 請以較新的時間戳為準。"
+    )
 
     cA, cB, cC = st.columns([1, 1, 1])
     with cA:
@@ -3020,6 +3112,13 @@ with tab_us:
                     st.session_state["us_actionable"] = _ua.compute_us_actionable_picks(
                         top_n=10, min_score=65, us_pool=_us_pool,
                     )
+                    # Bug fix: 這裡跟 GitHub Actions 排程推播 (us_buy_picks) 是兩個
+                    # 獨立 process, 各自即時抓價, 沒有共用 cache — 同一檔股票的進場
+                    # 價位很可能因為抓取時間點不同而跟稍早收到的推播對不上。目前先
+                    # 用時間戳讓使用者清楚知道「這是幾點重新運算的」, 不會誤以為
+                    # 兩邊是同一份資料 (完整的跨 process 共用快取是較大的架構調整,
+                    # 之後有需要再做)。
+                    st.session_state["us_actionable_ts"] = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
                     _n_act = len(st.session_state["us_actionable"])
                     if _n_act > 0:
                         st.toast(f"✅ 完成! Top {_n_act} 可進場", icon="🎯")
@@ -3028,6 +3127,7 @@ with tab_us:
                 except Exception as _ae:
                     st.warning(f"actionable 精選失敗 (fallback table): {_ae}")
                     st.session_state["us_actionable"] = []
+                    st.session_state["us_actionable_ts"] = dt.datetime.now().strftime("%Y-%m-%d %H:%M") + " (失敗)"
         except Exception as e:
             import traceback
             st.error(f"美股掃描失敗：{type(e).__name__}: {e}")
@@ -3191,6 +3291,72 @@ with tab_us:
             st.warning("⚠️ 還沒抓到 picks — 請先按「更新美股 Top 10」")
         else:
             _send_tg(notifier.fmt_us_top_picks(top_picks, fg), "美股 Top 10")
+
+    # =========================================================================
+    # 🚀 美股潛在爆發股 (us_upside_screener, 5 大類, 含「壓縮待噴」漲停前兆型)
+    # 這個模組原本已經寫好且可以正常運作, 但沒有任何地方 (dashboard/推播) 呼叫它,
+    # 使用者完全看不到 — 這裡正式把它接上 dashboard, 讓 squeeze_setup (最接近
+    # 「噴出之前」的壓縮待噴型) 等 5 大類實際派得上用場。另外把 squeeze_setup
+    # 的判斷邏輯加了 VPT 量價背離向上這個訊號 (見 us_upside_screener.py), 讓它
+    # 也能抓到「量還沒完全縮到底、但籌碼已經在悄悄轉手」的早期階段。
+    # =========================================================================
+    st.markdown("---")
+    st.markdown("### 🚀 美股潛在爆發股 (5 大類 · 含「壓縮待噴」漲停前兆型)")
+    st.caption(
+        "breakout(52w突破) / acceleration(動能加速) / squeeze_setup(壓縮待噴, "
+        "價格收斂+量縮或VPT悄悄吸籌, 最接近「噴出之前」) / revival_setup(谷底重生) / "
+        "narrative_leader(題材領跑)。"
+    )
+    if st.button("🚀 掃描美股潛在爆發股", use_container_width=True, key="us_upside_btn",
+                 help="約 60-90 秒, 掃約 140 檔"):
+        try:
+            with st.spinner("掃描美股潛在爆發股中 (約 60-90 秒)..."):
+                import us_upside_screener as _uus
+                st.session_state["us_upside"] = _uus.run_us_upside_screen(
+                    top_n_per_category=5, use_cache=True, with_themes=True,
+                    with_entry_label=False,
+                )
+        except Exception as e:
+            st.error(f"美股潛在爆發股掃描失敗: {e}")
+
+    _us_upside = st.session_state.get("us_upside")
+    if _us_upside:
+        _meta = _us_upside.get("meta", {})
+        st.caption(f"掃描 {_meta.get('scanned', '?')}/{_meta.get('universe_size', '?')} 檔 · 資料日 {_meta.get('data_date', '?')}")
+
+        def _uf2(v):
+            return f"{v:.2f}" if isinstance(v, (int, float)) else "—"
+
+        _cat_labels = [
+            ("squeeze_setup", "🎯 壓縮待噴 (漲停前兆型)"),
+            ("breakout", "📈 52w 突破"),
+            ("acceleration", "🚀 動能加速"),
+            ("revival_setup", "🌱 谷底重生"),
+            ("narrative_leader", "🔥 題材領跑"),
+        ]
+        for cat_key, cat_label in _cat_labels:
+            picks = _us_upside.get(cat_key) or []
+            st.markdown(f"**{cat_label}** (共 {len(picks)} 檔)")
+            if not picks:
+                st.caption("_(目前無符合標的)_")
+                continue
+            for p in picks:
+                sym = p.get("symbol", "—")
+                cur = _uf2(p.get("current"))
+                score = p.get("score", "—")
+                upside = p.get("upside_pct")
+                with st.expander(f"{sym} · {cur} · 分數 {score} · 預估空間 {_uf2(upside)}%", expanded=False):
+                    for r in (p.get("reasons") or [])[:5]:
+                        st.markdown(f"- {r}")
+                    for w in (p.get("warnings") or [])[:3]:
+                        st.markdown(f"- ⚠️ {w}")
+                    lv = p.get("levels") or {}
+                    if lv:
+                        st.caption(
+                            f"進場 {_uf2(lv.get('entry_low'))}-{_uf2(lv.get('entry_high'))} · "
+                            f"停損 {_uf2(lv.get('stop'))} · 目標 {_uf2(lv.get('target'))} · "
+                            f"R:R {_uf2(lv.get('rr'))}"
+                        )
 
 
 # =============================================================================

@@ -61,28 +61,48 @@ def get_today_count() -> int:
     return int(entry.get("count", 0))
 
 
-def check_and_consume(category: str, cap: int = DEFAULT_DAILY_CAP) -> bool:
-    """Check daily cap and atomically increment counter if OK.
+def would_allow(category: str, cap: int = DEFAULT_DAILY_CAP) -> bool:
+    """唯讀檢查: 今日次要 alert 數是否還沒到 cap. 不 increment counter.
 
-    Returns:
-      True  - 還在 cap 內, counter 已 +1, caller 可推.
-      False - 已到 cap, 不該推.
-
-    Note: 這個 function 是 "best-effort" 原子 — 如果同一 cron 內多次 call,
-          每次都會 +1 (即使 caller 後面 send 失敗). 為避免 send 失敗仍佔額,
-          建議 caller 先 send 再 mark (見 mark_consumed below).
+    Caller 應該: 先 would_allow() 檢查 → 真的送出成功後才呼叫 mark_consumed()
+    去 +1, 避免送失敗 (網路抖動 / TG API 503) 也白白佔掉當日額度。
     """
     state = _load_state()
     entry = _get_today_entry(state)
     if int(entry.get("count", 0)) >= cap:
         print(f"[push_cap] daily cap {cap} reached, skip {category}", flush=True)
         return False
+    return True
+
+
+def mark_consumed(category: str) -> None:
+    """實際送出成功後才呼叫, 真正把今日 counter +1.
+
+    Bug fix: 舊版 check_and_consume() 在送出前就先 +1, 若 caller 3 次重試全部
+    失敗, 當日 cap 額度已經被「送失敗的訊息」燒光, 導致後面真正成功的次要
+    alert 被 cap 擋下但使用者其實一封都沒收到。現在改成 would_allow() 只讀
+    不寫, 送出確定成功後才呼叫這個函式扣額。
+    """
+    state = _load_state()
+    entry = _get_today_entry(state)
     entry["count"] = int(entry.get("count", 0)) + 1
     cats = entry.get("categories") or []
     cats.append(category)
     entry["categories"] = cats[-20:]  # keep last 20 for debug
     state[_STATE_KEY] = entry
     _save_state(state)
+
+
+def check_and_consume(category: str, cap: int = DEFAULT_DAILY_CAP) -> bool:
+    """[Deprecated] 舊 API: 檢查時就立刻 +1 counter, 保留給尚未遷移的舊 caller。
+
+    新 caller 請改用 would_allow() + mark_consumed() (送出成功後才扣額),
+    避免送失敗仍佔用當日額度。目前專案內的呼叫點已全部遷移, 這個函式只
+    是相容性保留, 行為維持原樣 (先 +1 再回傳)。
+    """
+    if not would_allow(category, cap):
+        return False
+    mark_consumed(category)
     return True
 
 

@@ -265,7 +265,9 @@ def check_and_push_if_surge() -> Optional[Dict]:
 
     try:
         import notifier
-        ok, info = notifier.send_message(msg, disable_preview=True)
+        # Bug fix: 之前沒傳 category → 完全繞過 push_cap 的每日 6 封次要 alert 共用
+        # 上限, 行情大幅波動時可無限次觸發. 補上 category 併入共用 cap.
+        ok, info = notifier.send_message(msg, disable_preview=True, category="strong_stock")
         if ok:
             sent_today.append(trigger_key)
             ssa[today_str] = sent_today
@@ -576,7 +578,8 @@ def check_and_push_intraday_strong() -> Optional[Dict]:
 
     try:
         import notifier
-        ok, info = notifier.send_message(msg, disable_preview=True)
+        # Bug fix: 同上, 補上 category 併入 push_cap 每日共用上限.
+        ok, info = notifier.send_message(msg, disable_preview=True, category="strong_stock")
         if ok and today_data is not None:
             today_data["count"] = today_data.get("count", 0) + 1
             today_data["last_ts"] = now_utc.isoformat()

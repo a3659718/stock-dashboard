@@ -38,8 +38,9 @@ def _safe_finmind_data(dataset: str, days: int = 7) -> Optional[List[Dict]]:
         if not token:
             return None
         import requests
-        end = dt.date.today().strftime("%Y-%m-%d")
-        start = (dt.date.today() - dt.timedelta(days=days)).strftime("%Y-%m-%d")
+        _today_tw = (dt.datetime.utcnow() + dt.timedelta(hours=8)).date()  # TPE 修正
+        end = _today_tw.strftime("%Y-%m-%d")
+        start = (_today_tw - dt.timedelta(days=days)).strftime("%Y-%m-%d")
         url = "https://api.finmindtrade.com/api/v4/data"
         params = {
             "dataset": dataset,
@@ -305,8 +306,8 @@ def _fetch_major_traders() -> Dict:
     # FinMind 沒有直接的大表 dataset, 從期交所 HTML 抓
     try:
         import requests
-        from datetime import date, timedelta
-        d = date.today() - timedelta(days=1)
+        from datetime import timedelta
+        d = (dt.datetime.utcnow() + dt.timedelta(hours=8)).date() - timedelta(days=1)  # TPE 修正
         # 期交所大型交易人未平倉表 daily
         url = (
             "https://www.taifex.com.tw/cht/3/largeTraderFutQry?"

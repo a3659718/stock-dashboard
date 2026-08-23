@@ -40,7 +40,7 @@ def fetch_recent_announcements(stock_id: str, days: int = 30) -> Dict:
         "count": N,
       }
     """
-    today = dt.date.today()
+    today = (dt.datetime.utcnow() + dt.timedelta(hours=8)).date()  # TPE 修正
     end = today.strftime("%Y-%m-%d")
     start = (today - dt.timedelta(days=days)).strftime("%Y-%m-%d")
 
@@ -165,8 +165,9 @@ def compute_pe_vs_peers(stock_id: str) -> Dict:
     """
     out = {"stock_pe": None, "valuation": "—", "context": ""}
 
-    today = dt.date.today().strftime("%Y-%m-%d")
-    start = (dt.date.today() - dt.timedelta(days=14)).strftime("%Y-%m-%d")
+    _today_tw = (dt.datetime.utcnow() + dt.timedelta(hours=8)).date()  # TPE 修正
+    today = _today_tw.strftime("%Y-%m-%d")
+    start = (_today_tw - dt.timedelta(days=14)).strftime("%Y-%m-%d")
 
     # 該股 PE
     try:
@@ -271,7 +272,7 @@ def fetch_holdings_change(stock_id: str, days: int = 90) -> Dict:
         "trend": "外資增持" / "外資減持" / "持平"
       }
     """
-    today = dt.date.today()
+    today = (dt.datetime.utcnow() + dt.timedelta(hours=8)).date()  # TPE 修正
     end = today.strftime("%Y-%m-%d")
     start = (today - dt.timedelta(days=days)).strftime("%Y-%m-%d")
 
@@ -524,7 +525,7 @@ def fetch_fundamental_metrics(stock_id: str) -> Dict:
         "summary": "近 6 月營收 YoY 平均 +12.5%; 2026Q1 EPS 4.5 (YoY +25%)"
       }
     """
-    today = dt.date.today()
+    today = (dt.datetime.utcnow() + dt.timedelta(hours=8)).date()  # TPE 修正
     start = (today - dt.timedelta(days=365)).strftime("%Y-%m-%d")
     end = today.strftime("%Y-%m-%d")
 

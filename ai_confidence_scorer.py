@@ -179,8 +179,18 @@ def rescore_with_ai(picks: List[Dict], market: str = "TW",
 
     # 重排 (只重排 scored_picks; rest 接在後面保原序)
     def _key(p):
-        return p.get("ai_adjusted_score") or (
-            (p.get("score") or p.get("entry_score") or 5) * (10 if p.get("entry_score") else 1) / 10
-        )
+        # Bug fix: 原本用 `p.get(...) or (...)` 這種 truthy fallback — 若
+        # ai_adjusted_score / score 剛好是合法的 0.0 (低分, 不是缺值), Python
+        # 會把 0.0 當 falsy 誤判成「沒有這個值」, 改用括號內的備援算式 (常常
+        # 會算出更高的值), 導致真正低分的股票悄悄被排到更前面。全部改用
+        # `is not None` 判斷, 讓 0 被當成合法分數, 不落入備援分支。
+        aas = p.get("ai_adjusted_score")
+        if aas is not None:
+            return aas
+        score = p.get("score")
+        entry_score = p.get("entry_score")
+        base = score if score is not None else (entry_score if entry_score is not None else 5)
+        mult = 10 if entry_score is not None else 1
+        return base * mult / 10
     scored_picks.sort(key=_key, reverse=True)
     return scored_picks + rest_picks

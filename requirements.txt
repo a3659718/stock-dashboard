@@ -16,3 +16,9 @@ gspread>=6.0.0,<7.0.0
 google-auth>=2.30.0,<3.0.0
 feedparser>=6.0.10,<7.0.0
 pandas_market_calendars>=4.4.0,<6.0.0
+# BUG FIX (smoke test 稽核發現): signal_tracker.py 在 Windows 上 (fcntl 不存在)
+# 會 fallback 用 portalocker 幫寫入的檔案上鎖, 避免多個排程/手動執行同時寫入
+# signal_tracker 的紀錄檔造成資料損毀。但這個套件從沒被列進 requirements.txt,
+# 導致「安裝好相依套件」之後, Windows 上這個鎖其實還是裝不到、悄悄退化成無鎖
+# 模式 (程式碼有 try/except 接住不會噴錯, 所以完全不會被發現) — 補上讓保護生效。
+portalocker>=2.7.0,<3.0.0

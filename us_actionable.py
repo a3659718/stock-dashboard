@@ -7,7 +7,7 @@ us_actionable.py
 sector ETF 強度 / Gemini 結論 / 入場標籤 / 持倉建議.
 
 對外 API:
-  compute_us_actionable_picks(top_n=10, min_score=55) -> List[Dict]
+  compute_us_actionable_picks(top_n=10, min_score=65) -> List[Dict]
 """
 from __future__ import annotations
 
@@ -178,7 +178,14 @@ def _enrich_pick(row: Dict) -> Dict:
         "entry_emoji": eval_res.get("entry_emoji"),
         "entry_score": eval_res.get("entry_score"),
         "entry_action": eval_res.get("entry_action"),
-        "score": eval_res.get("entry_score", 50) / 10.0,  # 轉成 0-10 對齊台股
+        # Bug fix: entry_score 這個 key 一定存在, 但 quick_evaluate 內部評估失敗時
+        # 值會是 None (見 entry_evaluator.py quick_evaluate 的失敗 fallback) —
+        # .get("entry_score", 50) 的 50 預設值只在 key 不存在時生效, key 存在但是
+        # None 一樣會拿到 None, 下面 /10.0 直接 TypeError。雖然外層
+        # compute_us_actionable_picks() 有 try/except 接住, 但代價是這檔股票整筆
+        # 被靜默丟掉 — 使用者永遠看不到這支可能真的不錯、只是評分器剛好失敗一次
+        # 的股票。改成 None 才 fallback 到 50 分。
+        "score": (eval_res.get("entry_score") if eval_res.get("entry_score") is not None else 50) / 10.0,
         "reasons": [],
         "warnings": [],
         # PE / EPS
@@ -339,4 +346,11 @@ def compute_us_actionable_picks(top_n: int = 10, min_score: int = 65,
             print(f"[us_actionable] enrich fail {r.get('symbol')}: {_e}", flush=True)
 
     enriched.sort(key=lambda x: -float(x.get("_adj_score") or 0))
-    return enriched[:top_n]
+    # BUG FIX: min_score 參數之前完全沒被套用, 排序後直接截 top_n, 導致就算候選池
+    # 全部都是低分股, 也會硬湊 top_n 檔推出去 (可能推低品質的入場建議)。
+    # 現在先用 min_score 過濾及格分數的候選, 若濾完不足 top_n 檔, 寧可回傳較少筆
+    # 也不用不及格的候選硬湊數。
+    filtered = [p for p in enriched if float(p.get("_adj_score") or 0) >= min_score]
+    if not filtered and enriched:
+        print(f"[us_actionable] 無候選達 min_score={min_score}, 回空 (原池 {len(enriched)} 檔)", flush=True)
+    return filtered[:top_n]

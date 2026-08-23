@@ -272,8 +272,9 @@ def fetch_tw_universe_daily(stock_ids_tuple: tuple, start_date: str, end_date: s
 
 @st.cache_data(ttl=900, show_spinner=False)
 def fetch_tw_stock_daily_one(stock_id: str, days: int = 120) -> pd.DataFrame:
-    end_date = dt.date.today().strftime("%Y-%m-%d")
-    start_date = (dt.date.today() - dt.timedelta(days=days)).strftime("%Y-%m-%d")
+    _today_tw = (dt.datetime.utcnow() + dt.timedelta(hours=8)).date()  # TPE 修正: UTC 00:00-07:59 時 date.today() 會慢一天
+    end_date = _today_tw.strftime("%Y-%m-%d")
+    start_date = (_today_tw - dt.timedelta(days=days)).strftime("%Y-%m-%d")
     df = _finmind_get_one("TaiwanStockPrice", stock_id, start_date, end_date)
     if df is None or df.empty:
         return pd.DataFrame()
@@ -315,8 +316,9 @@ def fetch_margin_universe(stock_ids_tuple: tuple, start_date: str, end_date: str
 @st.cache_data(ttl=86400, show_spinner=False)
 def fetch_shares_outstanding(stock_ids_tuple: tuple) -> Dict[str, float]:
     """回傳 {stock_id: 流通股本(張)}; 1張=1000股, 面額10元."""
-    end = dt.date.today().strftime("%Y-%m-%d")
-    start = (dt.date.today() - dt.timedelta(days=400)).strftime("%Y-%m-%d")
+    _today_tw = (dt.datetime.utcnow() + dt.timedelta(hours=8)).date()  # TPE 修正
+    end = _today_tw.strftime("%Y-%m-%d")
+    start = (_today_tw - dt.timedelta(days=400)).strftime("%Y-%m-%d")
     df = _fetch_universe("TaiwanStockBalanceSheet", list(stock_ids_tuple), start, end)
     if df.empty:
         return {}

@@ -156,8 +156,9 @@ def find_hidden_concept_stocks(keyword: str, days: int = 60,
         print(f"[concept_finder] universe failed: {e}", flush=True)
         return []
 
-    end_date = dt.date.today().strftime("%Y-%m-%d")
-    start_date = (dt.date.today() - dt.timedelta(days=days)).strftime("%Y-%m-%d")
+    _today_tw = (dt.datetime.utcnow() + dt.timedelta(hours=8)).date()  # TPE 修正
+    end_date = _today_tw.strftime("%Y-%m-%d")
+    start_date = (_today_tw - dt.timedelta(days=days)).strftime("%Y-%m-%d")
 
     universe_sids = set(universe["stock_id"].astype(str).tolist())
 

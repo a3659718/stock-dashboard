@@ -324,13 +324,19 @@ def build_post_market_msg() -> str:
         wt_today = state.get("watchlist_triggers_today") or []
         # 過濾今天
         import datetime as _dt
-        today_str = _dt.date.today().strftime("%Y-%m-%d")
+        # Bug fix: dt.date.today() 是伺服器 UTC 日期。目前 tw_close/tw_post_market
+        # 只在 TPE 15:03 (UTC 07:03) 跑, 這個時間點 UTC 日期剛好等於 TPE 日期不會
+        # 出錯, 但改成 TPE 日期跟 scripts/market_open_alert.py 寫入這批資料時用的
+        # 日期一致, 之後排程時間調整或手動觸發也不會有邊界問題。
+        today_str = (_dt.datetime.utcnow() + _dt.timedelta(hours=8)).date().strftime("%Y-%m-%d")
         wt_today = [t for t in wt_today if t.get("date") == today_str]
         if wt_today:
             lines.append("━━━━━━━ ⭐ Watchlist 觸發 ━━━━━━━")
             for t in wt_today[:5]:
                 sid = _esc(t.get("stock_id", ""))
-                tt = _esc(t.get("trigger_type", ""))
+                # type_label (人類看得懂的中文標籤, 例如「現價跌破 X」) 是這次新增
+                # 補存的欄位; 舊資料 / 補存失敗時退回原始 trigger_type 代碼字串。
+                tt = _esc(t.get("type_label") or t.get("trigger_type", ""))
                 cur = t.get("current", "—")
                 val = t.get("value", "—")
                 lines.append(f"  <code>{sid}</code> {tt} (現價 {cur} / 條件 {val})")

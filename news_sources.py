@@ -295,6 +295,49 @@ def fetch_macro_indicators() -> Dict:
 TRUMP_TS_ACCOUNT_ID = "107780257626128497"  # @realDonaldTrump 的固定 ID
 
 
+def fetch_external_signals_bounded(timeout_sec: float = 5.0) -> Dict:
+    """開盤主推播 (fmt_tw_open_picks / fmt_us_open_picks) 專用: 有界時間版的
+    油價 + macro + Trump 訊號彙整.
+
+    BUG FIX (稽核發現): 這 3 個來源原本是在 notifier._fmt_external_signals_block()
+    格式化文字的當下才「順便」現抓, 而且是序列抓 (油價 → 5 檔 macro 逐一 → Trump),
+    完全沒有計入 market_open_alert.py 自己「主推要優先且準時送出, 不能被慢工卡住」
+    的設計 (_run_us_open_main 的註解原文就是這樣寫的)。加上 @st.cache_data 的
+    ttl 在 GitHub Actions 這種「每次都是全新 process」的排程環境下完全沒有跨執行
+    的快取效果, 等於每次開盤推播都要老實做完 7 次序列外部連線才能送出主推。
+
+    這裡改成: 平行抓 + 有總時間上限 (預設 5 秒), 抓不完的就跳過不等, 讓呼叫端
+    可以把結果直接塞進 data["external_signals"] 給 notifier 當純格式化用的
+    「已經抓好的資料」, 不會因為某個來源慢/被限流就拖累主推播的準時送出。
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    tasks = {
+        "oil": fetch_oil_signal,
+        "macro": fetch_macro_indicators,
+        "trump": fetch_trump_truth_social,
+    }
+    out: Dict = {}
+    ex = ThreadPoolExecutor(max_workers=len(tasks))
+    futs = {ex.submit(fn): name for name, fn in tasks.items()}
+    try:
+        for fut in as_completed(futs, timeout=timeout_sec):
+            name = futs[fut]
+            try:
+                out[name] = fut.result()
+            except Exception as e:
+                print(f"[news_sources] external_signals[{name}] 失敗 (non-fatal): {e}", flush=True)
+    except Exception:
+        # as_completed 逾時會 raise TimeoutError — 沒抓完的來源就跳過不等,
+        # 已完成的仍照收 (out 已經在迴圈裡邊跑邊塞, 不會因為逾時而整批丟掉)。
+        pass
+    # 不呼叫 ex.shutdown(wait=True) (預設 with 區塊結束時的行為) — 避免又卡在
+    # 等未完成的 thread 收尾, 讓還在跑的背景 thread 自然結束就好 (最多 3 條,
+    # 排程 process 本來就會在整個 script 結束時一起收掉)。
+    ex.shutdown(wait=False)
+    return out
+
+
 @st.cache_data(ttl=900, show_spinner=False)
 def fetch_trump_truth_social(max_items: int = 10) -> List[Dict]:
     """從 Truth Social 公開 endpoint 抓 Trump 最新貼文。

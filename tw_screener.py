@@ -78,7 +78,7 @@ def _last_trading_day_tw(today: dt.date | None = None) -> dt.date:
     """回傳「最近一個台股交易日」(週末 / 假日 → 往前推).
     B3 修正: 用 holiday_check 判斷, 失敗時 fallback 到只跳週末.
     """
-    today = today or dt.date.today()
+    today = today or (dt.datetime.utcnow() + dt.timedelta(hours=8)).date()  # TPE 修正
     try:
         import holiday_check
         # 從今天往前最多回 14 天找最近交易日
@@ -506,7 +506,7 @@ def run_all_screens(
     universe = info["stock_id"].head(params.max_stocks).tolist()
     universe_t = tuple(universe)
 
-    today = dt.date.today()
+    today = (dt.datetime.utcnow() + dt.timedelta(hours=8)).date()  # TPE 修正
     start = (today - dt.timedelta(days=120)).strftime("%Y-%m-%d")
     end = today.strftime("%Y-%m-%d")
 

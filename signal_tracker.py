@@ -143,7 +143,13 @@ def _mutate_signals_atomically(mutate_fn) -> int:
 
 
 def _today_str() -> str:
-    return dt.date.today().strftime("%Y-%m-%d")
+    # Bug fix: 原本用 dt.date.today() (執行機器的系統本地日期). 本專案實際跑在
+    # GitHub Actions (UTC), 台北 00:00-07:59 這段時間 UTC 還是「前一天」, 會讓
+    # predicted_at 記到比台北實際交易日晚一天的日期 — 同一個台北交易日可能因為
+    # 橫跨 UTC 日界被切成兩天, 造成 evaluate_at 的驗證窗口提前/延後一天觸發,
+    # accuracy_summary() 算出的滾動勝率也悄悄跟著錯. 改成跟 push_cap._today_tpe()
+    # 一致, 統一用 TPE (UTC+8) 日期。
+    return (dt.datetime.utcnow() + dt.timedelta(hours=8)).strftime("%Y-%m-%d")
 
 
 def _add_days(d: str, n: int) -> str:
@@ -308,7 +314,10 @@ def accuracy_summary(signal_type: Optional[str] = None,
     """指定 signal_type 的滾動準確率 (None = 全部)."""
     state = _load_state()
     records: List[Dict] = state.get(_STATE_KEY, []) or []
-    cutoff = dt.date.today() - dt.timedelta(days=lookback_days)
+    # Bug fix: 跟 _today_str() 同理, 改用 TPE 日期算 cutoff, 避免跟系統本地
+    # (UTC, GitHub Actions) 日期不一致造成滾動視窗邊界悄悄偏移一天。
+    today_tpe = (dt.datetime.utcnow() + dt.timedelta(hours=8)).date()
+    cutoff = today_tpe - dt.timedelta(days=lookback_days)
     cutoff_str = cutoff.strftime("%Y-%m-%d")
     total = 0
     hit = 0

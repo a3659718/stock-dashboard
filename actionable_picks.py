@@ -357,6 +357,15 @@ def compute_actionable_picks(top_n: int = 5, market: str = "TW",
 
 
 def _compute_rr(entry_low, entry_high, target, stop) -> Optional[float]:
+    # Bug fix (一致性): notifier.py 維護了一份幾乎一樣的 _compute_rr, 兩份獨立
+    # 程式碼只要有一邊改了進位/防呆邏輯就會悄悄不同步, dashboard 跟推播的 R:R
+    # 就可能對不上且沒有測試會抓到。改成優先呼叫 notifier 的版本 (單一事實
+    # 來源), import 失敗才 fallback 回這裡的舊邏輯, 不影響離線可測試性。
+    try:
+        import notifier as _notifier
+        return _notifier._compute_rr(entry_low, entry_high, target, stop)
+    except Exception:
+        pass
     try:
         el, eh, t, s = float(entry_low), float(entry_high), float(target), float(stop)
         entry = (el + eh) / 2
@@ -485,6 +494,13 @@ def _build_from_potential(p: Dict, parent_data: Dict) -> Optional[Dict]:
         if ev_summary and ev_summary != "—":
             reasons.append(f"財報: {ev_summary[:50]}")
 
+    warnings = []
+    if p.get("_levels_invalid"):
+        # 見 potential_picker._validate_gemini_pick: AI 產生的進場/目標/停損價
+        # 型別錯誤或順序不合理 (e.g. 停損高於進場價), 已被清成 None, 這裡只是
+        # 讓使用者知道「這檔股票有推薦但價位資料異常」, 而非悄悄顯示壞數字。
+        warnings.append("⚠️ AI 產生的進場/目標/停損價資料異常, 已隱藏, 請自行確認價位")
+
     return {
         "stock_id": sid,
         "name": p.get("name", ""),
@@ -496,7 +512,7 @@ def _build_from_potential(p: Dict, parent_data: Dict) -> Optional[Dict]:
         "hold_period": p.get("hold_period", ""),
         "catalyst": catalyst,
         "reasons": reasons,
-        "warnings": [],
+        "warnings": warnings,
         "source": "potential_picker",
     }
 
@@ -672,8 +688,13 @@ def fmt_actionable_picks_tg(picks: List[Dict]) -> str:
     for i, p in enumerate(picks, 1):
         if not p.get("stock_id"):
             continue  # skip dummy regime entry
+        # Bug fix: rr 是 None 時原本會直接印出字面 "R:R None" 到 Telegram 訊息;
+        # 跟 dashboard 端 (app.py) 顯示 "—" 不一致, 同一筆 pick 兩邊呈現不同。
+        # 統一顯示成 "—"。
         rr = p.get("rr")
-        rr_str = f"R:R {rr}" + (" ⭐⭐" if rr and rr >= 3 else " ⭐" if rr and rr >= 2 else "")
+        rr_str = f"R:R {rr if rr is not None else '—'}" + (
+            " ⭐⭐" if rr and rr >= 3 else " ⭐" if rr and rr >= 2 else ""
+        )
         score = p.get("score", 0)
         lines.append(
             f"<b>{i}. {_esc(p.get('stock_id'))} {_esc(p.get('name'))}</b>  "

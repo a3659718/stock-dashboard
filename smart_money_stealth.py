@@ -8,15 +8,17 @@ smart_money_stealth.py
    - 借券賣出減少 (法人空單回補)
 
 2. 價量結構:
-   - 量比 ≥ 2.0x (異常量, 不只 1.5x)
-   - 今日漲跌 ≤ +1.5% (沒被市場注意到)
+   - 量比 ≥ 1.6x (異常量; 原 2.0x 太嚴, 已微調)
+   - 今日漲跌 ≤ +2.0% (沒被市場注意到; 原 1.5% 太嚴, 已微調)
    - 股價在 20MA ±5% 區間 (沒過熱)
    - 近 10 日窄幅整理 range ≤ 6%
 
 3. 題材相關性:
    - 屬於熱門題材 top 3
-   - 同族群已有 2-3 支大漲 (確認真熱)
-   - 個股還沒進入領漲名單 (族群均漲 +3% 但個股 +0~+2%)
+   - 掃該題材「全部成分股」(sector_pulse.TW_THEMES, 每題材 6~16 檔), 不再只看
+     「今日領漲前 5 名」— 領漲前 5 名幾乎必然已經漲超過門檻, 跟「還沒被注意到」
+     的目標互相矛盾, 導致候選池常態性被縮到剩沒幾檔甚至 0 檔 (bug fix)
+   - 個股還沒進入領漲名單 (族群均漲 +2% 以上, 但個股本身還沒跟上)
 
 4. 進場價建議 (每檔具體):
    - 進場區: 當前 ~ 5MA
@@ -152,17 +154,18 @@ def _evaluate_smart_money_stock(stock_id: str, name: str, theme: str,
         reasons = []
         warns = []
 
-        # 1. 量比 ≥ 2.0
-        cond_vol = vol_ratio >= 2.0
+        # 1. 量比 ≥ 1.6 (原 2.0 太嚴, 池子擴大後配合微調 — 跟 sector_pulse 同類函式
+        #    的 1.5 門檻更接近, 仍算明顯異常量)
+        cond_vol = vol_ratio >= 1.6
         if cond_vol:
-            reasons.append(f"📊 量比 {vol_ratio:.2f}x (≥2.0, 異常量)")
+            reasons.append(f"📊 量比 {vol_ratio:.2f}x (≥1.6, 異常量)")
 
-        # 2. 今日 ≤ +1.5%
-        cond_today = today_pct <= 1.5
+        # 2. 今日 ≤ +2.0% (原 1.5% 太嚴)
+        cond_today = today_pct <= 2.0
         if cond_today:
-            reasons.append(f"📉 今日僅 {today_pct:+.2f}% (≤+1.5%, 還沒被注意)")
+            reasons.append(f"📉 今日僅 {today_pct:+.2f}% (≤+2.0%, 還沒被注意)")
         else:
-            warns.append(f"⚠️ 今日已 {today_pct:+.2f}% (>+1.5%, 不夠潛伏)")
+            warns.append(f"⚠️ 今日已 {today_pct:+.2f}% (>+2.0%, 不夠潛伏)")
 
         # 3. 股價在 20MA ±5%
         cond_ma = abs(ma20_deviation) <= 5
@@ -209,8 +212,8 @@ def _evaluate_smart_money_stock(stock_id: str, name: str, theme: str,
             (3 if cond_theme else 0) +
             (4 if cond_chip else 0)
         )
-        if score < 7:
-            return None  # 分數不夠
+        if score < 6:
+            return None  # 分數不夠 (原門檻 7, 池子擴大 + 量比/今日% 微調後配合放寬)
 
         # === 進出場價 ===
         entry_low = round(ma5 * 0.99, 2)
@@ -253,7 +256,6 @@ def scan_smart_money_stealth(top_n: int = 5) -> List[Dict]:
         import sector_pulse as sp
         hot = sp.compute_hot_themes()
         themes_df = hot.get("themes")
-        leaders_map = hot.get("leaders") or {}
         if themes_df is None or themes_df.empty:
             return []
         # 取 top 3 熱門題材
@@ -262,23 +264,57 @@ def scan_smart_money_stealth(top_n: int = 5) -> List[Dict]:
         print(f"[smart_stealth] hot_themes fail: {e}", flush=True)
         return []
 
-    candidates = []
+    # Bug fix (選股池): 原本從 sp.compute_hot_themes()["leaders"] 挑股 — 那是「該題材
+    # 今日漲幅前 5 名」。但這裡要找的是「族群熱、個股還沒被市場注意到」(今日 ≤ 門檻),
+    # 這兩個條件互相矛盾: 題材真的熱 (平均漲 ≥2% 才會入選) 時, 今日漲幅前 5 名幾乎必然
+    # 已經漲超過門檻, 候選池常態性被縮到剩沒幾檔甚至 0 檔 (dashboard「目前無訊號」
+    # 常態出現的主因)。改成直接掃該題材的「全部成分股」(sector_pulse.TW_THEMES,
+    # 每題材 6~16 檔), 才有機會找到「族群熱但個股自己還沒跟上」的真正落後股。
+    name_map: Dict[str, str] = {}
+    try:
+        import data_sources as _ds
+        info = _ds.get_taiwan_stock_info()
+        if info is not None and not info.empty and "stock_name" in info.columns:
+            name_map = info.set_index("stock_id")["stock_name"].to_dict()
+    except Exception as e:
+        print(f"[smart_stealth] stock name lookup fail (non-fatal): {e}", flush=True)
+
+    # 同一檔股票若橫跨多個題材 (e.g. 2308 同時在 AI伺服器/機器人), 只算在排名最高的
+    # 題材下 — 跟 sector_pulse 其他函式的去重方式一致, 避免重複評估同一檔股票。
+    tasks = []  # (sid, name, theme, theme_avg)
+    seen_stocks: set = set()
     for theme_row in top_themes:
         theme = theme_row.get("題材", "")
         theme_avg = float(theme_row.get("平均%", 0) or 0)
         if theme_avg < 2.0:
             continue  # 族群不夠熱
-        df = leaders_map.get(theme)
-        if df is None or df.empty:
-            continue
-        for _, r in df.iterrows():
-            sid = str(r.get("stock_id", ""))
-            name = str(r.get("stock_name", "") or r.get("name", ""))
-            if not sid:
+        for sid in sp.TW_THEMES.get(theme, []):
+            sid = str(sid)
+            if not sid or sid in seen_stocks:
                 continue
-            result = _evaluate_smart_money_stock(sid, name, theme, theme_avg)
-            if result:
-                candidates.append(result)
+            seen_stocks.add(sid)
+            tasks.append((sid, name_map.get(sid, ""), theme, theme_avg))
+
+    candidates = []
+    if tasks:
+        # 池子從「每題材前 5 名」擴大成「每題材全部成分股」後, 掃描檔數會變成 3~5 倍
+        # (原本 top3 題材最多 15 檔 → 現在可能 30~45 檔), 每檔都要跑 yfinance + 籌碼
+        # API, 序列跑會讓按鈕等超過 1 分鐘。改用 ThreadPoolExecutor 平行跑, 維持原本
+        # 「約 30s」的體感速度。
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        with ThreadPoolExecutor(max_workers=6) as ex:
+            futs = {
+                ex.submit(_evaluate_smart_money_stock, sid, name, theme, theme_avg): sid
+                for sid, name, theme, theme_avg in tasks
+            }
+            for fut in as_completed(futs):
+                try:
+                    result = fut.result()
+                except Exception as e:
+                    print(f"[smart_stealth] {futs[fut]} eval failed: {e}", flush=True)
+                    result = None
+                if result:
+                    candidates.append(result)
 
     candidates.sort(key=lambda x: x.get("score", 0), reverse=True)
     return candidates[:top_n]
@@ -294,7 +330,7 @@ def fmt_smart_stealth_msg(picks: List[Dict]) -> str:
     now_tpe = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=8)).strftime("%H:%M")
     lines = [
         f"🕵️ <b>大戶偷偷進場 Top {len(picks)}</b> · {now_tpe} TPE",
-        "<i>(量比≥2x + 沒大漲 + 籌碼/族群配合)</i>",
+        "<i>(量比≥1.6x + 沒大漲 + 籌碼/族群配合)</i>",
         "",
     ]
     for i, p in enumerate(picks, 1):

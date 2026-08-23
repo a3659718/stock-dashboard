@@ -228,7 +228,12 @@ def _check_acceleration(f: Dict, theme_data: Optional[Dict] = None) -> Optional[
         reasons.append("20d +" + str(f["twenty_pct"]) + "%"); score += 5
     if f.get("is_vpt_up"):
         reasons.append("量價同向"); score += 5
-    if (f.get("pct_from_ath") or -100) >= -15:
+    # Bug fix: 原本 `f.get("pct_from_ath") or -100` — 若一檔股票剛好站上歷史新高
+    # (pct_from_ath == 0.0, 合法且是最強勢的情況), 0.0 被當 falsy 誤判成缺值,
+    # 退回 -100 這個預設值, 導致本該加 10 分的「有突破潛力」判斷被跳過, 全場
+    # 最強勢的股票反而被低估分數。改用 is not None 判斷, 讓 0 被當合法值。
+    _pct_from_ath = f.get("pct_from_ath")
+    if (_pct_from_ath if _pct_from_ath is not None else -100) >= -15:
         reasons.append("距 ATH 僅 " + str(-f["pct_from_ath"]) + "% (有突破潛力)"); score += 10
     if (f.get("rsi") or 50) >= 75:
         warnings.append("RSI " + str(f["rsi"]) + " 偏熱")
@@ -244,7 +249,14 @@ def _check_acceleration(f: Dict, theme_data: Optional[Dict] = None) -> Optional[
 def _check_squeeze_setup(f: Dict, theme_data: Optional[Dict] = None) -> Optional[Dict]:
     if not (f.get("is_tight") or f.get("bb_squeeze")):
         return None
-    if not f.get("vol_dry_5d"):
+    # Bug fix / 精進: 原本硬性要求 vol_dry_5d (量縮到底), 但「量縮到底」跟「沒人
+    # 要買也沒人要賣的死股」其實無法區分 — 兩者都會通過這個條件。真正的 Wyckoff
+    # 式安靜吸籌, 常見特徵是「量縮整理中, 上漲日的量能仍比下跌日大」(VPT 斜率為
+    # 正), 這種訊號比單純量縮更能篩掉死股、留下真的有人在買的標的。改成「量縮
+    # 或 VPT 向上」1 選 1, 讓這個類別也能抓到「量還沒完全縮到底、但籌碼已經在
+    # 悄悄轉手」的早期階段, 跟 is_vpt_up 只在其他類別當加分項不同, 這裡讓它也能
+    # 直接放行。
+    if not (f.get("vol_dry_5d") or f.get("is_vpt_up")):
         return None
     if f.get("pct_from_52w_high") is None or f["pct_from_52w_high"] < -25:
         return None
@@ -260,7 +272,18 @@ def _check_squeeze_setup(f: Dict, theme_data: Optional[Dict] = None) -> Optional
         reasons.append("tight base (近 20 日 " + str(f["tight_range"]) + "%)"); score += 15
     if f.get("bb_squeeze"):
         reasons.append("BB 寬度近 60 日 percentile 20% 以下"); score += 15
-    reasons.append("量縮整理 (籌碼沉澱)")
+    # BUG FIX: vol_dry_5d / is_vpt_up 是這個類別「量能訊號」這一關的兩種互斥滿足方式
+    # (見上面 gate 的 or 判斷), 但原本只有 is_vpt_up 給 +8 分, vol_dry_5d 完全沒加分
+    # — 造成靠 vol_dry_5d 過關的股票, 雖然通過但拿不到對應分數, 排序時反而輸給用
+    # VPT 過關的股票, 兩種同等地位的證據被不一致地對待。改成兩者都給 +8, 若兩者
+    # 都成立只算一次 (避免雙重計分)。
+    if f.get("vol_dry_5d"):
+        reasons.append("量縮整理 (籌碼沉澱)"); score += 8
+    if f.get("is_vpt_up"):
+        reasons.append("VPT 量價背離向上 (上漲日量能較大, 悄悄吸籌訊號)")
+        if not f.get("vol_dry_5d"):
+            score += 8
+            warnings.append("量未完全縮到底, 靠 VPT 吸籌訊號判斷, 建議搭配基本面確認")
     if f.get("base_depth") and 5 <= f["base_depth"] <= 15:
         reasons.append("健康 base 深度 " + str(f["base_depth"]) + "%"); score += 10
     if f.get("is_stage2"):

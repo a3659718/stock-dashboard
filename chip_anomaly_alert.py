@@ -29,8 +29,12 @@ def _check_one_stock(sid: str) -> List[Dict]:
     try:
         import data_sources as ds
         # 用 fetch_institutional_universe (data_sources 唯一公開 API)
-        end = dt.date.today().strftime("%Y-%m-%d")
-        start = (dt.date.today() - dt.timedelta(days=20)).strftime("%Y-%m-%d")
+        # Bug fix: dt.date.today() 是伺服器 UTC 日期, 台北 00:00-07:59 這段 UTC
+        # 還是「前一天」, 會讓法人籌碼抓取區間整段偏移一天, 少算最新一個交易日的
+        # 買賣超, 導致「連買/連賣 ≥5 日」的判斷低估。改用 TPE (UTC+8) 日期。
+        _today_tpe = (dt.datetime.utcnow() + dt.timedelta(hours=8)).date()
+        end = _today_tpe.strftime("%Y-%m-%d")
+        start = (_today_tpe - dt.timedelta(days=20)).strftime("%Y-%m-%d")
         inst_df = ds.fetch_institutional_universe((sid,), start, end)
         if inst_df is None or inst_df.empty:
             return out
@@ -102,7 +106,9 @@ def _check_one_stock(sid: str) -> List[Dict]:
 def check_chip_anomaly() -> List[Dict]:
     state = watchlist_store.load_monitor_state()
     ca_state = state.setdefault("chip_anomaly_alert", {})
-    today_str = dt.date.today().strftime("%Y-%m-%d")
+    # Bug fix: 跟上面 _check_one_stock 一樣改用 TPE 日期, 避免台北 00:00-07:59
+    # 這段時間 UTC 「今天」還沒跨日, 導致每日重置的時間點跟其他模組對不上。
+    today_str = (dt.datetime.utcnow() + dt.timedelta(hours=8)).date().strftime("%Y-%m-%d")
     if ca_state.get("date") != today_str:
         ca_state.clear()
         ca_state.update({"date": today_str, "alerted": []})
@@ -149,7 +155,7 @@ def mark_alerts_sent(alerts: List[Dict]) -> None:
     try:
         state = watchlist_store.load_monitor_state()
         ca = state.setdefault("chip_anomaly_alert", {})
-        today_str = dt.date.today().strftime("%Y-%m-%d")
+        today_str = (dt.datetime.utcnow() + dt.timedelta(hours=8)).date().strftime("%Y-%m-%d")
         if ca.get("date") != today_str:
             ca.clear()
             ca.update({"date": today_str, "alerted": []})

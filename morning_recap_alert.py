@@ -193,16 +193,14 @@ def build_morning_recap_msg() -> str:
 
 
 def check_and_push() -> Dict:
-    """給 cron 呼叫. 回 {ok, sent, msg_len, error}."""
-    try:
-        import notifier
-        msg = build_morning_recap_msg()
-        if not msg:
-            return {"ok": False, "sent": False, "error": "empty msg"}
-        ok, info = notifier.send_message(msg, disable_preview=True)
-        print(f"[morning_recap] sent: ok={ok} info={info}", flush=True)
-        return {"ok": ok, "sent": ok, "msg_len": len(msg), "info": info}
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        return {"ok": False, "sent": False, "error": str(e)}
+    """[已併入 08:02 晨報, no-op] 給 cron 呼叫. 回 {ok, sent, msg_len, error}.
+
+    使用者反映早上 07:32(本模組)/08:02(morning_brief)/08:17/08:33(pre_market) 四封
+    推播集中在 1 小時內、內容高度重疊 (都在講美股隔夜收盤). 本模組的獨有內容
+    (一句話定調 / 昨夜推播統計 / 30 日勝率) 已併入 scripts/morning_brief.py 的
+    _section_recap_and_tldr(), 這裡改成 no-op 不再獨立送出, 使用者從四封減為三封。
+    build_morning_recap_msg() 仍保留 (dashboard 或手動需要完整版時可呼叫)。
+    """
+    print("[morning_recap] 已併入 08:02 晨報 (scripts/morning_brief.py), "
+          "本次排程 no-op 不推播", flush=True)
+    return {"ok": True, "sent": False, "skipped": "merged_into_morning_brief"}

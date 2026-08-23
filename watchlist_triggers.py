@@ -260,12 +260,24 @@ def _evaluate_trigger(trigger: Dict, market_state: Dict) -> Optional[str]:
 
 
 def check_triggers() -> List[Dict]:
-    """掃所有 armed 的 trigger, 回觸發的清單. 同時把已觸發的 mark fired_at + disarm."""
+    """掃所有 armed 的 trigger, 回觸發的清單.
+
+    Bug fix: 原本這裡會在偵測到觸發的當下就直接把 armed 設 False + fired_at 寫回
+    state — 但這些是 one-shot 觸發 (使用者設「跌破 1000 通知我」, 通知過一次就該
+    解除), 一旦這裡寫回去, 不管呼叫端後續有沒有真的把訊息送出去 (實測發現送出
+    這段目前是靠 scripts/market_open_alert.py 把結果暫存進
+    monitor_state["watchlist_triggers_today"], 等 15:00 彙總時才真正組訊息推播),
+    這個 trigger 都已經「用完了」— 如果彙總那步失敗 (例如程式改版/暫時性錯誤),
+    使用者的警報就會不聲不響永遠消失, 且無法重跑補救。
+    改成 check_triggers() 只負責「找出符合條件的」, 不動 armed/fired_at; 呼叫端
+    確認已經把結果妥善保存 (至少寫進待彙總的 state) 之後, 再呼叫
+    mark_triggers_fired() 才真正解除警戒, 避免半途出錯就把使用者的警報吃掉。
+    """
     state = _load_state()
     triggers: Dict = state.get(_STATE_KEY, {}) or {}
     if not triggers:
         return []
-    today = dt.date.today().strftime("%Y-%m-%d")
+    today = (dt.datetime.utcnow() + dt.timedelta(hours=8)).date().strftime("%Y-%m-%d")
 
     # group by stock_id 一次抓資料
     by_stock: Dict[str, List] = {}
@@ -301,8 +313,6 @@ def check_triggers() -> List[Dict]:
                 continue
             msg = _evaluate_trigger(t, m_state)
             if msg:
-                t["fired_at"] = today
-                t["armed"] = False
                 fired.append({
                     "id": tid,
                     "stock_id": sid,
@@ -311,12 +321,44 @@ def check_triggers() -> List[Dict]:
                     "type_label": TRIGGER_TYPES.get(t.get("type", ""), t.get("type", "")),
                     "msg": msg,
                     "current": m_state.get("close_today"),
+                    # Bug fix: 原本沒帶原始門檻值出去, 下游 (scripts/market_open_alert.py
+                    # 累積進 watchlist_triggers_today, tw_post_market_summary.py 讀出來
+                    # 顯示) 因此永遠顯示「條件 None」— 這裡補上, 讓 15:00 彙總能顯示
+                    # 完整的「現價 X / 條件 Y」。
+                    "value": t.get("value"),
+                    "fired_at": today,
                 })
 
-    if fired:
-        state[_STATE_KEY] = triggers
-        _save_state(state)
     return fired
+
+
+def mark_triggers_fired(fired: List[Dict]) -> None:
+    """把 check_triggers() 回傳、且已經確認妥善保存 (至少寫進待彙總 state) 的
+    trigger 標記 fired_at + armed=False (解除警戒, one-shot 用掉)。
+
+    呼叫端只有在確定這批 fired 已經被安全記下來 (寫進 monitor_state 給後續彙總
+    推播用, 或已經直接送出成功) 之後才該呼叫這個函式 — 若中途保存/推播失敗,
+    不呼叫這個函式即可, 下次 check_triggers() 還會再抓到同一批, 不會漏推。
+    """
+    if not fired:
+        return
+    try:
+        state = _load_state()
+        triggers: Dict = state.get(_STATE_KEY, {}) or {}
+        changed = False
+        for f in fired:
+            tid = f.get("id")
+            t = triggers.get(tid)
+            if not t:
+                continue
+            t["fired_at"] = f.get("fired_at") or (dt.datetime.utcnow() + dt.timedelta(hours=8)).date().strftime("%Y-%m-%d")
+            t["armed"] = False
+            changed = True
+        if changed:
+            state[_STATE_KEY] = triggers
+            _save_state(state)
+    except Exception as e:
+        print(f"[watchlist_triggers] mark_triggers_fired failed (non-fatal, will retry next check): {e}", flush=True)
 
 
 def fmt_trigger_alerts(fired: List[Dict]) -> str:

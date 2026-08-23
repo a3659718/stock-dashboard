@@ -81,7 +81,9 @@ def fetch_large_holders_change(stock_id: str, days: int = 30) -> Dict:
     trend: 'increasing' (主力集中), 'decreasing' (主力出貨), 'stable'
     抓不到回 {}.
     """
-    today = dt.date.today()
+    # Bug fix: dt.date.today() 是伺服器本地/UTC 日期, 台北 00:00-07:59 這段 UTC
+    # 還是「前一天」, 會讓抓取區間整段偏移一天。改用 TPE (UTC+8) 日期。
+    today = (dt.datetime.utcnow() + dt.timedelta(hours=8)).date()
     end = today.strftime("%Y-%m-%d")
     start = (today - dt.timedelta(days=days + 5)).strftime("%Y-%m-%d")
     df = _try_fetch(_LARGE_HOLDER_DATASETS, stock_id, start, end)
@@ -145,7 +147,9 @@ def fetch_securities_lending(stock_id: str, days: int = 10) -> Dict:
     回傳 {lending_balance_now, lending_change_5d, signal}
     signal: 'short_pressure' (借券激增), 'short_cover' (借券回補), 'stable'
     """
-    today = dt.date.today()
+    # Bug fix: dt.date.today() 是伺服器本地/UTC 日期, 台北 00:00-07:59 這段 UTC
+    # 還是「前一天」, 會讓抓取區間整段偏移一天。改用 TPE (UTC+8) 日期。
+    today = (dt.datetime.utcnow() + dt.timedelta(hours=8)).date()
     end = today.strftime("%Y-%m-%d")
     start = (today - dt.timedelta(days=days + 5)).strftime("%Y-%m-%d")
     df = _try_fetch(_LENDING_DATASETS, stock_id, start, end)
@@ -207,7 +211,9 @@ def fetch_main_broker_flow(stock_id: str, days: int = 5) -> Dict:
     回傳 {top_buy_brokers: [...], top_sell_brokers: [...],
           foreign_proxy_net: int, main_force_net: int}
     """
-    today = dt.date.today()
+    # Bug fix: dt.date.today() 是伺服器本地/UTC 日期, 台北 00:00-07:59 這段 UTC
+    # 還是「前一天」, 會讓抓取區間整段偏移一天。改用 TPE (UTC+8) 日期。
+    today = (dt.datetime.utcnow() + dt.timedelta(hours=8)).date()
     end = today.strftime("%Y-%m-%d")
     start = (today - dt.timedelta(days=days + 3)).strftime("%Y-%m-%d")
     df = _try_fetch(_BROKER_DATASETS, stock_id, start, end)

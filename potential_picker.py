@@ -142,10 +142,68 @@ def _gemini_pick_with_targets(candidates: List[Dict], macro_context: str = "",
         text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.MULTILINE)
         data = json.loads(text)
         if isinstance(data, list):
-            return data[:top_n]
+            # Bug fix: Gemini 是自由生成 JSON, 數值型欄位的型別/合理性完全沒有
+            # 保證 (可能給字串、可能停損高於進場價等亂序資料). 這些價位會被
+            # actionable_picks 直接拿去顯示/推播/算 R:R/算部位大小, 壞資料
+            # 沒被擋下的話輕則顯示錯誤價位, 重則讓 dashboard 某個分頁因型別
+            # 不合直接崩潰。這裡做最後一道清理防線再回傳。
+            cleaned = [_validate_gemini_pick(x) for x in data[:top_n]]
+            return [c for c in cleaned if c]
         return []
     except Exception:
         return []
+
+
+def _validate_gemini_pick(item: Dict) -> Optional[Dict]:
+    """驗證 + 清理 Gemini 回傳的單筆 pick.
+
+    數值型欄位一律 try 轉 float, 轉不了 (型別錯) 或不合理 (NaN/inf) 就清成 None,
+    不讓壞資料一路帶到下游才爆炸。另外做「多頭進場合理性」檢查: 停損 < 進場
+    區間 <= 目標價, 任一不合理就把整組價位清掉 (而非顯示/推播明顯錯亂的價位),
+    但保留股票代號/名稱/理由等其餘欄位, 讓使用者仍看得到這檔股票, 只是價位
+    標記為「資料異常」不顯示。
+    """
+    if not isinstance(item, dict):
+        return None
+    sid = str(item.get("stock_id", "") or "").strip()
+    if not sid:
+        return None
+
+    def _num(key):
+        v = item.get(key)
+        try:
+            f = float(v)
+            if f != f or f in (float("inf"), float("-inf")):  # NaN / inf
+                return None
+            return f
+        except (TypeError, ValueError):
+            return None
+
+    current = _num("current")
+    entry_low = _num("entry_low")
+    entry_high = _num("entry_high")
+    target_price = _num("target_price")
+    stop_loss = _num("stop_loss")
+
+    levels_ok = (
+        entry_low is not None and entry_high is not None and
+        target_price is not None and stop_loss is not None and
+        stop_loss < entry_low <= entry_high < target_price
+    )
+    if not levels_ok:
+        entry_low = entry_high = target_price = stop_loss = None
+
+    out = dict(item)
+    out["stock_id"] = sid
+    out["name"] = str(item.get("name", "") or "")
+    out["current"] = current
+    out["entry_low"] = entry_low
+    out["entry_high"] = entry_high
+    out["target_price"] = target_price
+    out["stop_loss"] = stop_loss
+    if not levels_ok:
+        out["_levels_invalid"] = True
+    return out
 
 
 # ---------------------------------------------------------------------------

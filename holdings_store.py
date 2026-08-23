@@ -100,11 +100,13 @@ def save_holdings(items: List[Dict]) -> bool:
     sheet = _get_sheet()
     if sheet is not None:
         try:
-            sheet.clear()
+            # Bug fix (race condition): 原本 clear() 後逐列 append_row(), 中間有空窗,
+            # 併發 reader 會讀到清空後、尚未寫完的表, 把持倉當成空清單; 中途失敗也會
+            # 永久留下不完整資料。改用跟 watchlist_store 一致的單次 update() 整格覆寫,
+            # 不 clear(), 詳見 watchlist_store._write_sheet_grid 註解。
+            import watchlist_store
             cols = ["stock_id", "name", "entry_price", "shares", "note", "added_date"]
-            sheet.append_row(cols)
-            for d in items:
-                sheet.append_row([str(d.get(c, "")) for c in cols])
+            watchlist_store._write_sheet_grid(sheet, cols, items, MAX_HOLDINGS)
             return True
         except Exception:
             pass

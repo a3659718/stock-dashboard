@@ -362,63 +362,6 @@ def _fundamentals(symbol: str, market: str) -> Dict:
 # ---------------------------------------------------------------------------
 # Gemini AI 結論 (新)
 # ---------------------------------------------------------------------------
-def _ai_verdict(symbol: str, snap: Dict, peers: Dict, rs, fund: Dict, verdict: Dict) -> Optional[str]:
-    """用 Gemini 整合所有資料給 2-3 句結論. 失敗回 None, 不 raise."""
-    try:
-        import ai_analyzer
-        if not ai_analyzer.gemini_available():
-            return None
-        # 摘要 context
-        ctx_lines = [
-            f"股票: {symbol}",
-            f"當下漲跌: {snap.get('today_pct'):+.2f}% (現價 {snap.get('current')})" if snap.get('today_pct') is not None else f"當下價格: {snap.get('current')}",
-        ]
-        if snap.get("trend"):
-            ctx_lines.append(f"趨勢: {snap['trend']} | RSI {snap.get('rsi14')} | 距 52w 高 {snap.get('from_52w_high_pct')}%")
-        if peers.get("sector"):
-            ctx_lines.append(
-                f"族群 ({peers['sector']}): 均漲 {peers.get('sector_avg_pct')}% / 上漲比 {peers.get('up_ratio')}"
-            )
-        if rs is not None:
-            ctx_lines.append(f"相對大盤 RS: {rs:+.2f}pp")
-        if fund.get("pe"):
-            ctx_lines.append(f"PE {fund['pe']} / Forward PE {fund.get('forward_pe')} / PEG {fund.get('peg')}")
-        if fund.get("eps_yoy_pct") is not None:
-            ctx_lines.append(f"EPS YoY {fund['eps_yoy_pct']:+.1f}%")
-        if fund.get("revenue_yoy_pct") is not None:
-            ctx_lines.append(f"營收 YoY {fund['revenue_yoy_pct']:+.1f}%")
-        if fund.get("earnings_date"):
-            ctx_lines.append(f"下次財報: {fund['earnings_date']}")
-        ctx_lines.append(f"系統評分: {verdict.get('score')}/100 → {verdict.get('verdict')}")
-
-        ctx = "\n".join(ctx_lines)
-        prompt = (
-            "你是專業股票分析師. 根據以下資料, 用繁體中文白話給我可行動的進出場建議。\n"
-            "嚴格照這個格式回 (每行一項, 精簡, 不要再列一堆數據):\n"
-            "結論: <BUY/WAIT/AVOID 一句話, 現在能不能進場>\n"
-            "進場時機: <現在就進/拉回到某價位再進/突破某價位再進, 給具體參考價>\n"
-            "目標價: <短期 + 中期 2 個目標價位, 或說明依據 (阻力/前高/R:R)>\n"
-            "停損: <具體停損價位或條件, 例如跌破 MA20 / 某價>\n"
-            "出場時機: <達標分批出 / 跌破關鍵位出 / 訊號轉弱出>\n"
-            "關鍵風險或催化劑: <一句>\n\n"
-            f"{ctx}"
-        )
-        # 直接呼叫 google.generativeai (ai_analyzer 沒通用 chat 函式)
-        try:
-            import google.generativeai as genai
-            genai.configure(api_key=ai_analyzer.get_gemini_key())
-            model = genai.GenerativeModel("gemini-2.0-flash-exp")
-            resp = model.generate_content(prompt)
-            text = (resp.text or "").strip()
-            return text if text else None
-        except Exception as e:
-            print(f"[entry_eval] Gemini call failed: {e}", flush=True)
-            return None
-    except Exception as e:
-        print(f"[entry_eval] AI verdict failed: {e}", flush=True)
-        return None
-
-
 # ---------------------------------------------------------------------------
 # 結論引擎
 # ---------------------------------------------------------------------------
@@ -673,8 +616,13 @@ def _enrich_chip_signal(snap: Dict, symbol: str, market: str) -> Dict:
     try:
         import datetime as _dt
         import data_sources as _ds
-        end = _dt.date.today().strftime("%Y-%m-%d")
-        start = (_dt.date.today() - _dt.timedelta(days=20)).strftime("%Y-%m-%d")
+        # Bug fix: dt.date.today() 是伺服器 UTC 日期, 台北 00:00-07:59 這段 UTC
+        # 還沒跨日, 會讓法人籌碼抓取區間整段偏移一天, 少算最新一日買賣超, 使
+        # 「外資連買/賣天數」判斷低估。改用 TPE (UTC+8) 日期, 跟 chip_advanced.py
+        # 等模組一致。
+        _today_tpe = (_dt.datetime.utcnow() + _dt.timedelta(hours=8)).date()
+        end = _today_tpe.strftime("%Y-%m-%d")
+        start = (_today_tpe - _dt.timedelta(days=20)).strftime("%Y-%m-%d")
         df = _ds.fetch_institutional_universe((symbol,), start, end)
         if df is None or df.empty or "name" not in df.columns:
             return snap

@@ -118,7 +118,7 @@ def _fetch_chip_data_impl_st(stock_id: str, days: int = 30) -> Dict:
 
 def _fetch_chip_data_impl_raw(stock_id: str, days: int = 30) -> Dict:
     """實際抓取實作 — 純函式, 沒 streamlit 裝飾, 可在任何 thread 安全呼叫."""
-    today = dt.date.today()
+    today = (dt.datetime.utcnow() + dt.timedelta(hours=8)).date()  # TPE 修正
     end = today.strftime("%Y-%m-%d")
     start = (today - dt.timedelta(days=days)).strftime("%Y-%m-%d")
 

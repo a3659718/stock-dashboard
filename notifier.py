@@ -530,6 +530,35 @@ def fmt_us_top_picks(df, fg: dict, top_n: int = 10) -> str:
     return _truncate_tg_msg("\n".join(lines))
 
 
+def _fmt_leader_stock_line(sr, seen_stocks: set):
+    """單檔龍頭股格式化 (共用給 fmt_strong_sectors 的「證交所分類」跟「熱門題材」
+    兩段用, 原本這段程式碼一模一樣被複製貼上兩次 — smoke test 的重複區塊偵測抓到,
+    抽成共用函式避免以後兩邊改一邊忘記改另一邊). 回傳格式化好的行字串, 或 None
+    (代表這檔股票該跳過: 沒有 stock_id, 或整份訊息裡已經出現過)."""
+    sid = str(sr.get("stock_id", "")).strip()
+    if not sid or sid in seen_stocks:
+        return None
+    seen_stocks.add(sid)
+    nm = str(sr.get("stock_name", ""))
+    cur = sr.get("現價")
+    pct = sr.get("今日%")
+    parts = []
+    if cur is not None:
+        try:
+            parts.append(f"{float(cur):.2f}")
+        except Exception:
+            pass
+    if pct is not None:
+        try:
+            p = float(pct)
+            sign = "+" if p > 0 else ""
+            parts.append(f"{sign}{p:.2f}%")
+        except Exception:
+            pass
+    details = " · ".join(parts) if parts else ""
+    return f"  <code>{_esc(sid)}</code> {_esc(nm)}  {details}"
+
+
 def fmt_strong_sectors(sectors_df, leaders_map: dict = None, themes_df=None,
                        theme_leaders: dict = None) -> str:
     """強勢族群 TG 推播 — 包含族群排名 + 每族群推薦股票.
@@ -558,38 +587,9 @@ def fmt_strong_sectors(sectors_df, leaders_map: dict = None, themes_df=None,
                 sub = leaders_map[leaders_map[ind_col] == sec_name] if ind_col else leaders_map
                 if sub is not None and not sub.empty:
                     for _, sr in sub.head(3).iterrows():
-                        sid = str(sr.get("stock_id", "")).strip()
-                        if not sid or sid in seen_stocks:
-                            continue
-                        seen_stocks.add(sid)
-                        nm = str(sr.get("stock_name", ""))
-                        cur = sr.get("現價")
-                        pct = sr.get("今日%")
-                        ratio = sr.get("量比")
-                        parts = []
-                        if cur is not None:
-                            try:
-                                parts.append(f"{float(cur):.2f}")
-                            except Exception:
-                                pass
-                        if pct is not None:
-                            try:
-                                p = float(pct)
-                                sign = "+" if p > 0 else ""
-                                parts.append(f"{sign}{p:.2f}%")
-                            except Exception:
-                                pass
-                        if ratio is not None:
-                            try:
-                                pass  # 量比已移除
-                            except Exception:
-                                pass
-                        details = " · ".join(parts) if parts else ""
-                        lines.append(f"  <code>{_esc(sid)}</code> {_esc(nm)}  {details}")
-                        # 催化劑 (若 DataFrame 有此欄)
-                        cat = sr.get("催化劑") if hasattr(sr, "get") else None
-                        if cat and str(cat).strip() and str(cat).strip() != "—":
-                            pass  # 催化劑已移除
+                        line = _fmt_leader_stock_line(sr, seen_stocks)
+                        if line:
+                            lines.append(line)
         lines.append("")
 
     if themes_df is not None and not themes_df.empty:
@@ -605,41 +605,12 @@ def fmt_strong_sectors(sectors_df, leaders_map: dict = None, themes_df=None,
                 if ldf is not None and not ldf.empty:
                     shown_in_theme = 0
                     for _, sr in ldf.iterrows():
-                        sid = str(sr.get("stock_id", "")).strip()
-                        if not sid or sid in seen_stocks:
-                            continue  # 整個訊息都去重 (一檔只出現一次)
-                        seen_stocks.add(sid)
-                        nm = str(sr.get("stock_name", ""))
-                        cur = sr.get("現價")
-                        pct = sr.get("今日%")
-                        ratio = sr.get("量比")
-                        parts = []
-                        if cur is not None:
-                            try:
-                                parts.append(f"{float(cur):.2f}")
-                            except Exception:
-                                pass
-                        if pct is not None:
-                            try:
-                                p = float(pct)
-                                sign = "+" if p > 0 else ""
-                                parts.append(f"{sign}{p:.2f}%")
-                            except Exception:
-                                pass
-                        if ratio is not None:
-                            try:
-                                pass  # 量比已移除
-                            except Exception:
-                                pass
-                        details = " · ".join(parts) if parts else ""
-                        lines.append(f"  <code>{_esc(sid)}</code> {_esc(nm)}  {details}")
-                        # 催化劑 (compute_hot_themes 已塞 "催化劑" 欄)
-                        cat = sr.get("催化劑") if hasattr(sr, "get") else None
-                        if cat and str(cat).strip() and str(cat).strip() != "—":
-                            pass  # 催化劑已移除
-                        shown_in_theme += 1
-                        if shown_in_theme >= 3:
-                            break
+                        line = _fmt_leader_stock_line(sr, seen_stocks)  # 整個訊息都去重 (一檔只出現一次)
+                        if line:
+                            lines.append(line)
+                            shown_in_theme += 1
+                            if shown_in_theme >= 3:
+                                break
         lines.append("")
 
     if not lines:
@@ -770,20 +741,41 @@ def _fmt_asia_markets_block(asia: dict) -> list:
     return out
 
 
-def _fmt_external_signals_block() -> list:
-    """油價 + macro 指標摘要 (簡短版，TG 用)."""
-    try:
-        import news_sources
-    except ImportError:
-        return []
+_EXT_SIGNALS_NOT_ATTEMPTED = object()  # sentinel: 呼叫端沒有先做有界時間的預抓
+
+
+def _fmt_external_signals_block(signals=_EXT_SIGNALS_NOT_ATTEMPTED) -> list:
+    """油價 + macro 指標摘要 (簡短版，TG 用).
+
+    BUG FIX (稽核發現): 原本這裡自己現抓 (序列: 油價 → 5 檔 macro → Trump),
+    完全沒有計入呼叫端 (fmt_tw_open_picks / fmt_us_open_picks, 都是「要優先且
+    準時送出」的主推播) 對時效的要求, 等於格式化函式裡偷偷藏了 7 次外部連線。
+    現在改成: 優先用呼叫端已經透過 news_sources.fetch_external_signals_bounded()
+    有界時間抓好、放進 data["external_signals"] 的結果 (可能是空 dict, 代表
+    有界時間內沒抓完, 這裡就照樣印「抓不到就跳過」, 不會又自己重抓一次拖時間)。
+    只有在完全沒人做過預抓 (呼叫端還是舊的直接呼叫方式, signals 維持 sentinel
+    預設值) 時, 才 fallback 回原本「自己現抓」的行為, 保留舊呼叫方式的相容性。
+    """
+    if signals is _EXT_SIGNALS_NOT_ATTEMPTED:
+        try:
+            import news_sources
+        except ImportError:
+            return []
+        oil = news_sources.fetch_oil_signal()
+        macro = news_sources.fetch_macro_indicators()
+        trumps = news_sources.fetch_trump_truth_social(max_items=2)
+    else:
+        signals = signals or {}
+        oil = signals.get("oil") or {}
+        macro = signals.get("macro") or {}
+        trumps = signals.get("trump") or []
+
     out = []
-    oil = news_sources.fetch_oil_signal()
     if oil:
         out.append("")
         out.append(f"<b>WTI 油價: ${_fmt_num(oil.get('price'))} ({_safe_pct(oil.get('pct_5d'), '+.1f', suffix='% 5d')})</b>")
         if oil.get("signal"):
             out.append(f"   {_esc(oil.get('signal'))}")
-    macro = news_sources.fetch_macro_indicators()
     if macro:
         parts = []
         if "美元指數" in macro:
@@ -794,8 +786,7 @@ def _fmt_external_signals_block() -> list:
             parts.append(f"VIX {_esc(macro['VIX'].get('value'))} ({_safe_pct(macro['VIX'].get('pct_5d'), '+.1f')})")
         if parts:
             out.append(f"<i>{' · '.join(parts)}</i>")
-    # Trump 最近一條
-    trumps = news_sources.fetch_trump_truth_social(max_items=2)
+    # Trump 最近一條 (trumps 已在函式開頭依 signals 是否預抓決定來源, 這裡不再重抓)
     if trumps:
         out.append("")
         out.append("<b>Trump 最新言論</b>")
@@ -875,8 +866,9 @@ def fmt_tw_open_picks(data: dict, ai_text: str = "") -> str:
             # 精簡: 移除美股各產業領漲/落後細節 (台股盤前參考價值低, 三大指數已足夠)
     # 亞洲鄰近市場
     lines.extend(_fmt_asia_markets_block(data.get("asia") or {}))
-    # 國際訊號
-    lines.extend(_fmt_external_signals_block())
+    # 國際訊號 (若呼叫端已用 news_sources.fetch_external_signals_bounded() 預抓,
+    # 傳 data["external_signals"]; 沒有這個 key 才會 fallback 回自己現抓)
+    lines.extend(_fmt_external_signals_block(data.get("external_signals", _EXT_SIGNALS_NOT_ATTEMPTED)))
     themes_df = data.get("themes")
     if themes_df is not None and not themes_df.empty:
         lines.append("")
@@ -2588,10 +2580,15 @@ def fmt_holdings_intraday_alerts(alerts: list) -> str:
             lines.append(f"  • {_esc(t)}")
         # 操作建議 (優先用 entry_action, fallback 用 severity 預設)
         entry_action = a.get("entry_action")
-        if entry_action and entry_action not in ("—", "持平觀望"):
+        entry_score = a.get("entry_score")
+        # BUG FIX: entry_score 在 quick_evaluate() 失敗時會回傳 None (key 仍存在),
+        # 原本的 a.get("entry_score", "—") 不會套用 fallback (key 存在, 值是 None),
+        # 導致推播文字出現字面上的 "None" (例如 entry_action="資料不足" 但 score=None)。
+        if (entry_action and entry_action not in ("—", "持平觀望", "資料不足")
+                and entry_score is not None):
             lines.append(
                 f"  💡 持倉建議: {_esc(entry_action)} "
-                f"(系統評分 {a.get('entry_score', '—')}/100)"
+                f"(系統評分 {entry_score}/100)"
             )
         elif a.get("severity") == "severe":
             lines.append("  💡 持倉建議: 嚴重訊號, 建議立即減碼 1/2 或設緊停損")
@@ -3155,8 +3152,8 @@ def fmt_us_open_picks(data: dict, ai_text: str = "") -> str:
             pass
     # 大盤預測
     lines.extend(_fmt_prediction_block(data.get("prediction"), data.get("accuracy")))
-    # 國際訊號
-    lines.extend(_fmt_external_signals_block())
+    # 國際訊號 (同 fmt_tw_open_picks — 優先用呼叫端預抓好的 data["external_signals"])
+    lines.extend(_fmt_external_signals_block(data.get("external_signals", _EXT_SIGNALS_NOT_ATTEMPTED)))
     # 美股版萌芽 sector (RS vs SPY 突破)
     us_emerging = data.get("emerging") or []
     if us_emerging:
