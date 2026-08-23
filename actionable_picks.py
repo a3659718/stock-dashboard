@@ -703,7 +703,19 @@ def fmt_actionable_picks_tg(picks: List[Dict]) -> str:
         cur = p.get("current")
         el = p.get("entry_low")
         eh = p.get("entry_high")
-        if cur is not None and el and eh:
+        # Bug fix (2026-08): entry_low/entry_high 是 indicators.atr_based_levels()
+        # 算的「現價 ± 0.3 ATR」— 永遠貼著現價, 隱含「現在就可以買」。entry_timing
+        # 卻是另一套獨立邏輯 (5MA/前高/Fib), 常常判斷「等回測/等突破」— 也就是叫你
+        # 現在先別買。這兩個沒有互相對照過, 同一則推播可能一行寫「進場 250~255」
+        # 緊接著下一行寫「⏳ 等回測 245 接」, 自相矛盾。只有 entry_timing 判定
+        # buy_now 時, 這兩者才是一致的 (entry_timing 的 trigger_price 本來就等於
+        # 現價); 其餘模式 (wait_pullback / wait_breakout) 就不要同時秀出「進場
+        # 區間貼著現價」這句, 避免同一則訊息同時說「現在買」又說「等等再買」。
+        timing_mode = (p.get("entry_timing") or {}).get("mode")
+        if timing_mode and timing_mode != "buy_now":
+            if cur is not None:
+                lines.append(f"   現價 {_esc(cur)} (進場時機見下)")
+        elif cur is not None and el and eh:
             lines.append(f"   現價 {_esc(cur)} · 進場 {_esc(el)}~{_esc(eh)}")
         if p.get("target"):
             lines.append(f"   目標 {_esc(p['target'])} · 停損 {_esc(p.get('stop','—'))}")

@@ -29,6 +29,22 @@ except Exception:
     PMC_AVAILABLE = False
 
 
+def _today_tpe() -> dt.date:
+    """TPE (UTC+8) 的今天日期.
+
+    Bug fix (2026-08): 這裡原本(以及全部呼叫端)都用 `dt.date.today()`,
+    在 GitHub Actions runner 上等於 UTC 日期。TPE = UTC+8, 所以 UTC 16:00-24:00
+    這段 (= TPE 00:00-08:00 次日) 用 dt.date.today() 會拿到「還沒跨到的前一天」。
+    這支模組的每個呼叫點 (is_market_closed_today 沒傳 today 參數時) 都會中招,
+    最明確的案例: scripts/morning_brief.py 在 UTC 23:32 (= TPE 07:32 次日) 跑,
+    週日 UTC 23:32 (代表週一 TPE 07:32, 正常開盤日) 時, dt.date.today() 拿到的
+    是「週日」, weekday()>=5 直接誤判成「今日休市」— 導致每週一的早安推播都
+    誤報「台股/美股今日休市」, 使用者可能因此以為當天不用看盤。
+    改用這支 TPE 校正過的日期當預設值, 修掉這整個 root cause。
+    """
+    return (dt.datetime.utcnow() + dt.timedelta(hours=8)).date()
+
+
 # pandas_market_calendars 的交易所 ISO 代碼
 EXCHANGE_MAP = {
     "TW": "XTAI",  # Taiwan Stock Exchange (TWSE)
@@ -154,9 +170,12 @@ def _is_open_via_pmc(exchange_code: str, date_str: str) -> Optional[bool]:
 def is_market_closed_today(market: str, today: Optional[dt.date] = None) -> bool:
     """檢查當日 market 是否休市.
     market: 'TW' | 'US' | 'JP' | 'KR'
+
+    today 沒傳時預設用 TPE 校正過的日期 (見 _today_tpe 說明), 不是 server 的
+    UTC 日期 — 避免 TPE 00:00-08:00 這段被誤判成前一天 (weekend 誤判尤其明顯)。
     """
     if today is None:
-        today = dt.date.today()
+        today = _today_tpe()
 
     # 1. 週末直接 True
     if today.weekday() >= 5:
@@ -179,7 +198,7 @@ def is_market_closed_today(market: str, today: Optional[dt.date] = None) -> bool
 def market_status_summary(today: Optional[dt.date] = None) -> dict:
     """回傳所有市場的開休市狀態 (debug 用)."""
     if today is None:
-        today = dt.date.today()
+        today = _today_tpe()
     return {
         market: ("休市" if is_market_closed_today(market, today) else "開盤")
         for market in EXCHANGE_MAP.keys()

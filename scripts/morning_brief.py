@@ -264,7 +264,12 @@ def _section_tw_picks() -> str:
 # Section 6: 今日盤前重點 (今天是否有財報日 / 重大事件)
 # ---------------------------------------------------------------------------
 def _section_today_focus() -> str:
-    today = dt.date.today()
+    # Bug fix: dt.date.today() 是伺服器 UTC 日期。此推播固定在 UTC 23:32 (=TPE 07:32
+    # 次日) 跑, 這剛好落在 TPE 00:00-08:00 這段「UTC 日期還沒跨過去」的窗口 — 週日
+    # UTC 23:32 (代表週一 TPE 07:32, 正常開盤日) 時 dt.date.today() 會拿到「週日」,
+    # weekday()>=5 直接誤判成週末, 導致每週一的早安推播都誤報「今日休市」。
+    # 改用 TPE 校正後的日期, 跟 holiday_check._today_tpe() 同一套邏輯。
+    today = (dt.datetime.utcnow() + dt.timedelta(hours=8)).date()
     weekday = today.weekday()
     lines = [f"📅 <b>今日 ({today.strftime('%Y-%m-%d %a')})</b>"]
     # 台股是否開盤
