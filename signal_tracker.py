@@ -342,6 +342,13 @@ def accuracy_summary(signal_type: Optional[str] = None,
 def fmt_accuracy_block(signal_types: Optional[List[str]] = None,
                         lookback_days: int = 30) -> str:
     """格式化「本月各訊號準確率」一段給推播末用."""
+    # 注意: limit_up_precursor 「刻意」不放進這個預設清單。這個 fmt_accuracy_block()
+    # 會被 tw_post_market_summary.py / market_open_picks.py 直接組進真的會送出的
+    # Telegram 推播裡 — 使用者明確要求 limit_up_precursor 現階段只留在 dashboard,
+    # 不要任何形式自動出現在推播裡, 即使只是「命中率 60%」這種不點名個股的彙總數字
+    # 也算。要在 dashboard 上手動看它的準確率, 呼叫
+    # fmt_accuracy_block(signal_types=["limit_up_precursor"]) 或直接呼叫
+    # accuracy_summary("limit_up_precursor") 即可 (label_map 已經備好)。
     types_to_show = signal_types or [
         "catalyst", "strong_sector_leader", "next_day_breakout",
         "avoid_pick", "potential_pick",
@@ -356,6 +363,7 @@ def fmt_accuracy_block(signal_types: Optional[List[str]] = None,
                 "next_day_breakout": "隔日上漲 Top 3→隔日漲",
                 "avoid_pick": "避開訊號→3日跌",
                 "potential_pick": "潛力股→5日漲",
+                "limit_up_precursor": "漲停前兆→5日漲",
             }
             label = label_map.get(st, st)
             mark = "🟢" if s["pct"] and s["pct"] >= 60 else ("🟡" if s["pct"] and s["pct"] >= 40 else "🔴")

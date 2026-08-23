@@ -20,7 +20,10 @@ API:
 """
 from __future__ import annotations
 
+import datetime as dt
 from typing import Dict, Optional
+
+import pandas as pd
 
 import data_sources as ds
 
@@ -61,6 +64,27 @@ def determine_entry_mode(stock_id: str, market: str = "auto") -> Dict:
                 df = ds.fetch_yf_history(f"{stock_id}.TWO", period="6mo", interval="1d")
             if df is None or df.empty or len(df) < 30:
                 return out
+        # Bug fix (2026-08): 資料新鮮度檢查 — 這支是「今日該不該買」的即時判斷,
+        # 如果 yfinance 剛好卡住回舊資料 (rate limit / 台股常見延遲, 見
+        # index_alerts.py._fetch_systemic_snapshot 的同類註解), 沒檢查會照樣
+        # 算出一個「今日盤中進 (高信心)」, 使用者看不出這是根據過期價格算的。
+        # 跟 index_alerts.py 同一套「差距 >= 2 天視為過期」門檻, "今天" 用 TPE
+        # 校正過的日期 (不是 dt.date.today() 的 UTC 日期, 見 holiday_check.py)。
+        date_col = "Date" if "Date" in df.columns else df.columns[0]
+        try:
+            latest_d = pd.to_datetime(df[date_col]).dt.date.iloc[-1]
+        except Exception:
+            latest_d = None
+        today_tpe = (dt.datetime.utcnow() + dt.timedelta(hours=8)).date()
+        stale = latest_d is not None and (today_tpe - latest_d).days >= 2
+
+        def _finalize(o: Dict) -> Dict:
+            """過期資料算出來的結論一律降到低信心 + 標註, 不當作正常結果直接顯示."""
+            if stale:
+                o["confidence"] = "low"
+                o["explanation"] = f"⚠️ 資料可能過期 (最新 {latest_d}) — {o['explanation']}"
+            return o
+
         c = df["Close"].astype(float).reset_index(drop=True)
         h = df["High"].astype(float).reset_index(drop=True)
         l = df["Low"].astype(float).reset_index(drop=True)
@@ -92,7 +116,7 @@ def determine_entry_mode(stock_id: str, market: str = "auto") -> Dict:
             out["trigger_price"] = round(cur, 2)
             out["explanation"] = f"突破 20d 高 ({high_20d:.2f}) + 量增 ({recent_vol/avg_vol:.1f}x), 趨勢確認"
             out["confidence"] = "high"
-            return out
+            return _finalize(out)
 
         # 2. 「等回測 X 接」: 當下價 在 高位區域 (≥ 5MA 之上 5%+) 但已偏離
         if cur > ma5 * 1.04 and cur >= high_20d * 0.95:
@@ -104,7 +128,7 @@ def determine_entry_mode(stock_id: str, market: str = "auto") -> Dict:
             distance = (cur / pullback_price - 1) * 100
             out["explanation"] = f"當前 {cur:.2f} 偏離 5MA ({ma5:.2f}) {distance:.1f}%, 等回測買到較好價位"
             out["confidence"] = "medium"
-            return out
+            return _finalize(out)
 
         # 3. 「等突破 Y 追」: 當下價 還在 20d 中段, 沒突破
         if cur < high_20d * 0.97:
@@ -114,7 +138,7 @@ def determine_entry_mode(stock_id: str, market: str = "auto") -> Dict:
             distance = (high_20d / cur - 1) * 100
             out["explanation"] = f"近 20d 高 {high_20d:.2f} (距離 +{distance:.1f}%), 突破才追, 防假突破"
             out["confidence"] = "medium"
-            return out
+            return _finalize(out)
 
         # 4. 中間區域 (高位但未明顯偏離) — 等 5MA 接
         if cur >= ma5:
@@ -123,7 +147,7 @@ def determine_entry_mode(stock_id: str, market: str = "auto") -> Dict:
             out["trigger_price"] = round(ma5, 2)
             out["explanation"] = f"當前 {cur:.2f} 在 5MA 附近, 拉回支撐買進"
             out["confidence"] = "low"
-            return out
+            return _finalize(out)
 
         # 5. fallback
         out["mode"] = "wait_breakout"
@@ -131,7 +155,7 @@ def determine_entry_mode(stock_id: str, market: str = "auto") -> Dict:
         out["trigger_price"] = round(ma5, 2)
         out["explanation"] = f"當前 {cur:.2f} 跌破 5MA, 等回升再評估"
         out["confidence"] = "low"
-        return out
+        return _finalize(out)
     except Exception as e:
         print(f"[entry_timing] {stock_id} fail: {e}", flush=True)
         return out

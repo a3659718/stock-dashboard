@@ -1072,12 +1072,25 @@ def main() -> int:
                     if score is not None:
                         head += f" · 入場分 {float(score):.0f}"
                     lines.append(head)
-                    if cur is not None and el and eh:
+                    # Bug fix (2026-08): entry_low/entry_high 跟 TW 版 actionable_picks.py
+                    # 同一個問題 — 都是 atr_based_levels() 算的「現價 ± 0.3 ATR」, 永遠貼著
+                    # 現價, 隱含「現在就可以買」。entry_timing 是另一套獨立邏輯 (5MA/前高/
+                    # Fib), 常判斷「等回測/等突破」。這裡原本只顯示 entry_low~entry_high、
+                    # 完全沒用到已經算好的 entry_timing_label, 等於白算 + 有跟 TW 版一樣的
+                    # 潛在矛盾風險。只有 buy_now (或沒有 entry_timing 資料) 時才顯示貼著
+                    # 現價的進場區間, 其餘模式改顯示 entry_timing_label。
+                    timing_mode = (p.get("entry_timing") or {}).get("mode")
+                    if timing_mode and timing_mode != "buy_now":
+                        if cur is not None:
+                            lines.append(f"   現價 ${cur} (進場時機見下)")
+                    elif cur is not None and el and eh:
                         lines.append(f"   現價 ${cur} · 進場 ${el}~${eh}")
                     if tgt:
                         lines.append(f"   目標 ${tgt} · 停損 ${_esc(stop or '—')}")
                     if p.get("win_prob"):
                         lines.append(f"   勝率 {_esc(p['win_prob'])} · 持有 {_esc(p.get('hold_period','—'))}")
+                    if p.get("entry_timing_label"):
+                        lines.append(f"   {p['entry_timing_label']}")
             msg = "\n".join(lines)
             notifier.send_message(msg)
             print(f"[us_buy_picks] sent {len(buy_picks)} BUY picks", flush=True)

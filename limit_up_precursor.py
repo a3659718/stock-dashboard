@@ -275,7 +275,25 @@ def scan_limit_up_precursor(top_n: int = 8, max_themes: Optional[int] = None) ->
                     candidates.append(r)
 
         candidates.sort(key=lambda x: x.get("score", 0), reverse=True)
-        return candidates[:top_n]
+        top_picks = candidates[:top_n]
+
+        # 新增: 記錄進 signal_tracker 做真實勝率回饋 (不是推播 — 純內部記錄用).
+        # 這不違反「先只放 dashboard, 不自動推播 Telegram」的限制: record_batch
+        # 只是把「今天篩出這幾檔」寫進 monitor_state 給以後驗證用, 不會觸發任何
+        # notifier.send_message()。record_signal() 本身有「同一天同 stock_id +
+        # signal_type 只記一筆」的 dedup, 所以使用者在 dashboard 上重複刷新這個
+        # tab 也不會灌爆紀錄。5 天驗證窗: 這裡抓的是「安靜吸籌」階段, 通常需要
+        # 幾天醞釀才會噴出, 比 next_day_breakout 之類「隔日」訊號給更長的窗口。
+        try:
+            import signal_tracker
+            signal_tracker.record_batch(
+                "limit_up_precursor", top_picks,
+                evaluate_after_days=5, expected_direction="up",
+            )
+        except Exception as e:
+            print(f"[limit_up_precursor] record_signal failed (non-fatal): {e}", flush=True)
+
+        return top_picks
     except Exception as e:
         print(f"[limit_up_precursor] scan failed: {e}", flush=True)
         return []
