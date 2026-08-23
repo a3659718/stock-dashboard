@@ -2,15 +2,27 @@
 push_cap.py — 每日次要 alert 推播 cap.
 
 主推播 (us_open / us_close / pre_market / weekend_recap / 反轉 / 系統性大跌) 不算 cap.
-次要 alert (volume_breakout / chip_anomaly / strong_stock / news_event /
-analyst_insider / trump / sector_strong) 共用 daily cap 6.
+次要 alert (volume_breakout / chip_anomaly / breakout_consolidation / news_event /
+analyst_insider / trump_policy / asia_leading) 共用 daily cap 6.
+(2026-08 修正: 原本這裡列的分類名稱是舊版, 跟 notifier.send_message() 實際呼叫時
+傳的 category 對不上, 只是文件寫錯, 不影響運作 — 已對照全repo實際用到的 7 種
+category 更新為正確名稱.)
 
 用 watchlist_store 的 monitor_state 存 counter, key=日期 (TPE 日).
 跨日自動 reset.
 
-API:
+API (建議新 caller 用):
+  would_allow(category: str) -> bool
+    唯讀檢查今日是否還有額度, 不 increment counter.
+  mark_consumed(category: str) -> None
+    送出成功後才呼叫, 真正把今日 counter +1.
+
+API (相容性保留, 尚未遷移的舊 caller 仍可用):
   check_and_consume(category: str) -> bool
+    [Deprecated] 檢查同時立刻 +1 counter (內部就是 would_allow + mark_consumed).
     回 True = 可推 (已 increment counter); False = 已到 cap, 不該推.
+    目前 notifier.send_message() 仍呼叫這個版本 — 尚未遷移到
+    would_allow/mark_consumed 的 send-成功後才扣額模式, 為已知待辦.
 
   get_today_count() -> int
     回今日已推次要 alert 數.

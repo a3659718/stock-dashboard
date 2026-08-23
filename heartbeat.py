@@ -170,10 +170,16 @@ def _check_state_persistence() -> Tuple[bool, str]:
 # ---------------------------------------------------------------------------
 # 主要 entry
 # ---------------------------------------------------------------------------
-def build_heartbeat_message() -> str:
+def build_heartbeat_message() -> Tuple[str, bool]:
     """跑全部 health check, 組成 TG 訊息 (HTML).
 
-    回 string. caller 自己 send_message.
+    回 (msg, all_healthy)。
+
+    BUG FIX (使用者要求): 原本這支每天固定推一封「系統健康日報」, 不管有沒有異常都送,
+    等於每天一封「一切正常」的背景推播, 沒有資訊價值。改成回傳 all_healthy 這個布林值,
+    讓呼叫端 (scripts/market_open_alert.py) 決定: 全部健康就只印 console log 不推播,
+    有異常 (🟡/🔴) 才真的推 — 跟 daily_selfcheck.py 已經在用的「安靜時不推、異常才響鈴」
+    是同一套設計哲學, 這裡補齊一致。
     """
     now = dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=8)  # 顯示 TPE 時間
     timestamp = now.strftime("%Y-%m-%d %H:%M TPE")
@@ -234,13 +240,15 @@ def build_heartbeat_message() -> str:
             "你會收到大量重複警報. 請設定 Google Sheets credentials.</i>"
         )
 
+    all_healthy = all_critical_ok and st_ok  # 對應 overall_icon 是不是 🟢
+
     # M3 fix: 走 byte-length truncate, 避免 ETF 監控擴張後超過 TG 4096 byte 上限
     try:
         import notifier as _n
-        return _n._truncate_tg_msg("\n".join(lines))
+        return _n._truncate_tg_msg("\n".join(lines)), all_healthy
     except Exception:
         # notifier 載入失敗時 fallback 用 char-length truncate (粗略)
         out = "\n".join(lines)
         if len(out.encode("utf-8")) > 3900:
             out = out.encode("utf-8")[:3900].decode("utf-8", errors="ignore") + "\n…(節錄)"
-        return out
+        return out, all_healthy

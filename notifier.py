@@ -127,21 +127,6 @@ def _tpe_now_str() -> str:
     return (_dt.datetime.utcnow() + _dt.timedelta(hours=8)).strftime("%H:%M")
 
 
-def _split_tg_msg(text: str, max_chars: int = 4000) -> list[str]:
-    """將長訊息依字數安全拆分成多個封包列表發送。"""
-    if not text:
-        return []
-    chunks = []
-    while len(text) > max_chars:
-        split_idx = text.rfind('\n', 0, max_chars)
-        if split_idx == -1:
-            split_idx = max_chars
-        chunks.append(text[:split_idx])
-        text = text[split_idx:].lstrip()
-    if text:
-        chunks.append(text)
-    return chunks
-
 def _balance_html_tags(s: str) -> str:
     """補齊未閉合的常見 Telegram HTML tag (b/i/code/pre/u/s).
     Telegram HTML 模式要求 tag 成對, 截斷後可能少了 </b> 之類 → 補在尾端.
@@ -282,10 +267,15 @@ def send_message(text: str, disable_preview: bool = True,
 
     # === 次要 alert daily cap (用戶要求: cap 6 封/日) ===
     # 只有傳 category 的 caller 算 cap; 主推 (us_open / 反轉 / pre_market 等) 不傳 → 不算
+    # (2026-08 修正: 改用 would_allow() 唯讀檢查, 送出「確定成功」後才呼叫 mark_consumed()
+    # 真正扣額度 — 取代舊版 check_and_consume() 那種「檢查當下就先 +1」的作法。舊版的問題:
+    # 如果剛好遇到網路抖動 / TG API 暫時 503, 下面 3 次 retry 全部失敗, 額度已經被這封
+    # 「其實沒送出去」的訊息燒掉, 導致當天後面真正送得出去的次要 alert 反而被 cap 擋下,
+    # 使用者卻一封都沒收到。would_allow/mark_consumed 是 push_cap.py 現在建議的新 API。)
     if category:
         try:
             import push_cap as _pc
-            if not _pc.check_and_consume(category):
+            if not _pc.would_allow(category):
                 print(f"[notifier] daily cap reached, skip {category}", flush=True)
                 return False, f"daily_cap_skip:{category}"
         except Exception as _ce:
@@ -300,6 +290,12 @@ def send_message(text: str, disable_preview: bool = True,
         if ok:
             if attempt > 0:
                 print(f"[notifier] send_message OK on retry #{attempt+1}", flush=True)
+            if category:
+                try:
+                    import push_cap as _pc
+                    _pc.mark_consumed(category)
+                except Exception as _ce:
+                    print(f"[notifier] push_cap mark_consumed fail (non-fatal): {_ce}", flush=True)
             _record_push_safe(text, ok, info)
             return ok, info
         # 失敗 — 短暫 backoff 後重試 (except 永久性錯誤: chat_id 沒設 / token 錯)
