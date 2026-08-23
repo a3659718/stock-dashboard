@@ -53,14 +53,10 @@ def _answer(callback_id: str, text: str = "", alert: bool = False) -> None:
 
 
 def _reply(chat_id, text: str) -> None:
-    """送一則 follow-up 訊息 (用 notifier 以共用 escape / retry / 截斷)."""
-    try:
-        import notifier
-        notifier.send_message(text)
-    except Exception:
-        _api("sendMessage", {"chat_id": chat_id, "text": text[:4000]})
-
-def _reply(chat_id, text: str) -> None:
+    # BUG FIX (稽核發現): 這個檔案原本有兩個同名 _reply() 定義 (第二個會完全覆蓋
+    # 第一個, 第一個從頭到尾沒被呼叫過 — 跟 entry_evaluator.py 抓到的死碼是同一種
+    # 問題), 已經刪掉那個永遠不會執行的版本, 只留下這個 (原本第二個, 較完整:
+    # fallback 走 API 時有做 html.escape 避免特殊符號讓 Telegram 回 HTTP 400)。
     try:
         import notifier
         notifier.send_message(text, chat_id=chat_id)

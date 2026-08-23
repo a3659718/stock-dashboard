@@ -168,6 +168,23 @@ def check_local_imports() -> List[Tuple[str, str, str]]:
                             rel, "missing_module",
                             f"{rel}: `import {top}` — 找不到本地檔案 {top}.py, 也非已知套件",
                         ))
+
+        # 同檔案內同名 top-level function/class 被定義兩次 — 稽核這次連續在
+        # notifier.py (_split_tg_msg / _ai_verdict 的前身)、entry_evaluator.py
+        # (_ai_verdict)、scripts/tg_callback_listener.py (_reply) 抓到 3 次同一種
+        # 「後面的定義把前面的完全蓋掉, 前面那份從頭到尾沒人真的呼叫得到」的死碼,
+        # 這種問題不需要真的 import/裝套件就能靜態抓到, 順便併進「程式完整性」檢查,
+        # 讓 daily_selfcheck.py 也能自動盯著, 以後同一類回歸不用等人工複查才發現。
+        seen_defs: Dict[str, int] = {}
+        for node in tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                if node.name in seen_defs:
+                    problems.append((
+                        rel, "duplicate_definition",
+                        f"{rel}: `{node.name}` 在第 {seen_defs[node.name]} 行和第 {node.lineno} 行"
+                        f"各定義一次 — 後面那份會完全蓋掉前面, 前面那份是死碼 (從頭到尾不會被呼叫到)",
+                    ))
+                seen_defs[node.name] = node.lineno
     return problems
 
 

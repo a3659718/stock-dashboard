@@ -1202,8 +1202,14 @@ def main() -> int:
             print(f"[signal_tracker] auto-evaluate failed (non-fatal): {_se}", flush=True)
         try:
             import heartbeat
-            msg = heartbeat.build_heartbeat_message()
+            msg, all_healthy = heartbeat.build_heartbeat_message()
             print(f"Heartbeat message length: {len(msg)} chars / {len(msg.encode('utf-8'))} bytes")
+            # BUG FIX (使用者要求精簡推播): 原本每天固定推送, 不管健不健康都送一封
+            # 「系統健康日報」, 等於每天一封沒資訊價值的背景推播。改成跟 daily_selfcheck.py
+            # 一樣: 全部健康只印 log 不推播, 有異常 (🟡/🔴) 才真的推播提醒。
+            if all_healthy:
+                print("[heartbeat] 全部健康, 只留 console log, 不推播", flush=True)
+                return 0
             ok, info = notifier.send_message(msg)
             print(f"Heartbeat TG: ok={ok}, info={info}")
             return 0 if ok else 2
