@@ -353,10 +353,21 @@ def _section_events() -> str:
 # ---------------------------------------------------------------------------
 # 組裝 + 推播
 # ---------------------------------------------------------------------------
+# 晨報的「排程目標時間」(TPE 分鐘數) — 只用來算延遲幾分, 改 cron 時请同步。
+SCHEDULED_TPE_MIN = 8 * 60  # 08:00 TPE
+
+
 def compose_brief() -> str:
     """組整封晨報."""
-    now = dt.datetime.now()
+    # Bug fix (2026-08): GitHub Actions runner 的 local time 是 UTC, dt.datetime.now()
+    # 會把台北 08:05 印成 "00:05" —— 這就是「推播時間很奇怪」的一半原因。
+    # 一律改用 TPE (UTC+8), 並且直接把「相對排程時間遲了幾分」寫在標題上,
+    # 遇到 GitHub Actions cron 排隊延遲時一眼就能分辨是「晚推」而非「資料舊」。
+    now = dt.datetime.utcnow() + dt.timedelta(hours=8)
     header = f"☀️ <b>晨報</b> · {now.strftime('%m/%d %H:%M')}"
+    _late_min = (now.hour * 60 + now.minute) - SCHEDULED_TPE_MIN
+    if 20 <= _late_min <= 12 * 60:
+        header += f" <i>(排程 08:00 · 延遲 {_late_min} 分)</i>"
     sections = []
     sections.append(_safe("recap_tldr", _section_recap_and_tldr))  # 併入原 07:32 morning_recap 內容, 放最前
     sections.append(_safe("events", _section_events))  # 重大事件預告放最前面 (高優先)

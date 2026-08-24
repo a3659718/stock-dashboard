@@ -17,7 +17,36 @@ API:
 """
 from __future__ import annotations
 
+import datetime as _dt
 from typing import Dict, List
+
+# slot 名稱 → 排程目標時間 (TPE)。用來在標題標註「實際幾點推的、遲了幾分」。
+_SLOT_TARGET_MIN = {"08:15": 8 * 60 + 15, "08:30": 8 * 60 + 30}
+
+
+def _tpe_now() -> "_dt.datetime":
+    """GitHub Actions runner 的 local time 是 UTC — 一律自己換算 TPE。"""
+    return _dt.datetime.utcnow() + _dt.timedelta(hours=8)
+
+
+def _build_header(slot: str) -> str:
+    """盤前標題: 排程 slot + 實際推送時間 + 延遲標註.
+
+    為什麼: 原本標題硬寫 "台股盤前 (08:30)", GitHub Actions cron 排隊延遲時
+    10 點多才收到, 訊息上卻還是寫 08:30 → 看起來像「推播時間亂掉」。
+    現在把實際 TPE 時間寫出來, 延遲超過 15 分就明講延遲幾分,
+    超過 09:00 (台股已開盤) 直接標成「補發」, 免得拿過期的盤前資訊進場。
+    """
+    now = _tpe_now()
+    cur_min = now.hour * 60 + now.minute
+    target = _SLOT_TARGET_MIN.get(slot, 8 * 60 + 15)
+    late = cur_min - target
+    head = f"\U0001F305 <b>台股盤前 ({slot})</b> \u00b7 {now.strftime('%H:%M')}"
+    if cur_min >= 9 * 60:          # 台股 09:00 已開盤 → 盤前資訊過期
+        head += f" <i>(\u26a0 補發 \u00b7 延遲 {late} 分, 台股已開盤)</i>"
+    elif late >= 15:
+        head += f" <i>(\u26a0 延遲 {late} 分)</i>"
+    return head
 
 
 def _fetch_snap(symbol: str, intraday: bool = False) -> Dict:
@@ -296,7 +325,7 @@ def build_pre_market_msg(slot: str = "08:15") -> str:
         except Exception as _te:
             print(f"[pre_market] tldr fail: {_te}", flush=True)
 
-    lines = [f"🌅 <b>台股盤前 ({slot})</b>"]
+    lines = [_build_header(slot)]
     if tldr:
         lines.append(f"⚡ <b>TL;DR</b>: {tldr}")
     lines.append("━━━━━━━━━━━━━━━━━")

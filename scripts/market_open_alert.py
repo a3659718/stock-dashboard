@@ -259,10 +259,24 @@ def main() -> int:
     try:
         import os as _os
         _is_manual = _os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
-        if not _is_manual:
-            import push_dedup as _pd
-            if _pd.should_guard(market) and not _pd.claim_slot(market):
-                print(f"[push_dedup] '{market}' 視為重複 (cron drift), 本次跳過。", flush=True)
+        import push_dedup as _pd
+        # window 從 50 分拉到 5 小時: 原本 50 分只擋得住 cron drift 幾十分鐘的重複,
+        # 但 GitHub Actions 排程佇列延遲常達 1~2 小時 —— 本機準時 dispatch 推完後,
+        # 遲到的 cron run 會在 1~2 小時後把同一則再推一次 (50 分 window 擋不住)。
+        _DEDUP_WINDOW_MIN = 300
+        if _pd.should_guard(market):
+            if _is_manual:
+                # 手動 / 本機準時觸發: 不被 dedup 擋 (要能強制補推), 但一定要「登記」,
+                # 否則後面遲到的 cron run 會重複推同一則。
+                try:
+                    _pd.reset(market)
+                    _pd.claim_slot(market, window_min=_DEDUP_WINDOW_MIN)
+                    print(f"[push_dedup] 手動觸發 '{market}' — 不擋, 但已登記 claim "
+                          f"({_DEDUP_WINDOW_MIN} 分內遲到的 cron 會被擋掉)", flush=True)
+                except Exception as _ce:
+                    print(f"[push_dedup] 手動 claim 失敗 (non-fatal): {_ce}", flush=True)
+            elif not _pd.claim_slot(market, window_min=_DEDUP_WINDOW_MIN):
+                print(f"[push_dedup] '{market}' 視為重複 (cron 延遲/drift), 本次跳過。", flush=True)
                 return 0
     except Exception as _de:
         print(f"[push_dedup] 守衛例外, fail-open 照跑: {_de}", flush=True)
