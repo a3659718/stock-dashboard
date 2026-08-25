@@ -67,19 +67,29 @@ def _section_recap_and_tldr() -> str:
         recap_lines = _mr._summarize_push_history()
         if recap_lines and recap_lines != ["(過去 14 小時無推播)"]:
             lines.append("📱 <b>昨夜推播</b>: " + " / ".join(recap_lines[:6]))
-        try:
-            import signal_tracker as _sig
-            s = _sig.accuracy_summary(None, lookback_days=30)
-            n = s.get("n") or 0
-            pct = s.get("pct")
-            if n >= 10 and pct is not None:
-                mark = "🟢" if pct >= 60 else ("🟡" if pct >= 40 else "🔴")
-                lines.append(f"🎯 <b>推播近 30 日勝率</b>:{mark} {pct:.0f}% (n={n})")
-        except Exception:
-            pass
+        # 註: 原本這裡還有一行「推播近 30 日勝率」, 已移到獨立的
+        # _section_pick_review() (逐檔列出昨日推薦有沒有漲 + 命中率 + 30 日累計),
+        # 留在這裡會變成同一個數字在同一封訊息出現兩次。
         return "\n".join(lines)
     except Exception as e:
         print(f"[morning_brief] recap_and_tldr section failed: {e}", flush=True)
+        return ""
+
+
+# ---------------------------------------------------------------------------
+# Section 0.5: 昨日推薦驗收 — 前一天推播推薦的台股 / 美股, 隔一個交易日到底漲沒漲
+# ---------------------------------------------------------------------------
+def _section_pick_review() -> str:
+    """逐檔列出昨日推薦的實際結果 + 「隔天確實有漲的比例 %」.
+
+    資料來自 pick_review / signal_tracker 帳本 (每封推播在推的當下就把代號 +
+    推薦當下價記進去), 這裡只負責把「已經有隔日收盤結果」的那批算出來並排版。
+    """
+    try:
+        import pick_review
+        return pick_review.build_review_block(refresh=True)
+    except Exception as e:
+        print(f"[morning_brief] pick_review section failed: {e}", flush=True)
         return ""
 
 
@@ -254,6 +264,22 @@ def _section_tw_picks() -> str:
             if reasons:
                 short_reason = reasons[0][:60]
                 lines.append(f"     ✓ {short_reason}")
+
+        # === 帳本: 把今天推出去的 Top 5 記下來, 明早晨報驗收「隔一個交易日有沒有漲」 ===
+        # price_is_last_close=True: 08:00 台股還沒開盤, upside_screener 給的「現價」
+        # 其實是前一交易日的收盤 → asof 要標成前一交易日, 這樣「往後一個交易日」才會
+        # 落在今天的盤 (= 使用者看到推薦後真正能進場的那一天), 而不是明天。
+        try:
+            import pick_review
+            _n = pick_review.record_picks(
+                "morning_tw_top5", all_picks[:5], market="TW",
+                source="晨報台股 Top 5", price_is_last_close=True,
+                evaluate_after_days=1,
+            )
+            print(f"[morning_brief] 已記錄 {_n} 檔台股推薦待驗收", flush=True)
+        except Exception as _re:
+            print(f"[morning_brief] record picks failed (non-fatal): {_re}", flush=True)
+
         return "\n".join(lines)
     except Exception as e:
         traceback.print_exc()
@@ -369,6 +395,7 @@ def compose_brief() -> str:
     if 20 <= _late_min <= 12 * 60:
         header += f" <i>(排程 08:00 · 延遲 {_late_min} 分)</i>"
     sections = []
+    sections.append(_safe("pick_review", _section_pick_review))  # 昨日推薦驗收 (使用者最在意, 放第一)
     sections.append(_safe("recap_tldr", _section_recap_and_tldr))  # 併入原 07:32 morning_recap 內容, 放最前
     sections.append(_safe("events", _section_events))  # 重大事件預告放最前面 (高優先)
     sections.append(_safe("us_overnight", _section_us_overnight))

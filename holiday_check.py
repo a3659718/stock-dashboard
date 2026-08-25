@@ -45,6 +45,38 @@ def _today_tpe() -> dt.date:
     return (dt.datetime.utcnow() + dt.timedelta(hours=8)).date()
 
 
+def _today_et() -> dt.date:
+    """美東 (ET) 的今天日期 — 判斷美股休市要用這個, 不能用 TPE 日期.
+
+    Bug fix (2026-08, 重大): _today_tpe() 是為了修「台股在 TPE 00:00-08:00 被誤判」
+    才加的, 但 is_market_closed_today() 對 **所有市場** 都套用它 —— 對美股是錯的。
+    美股相關的排程落在 UTC 14:00-23:59, 加 8 小時之後 TPE 日期會【跨到隔天】:
+
+      slot        cron (UTC)      週五觸發     TPE 日期    結果
+      us_close    2 22 * * 1-5    週五 22:02   週六        weekday()>=5 → 判「休市」→ skip
+      us_mid(EST) 32 16 * * 1-5   週五 16:32   週六 00:32  同上 → skip
+
+    也就是 **每週五的美股收盤總結從來沒有送出過** (冬令時連週五的美股中盤也一起消失)。
+    國定假日則是整組差一天: 感恩節前一天 (有交易) 被 skip, 感恩節當天 (休市) 反而
+    推了一封「美股收盤分析」。
+
+    ET = UTC-4 (夏令) / UTC-5 (冬令)。DST 判斷沿用 index_alerts 那一套, 失敗時
+    用「3 月中 ~ 11 月初」粗略近似 (只影響切換週的邊界, 且該週美股本來就有開盤)。
+    """
+    now_utc = dt.datetime.utcnow()
+    try:
+        import index_alerts
+        dst = bool(index_alerts._is_us_in_dst(now_utc.date()))
+    except Exception:
+        dst = 3 <= now_utc.month <= 10
+    return (now_utc - dt.timedelta(hours=4 if dst else 5)).date()
+
+
+def _today_for_market(market: str) -> dt.date:
+    """依市場選日期基準: US 用美東日期, 其餘 (TW/JP/KR) 用 TPE 日期."""
+    return _today_et() if str(market).upper() == "US" else _today_tpe()
+
+
 # pandas_market_calendars 的交易所 ISO 代碼
 EXCHANGE_MAP = {
     "TW": "XTAI",  # Taiwan Stock Exchange (TWSE)
@@ -171,11 +203,13 @@ def is_market_closed_today(market: str, today: Optional[dt.date] = None) -> bool
     """檢查當日 market 是否休市.
     market: 'TW' | 'US' | 'JP' | 'KR'
 
-    today 沒傳時預設用 TPE 校正過的日期 (見 _today_tpe 說明), 不是 server 的
-    UTC 日期 — 避免 TPE 00:00-08:00 這段被誤判成前一天 (weekend 誤判尤其明顯)。
+    today 沒傳時, 依 market 選日期基準 (見 _today_for_market):
+      TW / JP / KR → TPE 日期 (避免 TPE 00:00-08:00 被誤判成前一天)
+      US           → 美東日期 (避免 UTC 14:00-24:00 的美股排程被加成台北的隔天,
+                       導致每週五的美股推播被當成「週六休市」整個 skip)
     """
     if today is None:
-        today = _today_tpe()
+        today = _today_for_market(market)
 
     # 1. 週末直接 True
     if today.weekday() >= 5:
@@ -196,9 +230,11 @@ def is_market_closed_today(market: str, today: Optional[dt.date] = None) -> bool
 
 
 def market_status_summary(today: Optional[dt.date] = None) -> dict:
-    """回傳所有市場的開休市狀態 (debug 用)."""
-    if today is None:
-        today = _today_tpe()
+    """回傳所有市場的開休市狀態 (debug 用).
+
+    today 不傳時讓每個市場各自用自己的日期基準 (US 用美東, 其餘用 TPE);
+    有傳就一律用指定日期 (方便測試特定日子)。
+    """
     return {
         market: ("休市" if is_market_closed_today(market, today) else "開盤")
         for market in EXCHANGE_MAP.keys()

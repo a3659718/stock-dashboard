@@ -24,6 +24,21 @@ from typing import Dict, List, Optional
 import watchlist_store
 
 
+def _us_today_str() -> str:
+    """美東 (ET) 的今天日期字串 — 這支掃美股, 「一天」要用美東的一天算.
+
+    見 check_breakout_consolidation() 內的 bug 說明: 用 UTC 日期會在台北早上
+    (亞股 monitor tick) 把當日去重表清空, 造成前一晚推過的美股突破隔天再推一次。
+    """
+    now_utc = dt.datetime.utcnow()
+    try:
+        import index_alerts
+        dst = bool(index_alerts._is_us_in_dst(now_utc.date()))
+    except Exception:
+        dst = 3 <= now_utc.month <= 10
+    return (now_utc - dt.timedelta(hours=4 if dst else 5)).strftime("%Y-%m-%d")
+
+
 # 美股 universe (大型權值 + AI/熱門題材)
 DEFAULT_US_UNIVERSE_BREAKOUT = [
     "NVDA", "AAPL", "MSFT", "GOOGL", "AMZN", "META", "TSLA",
@@ -137,7 +152,16 @@ def check_breakout_consolidation(top_n: int = 5) -> List[Dict]:
     """掃 universe + watchlist, 找盤整突破 top N."""
     state = watchlist_store.load_monitor_state()
     bo_state = state.setdefault("breakout_consolidation_alert", {})
-    today_str = dt.date.today().strftime("%Y-%m-%d")
+    # Bug fix (2026-08): 原本用 dt.date.today() = GitHub Actions 的 UTC 日期。
+    #   這支掃的是【美股】日線 (period="90d", interval="1d"), 但 UTC 日界落在
+    #   台北 08:00 —— 也就是「亞股時段的 monitor tick」(TPE 09:08~13:08) 已經算
+    #   新的一天了。於是:
+    #     週二 TPE 22:15 推出 NVDA 突破 → alerted 記在 UTC 週二
+    #     週三 TPE 09:08 → UTC 日期翻頁 → bo_state.clear() → alerted 清空
+    #     此時美股已收盤, 日線最後一根還是週二那根, 篩選條件原封不動全部成立
+    #     → 同一批標的隔天早上被【原封不動重推一次】(alert_priority 的 30 分鐘窗早過期)
+    #   改用美東日期: 美股一個交易日內不會翻頁, 亞股時段也不會誤觸重置。
+    today_str = _us_today_str()
     if bo_state.get("date") != today_str:
         bo_state.clear()
         bo_state.update({"date": today_str, "alerted": []})
@@ -173,7 +197,7 @@ def mark_alerts_sent(alerts: List[Dict]) -> None:
     try:
         state = watchlist_store.load_monitor_state()
         bo = state.setdefault("breakout_consolidation_alert", {})
-        today_str = dt.date.today().strftime("%Y-%m-%d")
+        today_str = _us_today_str()  # 跟 check_breakout_consolidation 用同一個日界
         if bo.get("date") != today_str:
             bo.clear()
             bo.update({"date": today_str, "alerted": []})

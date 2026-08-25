@@ -453,11 +453,17 @@ def build_pre_market_msg(slot: str = "08:15") -> str:
                 lines.append("")
                 lines.append(f"🎯 <i>⚠ {_esc(picks[0]['_no_picks_reason'])} (保護資金優先)</i>")
                 return "\n".join(lines)
+            # Bug fix: 原本 `entry_score is None or ... >= 70` 讓「系統根本評不出
+            # 分數」的股票直接【通過】≥70 的高品質門檻, 而不是被排除 — 標題寫著
+            # 「entry_label=BUY + 分數 >=70」, 實際卻可能推出沒有分數的標的。
+            # 美股版 (scripts/market_open_alert.py us_buy_picks) 早就修掉了, 台股
+            # 版漏改, 兩邊行為不一致。改成沒分數就排除。
             buy_picks = [
                 p for p in picks
                 if p.get("stock_id")
                 and p.get("entry_label") == "BUY"
-                and (p.get("entry_score") is None or float(p.get("entry_score") or 0) >= 70)
+                and p.get("entry_score") is not None
+                and float(p.get("entry_score")) >= 70
             ][:5]
             if buy_picks:
                 lines.append("")
@@ -482,6 +488,19 @@ def build_pre_market_msg(slot: str = "08:15") -> str:
                         lines.append(f"   目標 {tgt} · 停損 {_esc(stop or '—')}")
                     if p.get("win_prob"):
                         lines.append(f"   勝率 {_esc(p['win_prob'])} · 持有 {_esc(p.get('hold_period','—'))}")
+
+                # === 帳本: 記下今天推的 BUY, 明早晨報驗收「隔一個交易日有沒有漲」 ===
+                # 08:30 台股未開盤 → current 是前一交易日收盤 → price_is_last_close
+                try:
+                    import pick_review
+                    _n = pick_review.record_picks(
+                        "pre_market_buy", buy_picks, market="TW",
+                        source="盤前台股可買 Top 5", price_is_last_close=True,
+                        evaluate_after_days=1,
+                    )
+                    print(f"[pre_market] 已記錄 {_n} 檔台股 BUY 待驗收", flush=True)
+                except Exception as _re:
+                    print(f"[pre_market] record picks failed (non-fatal): {_re}", flush=True)
             else:
                 lines.append("")
                 lines.append("🎯 <i>今日無高品質 BUY (entry_label=BUY + 分數 >=70), 觀望為主</i>")

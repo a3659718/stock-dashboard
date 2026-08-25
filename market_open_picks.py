@@ -308,7 +308,11 @@ def get_tw_open_picks(top_themes_n: int = 3, picks_per_theme: int = 3) -> Dict:
                 "strong_sector_leader", sid, name=r.get("stock_name", ""),
                 predicted_price=cur_price, expected_direction="up",
                 evaluate_after_days=1,
-                extras={"theme": r.get("_theme", ""), "today_pct": r.get("今日%")},
+                # market/source 是隔日驗收 (pick_review) 分類用的。這裡是 09:32
+                # 盤中推的, 現價就是「當天這根日 K」→ 不設 asof, 預設用推播日即可,
+                # 驗收會自動抓「下一個交易日」的收盤。
+                extras={"theme": r.get("_theme", ""), "today_pct": r.get("今日%"),
+                        "market": "TW", "source": "開盤強勢族群龍頭"},
             )
             # 有催化劑利多 → 3 天漲
             # B11 修正: 加括號明確化布林優先級, 避免後續 refactor 出錯
@@ -560,7 +564,10 @@ def get_tw_close_analysis() -> Dict:
                     "next_day_breakout", sid, name=d.get("name", ""),
                     predicted_price=cur, expected_direction="up",
                     evaluate_after_days=1,
-                    extras={"score": d.get("score")},
+                    # 盤後 15:03 推的, cur 就是【當天收盤】→ asof = 推播日 (預設),
+                    # 驗收抓下一個交易日收盤, 正好對應「隔日上漲」這個訊號的定義。
+                    extras={"score": d.get("score"), "market": "TW",
+                            "source": "盤後隔日上漲 Top 3"},
                 )
         # 3. 避開訊號 → 3 日跌
         for d in avoid_picks[:5]:

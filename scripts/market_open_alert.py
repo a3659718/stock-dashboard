@@ -701,6 +701,20 @@ def main() -> int:
             import traceback
             print(f"[pre_market] failed: {_e}", flush=True)
             traceback.print_exc()
+
+        # === IPO 今日上市推播 (原本寫在 ~1000 行, 是死碼) ===
+        # Bug fix: 原本這段放在下面 `if market == "pre_market_830":`, 但本區塊
+        # 結尾的 `return 0` 是無條件的 → 那個 if 永遠到不了, 台股「今日有新股上市」
+        # 的提醒從來沒推播過。搬到 return 之前。
+        # (對照組: 週五 us_open 的「下週 IPO 預告」是可達的, 所以只有「今日上市」壞掉。)
+        if market == "pre_market_830":
+            try:
+                import ipo_calendar_alert as _ipo
+                ipo_result = _ipo.check_and_push(mode="today")
+                print(f"[ipo_today] check: {ipo_result}", flush=True)
+            except Exception as _ipoe:
+                print(f"[ipo_today] check failed (non-fatal): {_ipoe}", flush=True)
+
         print("=== Pre-market done ===")
         return 0
 
@@ -973,15 +987,7 @@ def main() -> int:
             print(f"[{market}] 主分析訊息為空, 不送 (可能 FinMind 失效/無資料)", flush=True)
         return 0
 
-    # === IPO 今日上市推播 (pre_market_830 後跑) ===
-    # 沒上市 silent skip; 有上市 → 推一封獨立含 Gemini 進場分析
-    if market == "pre_market_830":
-        try:
-            import ipo_calendar_alert as _ipo
-            ipo_result = _ipo.check_and_push(mode="today")
-            print(f"[ipo_today] check: {ipo_result}", flush=True)
-        except Exception as _ipoe:
-            print(f"[ipo_today] check failed (non-fatal): {_ipoe}", flush=True)
+    # (「IPO 今日上市推播」已搬到上面 pre_market 區塊的 return 之前 — 放在這裡是死碼)
 
     # === IPO 下週預告 (週五 us_open 跑, 14:00 UTC = 22:00 TPE) ===
     # 用戶要的「週五晚 22:00 推下週上市」— 不加新 cron, 用 us_open + Friday 判斷
@@ -1108,6 +1114,22 @@ def main() -> int:
             msg = "\n".join(lines)
             notifier.send_message(msg)
             print(f"[us_buy_picks] sent {len(buy_picks)} BUY picks", flush=True)
+
+            # === 帳本: 記下今晚推的美股 BUY, 明早晨報驗收「隔一個交易日有沒有漲」 ===
+            # 這是 NYSE 開盤前 ~1hr 推的, current 是【前一個美股交易日】的收盤 →
+            # price_is_last_close=True, 這樣「往後一個交易日」正好是今晚這一盤,
+            # 明天早上 08:00 晨報就拿得到結果。
+            if buy_picks:
+                try:
+                    import pick_review as _pr
+                    _n = _pr.record_picks(
+                        "us_buy_picks", buy_picks, market="US",
+                        source="美股盤前 BUY Top 5", price_is_last_close=True,
+                        evaluate_after_days=1,
+                    )
+                    print(f"[us_buy_picks] 已記錄 {_n} 檔美股推薦待驗收", flush=True)
+                except Exception as _re:
+                    print(f"[us_buy_picks] record picks failed (non-fatal): {_re}", flush=True)
         except Exception as _ube:
             print(f"[us_buy_picks] failed (non-fatal): {_ube}", flush=True)
         return 0
@@ -1539,6 +1561,17 @@ def main() -> int:
             print(f"[watchlist_triggers] check failed (non-fatal): {_wte}", flush=True)
 
         # === 4: 持倉 intraday 風險警報 (今日 ≤ -3% / 從早高回吐 ≥ 5% / 跌破停損) ===
+        # Bug fix (重大, 2026-08): 這一段【只偵測、只印 log, 從來沒有送出過】。
+        #   holdings_intraday_alerts 這個變數在整個檔案裡只出現在本區塊 (賦值 + print),
+        #   唯一能送它的 notifier.fmt_combined_intraday_super(holdings_intraday_alerts=...)
+        #   呼叫點在上面 ~1444 行、比這裡早一百多行, 而且根本沒傳這個參數。
+        #   結果: alert_priority 裡評為 Tier 0 (最高優先/立即動作) 的持倉風險警報
+        #   ——「持股當日跌超過 3%」「從當日高點回吐 5%」「跌破停損價」——
+        #   一封都推不出去, mark_alerts_sent() 也從未被呼叫。
+        #   這裡補上「偵測到就自己送一封」, 不塞回上面的合併訊息:
+        #   (a) 那個合併訊息已經送完了, 塞回去要搬動大段程式碼、風險高;
+        #   (b) 持倉風險是 Tier 0, 本來就該獨立一封、獨立通知音, 不該跟大盤警報混在一起。
+        #   送成功才 mark_alerts_sent → 送失敗下一個 tick 會重試, 不會靜默漏掉一整天。
         holdings_intraday_alerts = []
         try:
             import holdings_intraday_alert as _hi
@@ -1549,6 +1582,17 @@ def main() -> int:
                     + ", ".join(a.get("stock_id", "") for a in holdings_intraday_alerts),
                     flush=True,
                 )
+                _hi_msg = notifier.fmt_holdings_intraday_alerts(holdings_intraday_alerts)
+                if _hi_msg:
+                    _ok_hi, _info_hi = notifier.send_message(_hi_msg, disable_preview=True)
+                    print(f"[holdings intraday] sent ok={_ok_hi}: {_info_hi}", flush=True)
+                    if _ok_hi:
+                        _hi.mark_alerts_sent(holdings_intraday_alerts)
+                    else:
+                        print("[holdings intraday] send 失敗 → 不標記已推, 下個 tick 會重試",
+                              flush=True)
+                else:
+                    print("[holdings intraday] 格式化後訊息為空, 不送", flush=True)
         except Exception as _e:
             import traceback
             print(f"[holdings intraday] check failed (non-fatal): {_e}", flush=True)
