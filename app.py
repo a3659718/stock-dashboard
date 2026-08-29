@@ -3593,40 +3593,84 @@ with tab_mood:
 with tab_bt:
     st.subheader("📊 回測勝率")
     st.caption("基於歷史資料模擬篩選器表現,評估訊號的歷史命中率與報酬分佈.")
+    # Bug fix (2026-08): 這個 tab 之前 100% 壞掉, 三個地方對不上 backtest.py 的實際介面:
+    #   1. 呼叫 backtest.run_backtest(market=..., days=...) — 這兩個參數根本不存在,
+    #      真正的簽名是 run_backtest(stock_universe, conditions, days_back=...) → 必 TypeError,
+    #      所以按下去只會看到「回測失敗」的紅字, 從來沒有真的跑過。
+    #   2. 讀 bt_res["trades"] — 回傳的 key 是 "raw" / "summary", 沒有 "trades"。
+    #   3. 讀欄位 "return%" — 實際欄位是 r5d / r10d / r20d。
+    #   另外 backtest.py 內部全部走 tw_screener, 只支援台股, 原本的「市場 TW/US」下拉是假的。
+    import backtest as _bt_mod
+    import tw_screener as _tw_mod
+
+    st.caption("⚠️ 回測僅支援台股 (條件篩選器是 tw_screener)。")
     cBT1, cBT2 = st.columns([1, 1])
     with cBT1:
-        bt_market = st.selectbox("市場", options=["TW", "US"], key="bt_market")
+        bt_conds = st.multiselect(
+            "回測條件",
+            options=list(_bt_mod.BACKTESTABLE_CONDITIONS.keys()),
+            default=["break_ma", "volume_burst"],
+            format_func=lambda c: _bt_mod.BACKTESTABLE_CONDITIONS.get(c, c),
+            key="bt_conds",
+        )
     with cBT2:
         bt_lookback = st.slider("回測天數", 30, 365, 90, step=30, key="bt_lookback")
+    bt_universe_n = st.slider("抽樣股票數 (越多越慢)", 30, 300, 120, step=30, key="bt_universe_n")
     bt_btn = st.button("🚀 跑回測", use_container_width=True, type="primary", key="bt_run")
     if bt_btn:
-        try:
-            with st.spinner("回測中..."):
-                import backtest
-                bt_res = backtest.run_backtest(market=bt_market, days=bt_lookback)
-            if bt_res.get("error"):
-                st.error(f"回測失敗: {bt_res['error']}")
-            else:
-                df_bt = bt_res.get("trades")
-                if df_bt is not None and not df_bt.empty:
-                    cMA, cMB, cMC = st.columns(3)
-                    with cMA:
-                        st.metric("總交易數", len(df_bt))
-                    with cMB:
-                        if "return%" in df_bt.columns:
-                            wr = (df_bt["return%"] > 0).mean() * 100
-                            st.metric("勝率", f"{wr:.1f}%")
-                    with cMC:
-                        if "return%" in df_bt.columns:
-                            avg = df_bt["return%"].mean()
-                            st.metric("平均報酬", f"{avg:+.2f}%")
-                    st.dataframe(df_bt, use_container_width=True, hide_index=True)
+        if not bt_conds:
+            st.warning("請至少選一個回測條件")
+        else:
+            try:
+                with st.spinner("回測中 (抓歷史日線 + walk-forward, 可能要 1-3 分鐘)..."):
+                    info_df = ds.get_taiwan_stock_info()
+                    if info_df is None or info_df.empty:
+                        universe = []
+                    else:
+                        try:
+                            info_df = ds.filter_tradeable_stocks(info_df)
+                        except Exception:
+                            pass
+                        universe = info_df["stock_id"].astype(str).tolist()[:bt_universe_n]
+                    if not universe:
+                        bt_res = {"error": "抓不到台股清單 (FinMind 額度用盡?), 稍後再試"}
+                    else:
+                        bt_res = _bt_mod.run_backtest(
+                            stock_universe=universe,
+                            conditions=bt_conds,
+                            days_back=bt_lookback,
+                        )
+                if bt_res.get("error"):
+                    st.error(f"回測失敗: {bt_res['error']}")
                 else:
-                    st.info("沒有回測結果")
-        except ImportError:
-            st.warning("尚未安裝 backtest 模組")
-        except Exception as e:
-            st.error(f"回測異常: {type(e).__name__}: {e}")
+                    df_sum = bt_res.get("summary")
+                    df_raw = bt_res.get("raw")
+                    if df_sum is not None and not df_sum.empty:
+                        st.markdown("#### 各條件勝率")
+                        st.dataframe(df_sum, use_container_width=True, hide_index=True)
+                    if df_raw is not None and not df_raw.empty:
+                        cMA, cMB, cMC = st.columns(3)
+                        with cMA:
+                            st.metric("總命中筆數", len(df_raw))
+                        if "r5d" in df_raw.columns:
+                            v5 = df_raw["r5d"].dropna()
+                            if not v5.empty:
+                                with cMB:
+                                    st.metric("+5日勝率", f"{(v5 > 0).mean() * 100:.1f}%")
+                                with cMC:
+                                    st.metric("+5日平均報酬", f"{v5.mean():+.2f}%")
+                        rng = bt_res.get("as_of_range")
+                        if rng:
+                            st.caption(f"回測區間: {rng[0]} ~ {rng[1]} "
+                                       f"({bt_res.get('n_trading_days', '?')} 個交易日)")
+                        with st.expander("原始命中明細"):
+                            st.dataframe(df_raw, use_container_width=True, hide_index=True)
+                    else:
+                        st.info("沒有回測結果")
+            except ImportError:
+                st.warning("尚未安裝 backtest 模組")
+            except Exception as e:
+                st.error(f"回測異常: {type(e).__name__}: {e}")
 
 
 # =============================================================================

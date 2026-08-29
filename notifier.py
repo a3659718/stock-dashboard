@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import html as _html
 import math
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import requests
 import streamlit as st
