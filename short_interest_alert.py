@@ -40,8 +40,14 @@ def _fetch_securities_lending() -> Dict:
         if not d:
             continue
         # 不同 FinMind 版本欄位名可能不同
-        lend_balance = float(r.get("balance", 0) or r.get("securities_lending_balance", 0) or 0)
-        lend_short_sell = float(r.get("short_sale_balance", 0) or r.get("securities_lending_short_sale", 0) or 0)
+        # Bug fix (2026-08): FinMind 這幾個 dataset 回的是 CamelCase 欄位 (repo 其他地方一律用
+        # MarginPurchaseTodayBalance / ShortSaleTodayBalance, 見 ai_analyzer.py:152、
+        # tw_screener.py:186)。原本只寫 snake_case → 一律填 0, 每天固定顯示「借券餘額 0 億」,
+        # 券資比整段消失, 而且看起來像「今天真的沒有空單」。兩種寫法都列進候選。
+        lend_balance = float(r.get("SecuritiesLendingBalance", 0) or r.get("balance", 0)
+                             or r.get("securities_lending_balance", 0) or 0)
+        lend_short_sell = float(r.get("ShortSaleBalance", 0) or r.get("short_sale_balance", 0)
+                                or r.get("securities_lending_short_sale", 0) or 0)
         if d not in by_date:
             by_date[d] = {"lend_balance": 0, "lend_short_sell": 0}
         by_date[d]["lend_balance"] += lend_balance
@@ -112,8 +118,10 @@ def _fetch_margin_short() -> Dict:
     if not today:
         return out
     r = today[0]
-    margin_balance = float(r.get("margin_purchase_today_balance", 0) or 0)
-    short_balance = float(r.get("short_sale_today_balance", 0) or 0)
+    margin_balance = float(r.get("MarginPurchaseTodayBalance", 0)
+                           or r.get("margin_purchase_today_balance", 0) or 0)
+    short_balance = float(r.get("ShortSaleTodayBalance", 0)
+                          or r.get("short_sale_today_balance", 0) or 0)
     # 不同單位: 有些是「張」(千股), 有些是金額. 用金額轉億
     # 若數字 < 10000 視為「億」, 否則轉億
     if margin_balance > 1e6:  # 元

@@ -24,6 +24,8 @@ mapping 邏輯:
 """
 from __future__ import annotations
 
+import re as _re
+from functools import lru_cache as _lru_cache
 from typing import Dict, List, Optional
 
 import data_sources as ds
@@ -128,6 +130,28 @@ def get_us_sector_strength() -> Dict[str, Dict]:
     return out
 
 
+@_lru_cache(maxsize=1)
+def _us_stock_to_tw_themes() -> Dict[str, set]:
+    """{美股代號: {它連動的台股族群名, ...}}
+
+    US_THEME_STOCK_TO_TW 的值是 "中興電 (1513)" 這種顯示字串, 這裡把括號裡的 4 碼代號
+    解出來, 再透過 STOCK_TO_TW_THEME (台股代號 → 族群) 反查族群名。
+    """
+    out: Dict[str, set] = {}
+    for us, tw_list in US_THEME_STOCK_TO_TW.items():
+        themes = set()
+        for tw in tw_list:
+            m = _re.search(r"(\d{4})", str(tw))
+            if not m:
+                continue
+            th = STOCK_TO_TW_THEME.get(m.group(1))
+            if th:
+                themes.add(th)
+        if themes:
+            out[us] = themes
+    return out
+
+
 def tw_theme_boost_from_us(theme: str, us_strength: Optional[Dict] = None) -> Dict:
     """給定 TW 族群名稱, 計算來自美股的 boost score (0-20).
 
@@ -162,9 +186,11 @@ def tw_theme_boost_from_us(theme: str, us_strength: Optional[Dict] = None) -> Di
             score += 2
 
     # 找對應的主題股
-    matched_stocks = [us for us, tw_list in US_THEME_STOCK_TO_TW.items()
-                      if any(theme.lower() in tw.lower() or tw.lower() in theme.lower()
-                              for tw in tw_list)]
+    # Bug fix (2026-08): 原本拿 theme (族群名, 例如 "重電族群") 去跟 tw_list 的元素
+    # (個股字串, 例如 "中興電 (1513)") 互相做子字串比對 —— 兩者永遠不是對方的子字串,
+    # 實測 21 個 theme 的 matched_stocks 全部是空 list, 整個「個股級別連動」從未生效。
+    # 正確作法: 從個股字串裡把 4 碼代號解出來, 再用 STOCK_TO_TW_THEME 反查它屬於哪個族群。
+    matched_stocks = [us for us, themes in _us_stock_to_tw_themes().items() if theme in themes]
     for sym in matched_stocks:
         info = us_strength.get(sym, {})
         p1 = info.get("1d_pct", 0)
@@ -206,7 +232,8 @@ STOCK_TO_TW_THEME = {
     # 機器人 / 自動化
     "1536": "機器人", "1319": "機器人", "4585": "機器人",
     # ABF 載板
-    "3037": "ABF 載板", "8046": "ABF 載板", "6669": "ABF 載板",
+    "3037": "ABF 載板", "8046": "ABF 載板",
+    # 6669 (緯穎) 原本在這裡重複定義, 會靜默覆蓋上面的 "AI 伺服器" 分類 — 移除。
     # 金融
     "2891": "金融", "2882": "金融", "2881": "金融",
 }

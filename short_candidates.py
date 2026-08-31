@@ -126,7 +126,8 @@ def scan_intraday_weak_stocks(top_n: int = WEAK_TOP_N,
     ]
     try:
         import watchlist_store
-        wl = watchlist_store.load_watchlist() or []
+        # 原本 universe + wl 會 TypeError (wl 是 dict 陣列) 並被下面的 except 吞掉
+        wl = watchlist_store.load_watchlist_ids()
         universe = list(dict.fromkeys(universe + wl))
     except Exception:
         pass

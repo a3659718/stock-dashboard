@@ -47,7 +47,16 @@ def check_market_surge() -> Optional[Dict]:
     try:
         twii, _twii_src = _fetch_twii_5m_resilient()
         if twii is not None and not twii.empty:
-            today_bars = twii.tail(50)
+            # Bug fix (2026-08): 原本直接 twii.tail(50) 當「今日 K 棒」。台股一個交易日只有
+            # 54 根 5m K, 所以盤中任何時刻這個視窗都會跨到昨天 → twii_pct 其實是
+            # 「距今 4 小時 10 分前的漲幅」, 含整段隔夜跳空, 高估或低估都可能。
+            # 同檔的 _stock_strength_metrics() 有正確做日期過濾, 只有這裡漏了。
+            try:
+                _idx = twii.index
+                _dates = _idx.date if hasattr(_idx, "date") else None
+                today_bars = twii[_dates == _dates[-1]] if _dates is not None else twii.tail(50)
+            except Exception:
+                today_bars = twii.tail(50)
             if len(today_bars) >= 2:
                 open_price = float(today_bars.iloc[0]["Open"])
                 current_price = float(today_bars.iloc[-1]["Close"])
@@ -149,7 +158,8 @@ def scan_strong_stocks_now(top_n: int = 10, max_workers: int = 8) -> List[Dict]:
     # 嘗試讀使用者 watchlist 也加入掃描
     try:
         import watchlist_store
-        wl = watchlist_store.load_watchlist() or []
+        # 原本 universe + wl 會 TypeError (wl 是 dict 陣列) 並被下面的 except 吞掉
+        wl = watchlist_store.load_watchlist_ids()
         universe = list(dict.fromkeys(universe + wl))
     except Exception:
         pass
@@ -336,7 +346,8 @@ def scan_intraday_strong_stocks(top_n: int = INTRADAY_STRONG_TOP_N,
     ]
     try:
         import watchlist_store
-        wl = watchlist_store.load_watchlist() or []
+        # 原本 universe + wl 會 TypeError (wl 是 dict 陣列) 並被下面的 except 吞掉
+        wl = watchlist_store.load_watchlist_ids()
         universe = list(dict.fromkeys(universe + wl))
     except Exception:
         pass

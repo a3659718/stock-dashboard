@@ -58,6 +58,18 @@ def _first_friday(year: int, month: int) -> _dt.date:
     return d + _dt.timedelta(days=(4 - d.weekday()) % 7)
 
 
+def _nfp_tpe_time(d: _dt.date) -> str:
+    """非農 (08:30 ET) 對應的台北時間 — 隨美東夏令/冬令變動。
+    EDT (UTC-4) → 台北 20:30 ; EST (UTC-5) → 台北 21:30。
+    重用 index_alerts 已寫好的夏令判斷, 不另外土砲一份。
+    """
+    try:
+        import index_alerts as _ia
+        return "20:30" if _ia._is_us_in_dst(d) else "21:30"
+    except Exception:
+        return "20:30"
+
+
 def _nfp_dates(from_d: _dt.date, to_d: _dt.date) -> List[_dt.date]:
     """美國非農就業 (Nonfarm Payrolls) — BLS 慣例為每月第一個週五公布。
     少數月份 (第一個週五落在 1 號等) 會延到第二週, 但多數月份此規則準確。"""
@@ -93,7 +105,9 @@ def get_macro_events(from_d: _dt.date, to_d: _dt.date) -> List[Dict]:
             "date": d, "type": "NFP",
             "title": "美國非農就業數據 (Nonfarm Payrolls)",
             "impact": "high",
-            "tpe_time": "台北 20:30",
+            # Bug fix (2026-08): NFP 固定 08:30 ET 公布。EDT = 台北 20:30, EST = 台北 21:30。
+            # 原本寫死 20:30, 冬令 (11 月–3 月) 那幾次會讓你早一小時守盤。
+            "tpe_time": f"台北 {_nfp_tpe_time(d)}",
         })
 
     # 其他總經 (CPI/PCE/GDP…) — 嘗試 Finnhub, 失敗略過 (FOMC/非農已由上面保底)

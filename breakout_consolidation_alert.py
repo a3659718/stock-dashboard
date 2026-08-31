@@ -169,11 +169,9 @@ def check_breakout_consolidation(top_n: int = 5) -> List[Dict]:
 
     universe = set(DEFAULT_US_UNIVERSE_BREAKOUT)
     try:
-        wl = watchlist_store.load_watchlist() or []
-        for sid in wl:
-            s = str(sid).strip().upper()
-            if s and not s.isdigit():  # 美股
-                universe.add(s)
+        # load_watchlist() 回 dict 陣列 → 用 load_watchlist_ids("US") 只取美股代號
+        for s in watchlist_store.load_watchlist_ids("US"):
+            universe.add(s)
     except Exception:
         pass
 

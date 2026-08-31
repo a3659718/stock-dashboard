@@ -190,11 +190,8 @@ def _gather_universe() -> List[Dict]:
 
     # Watchlist (用戶觀察名單) — 通常含台股
     try:
-        wl = watchlist_store.load_watchlist() or []
-        for sid in wl:
-            sid = str(sid).strip().upper()
-            if not sid:
-                continue
+        # load_watchlist() 回 dict 陣列 → 一律走 load_watchlist_ids()
+        for sid in watchlist_store.load_watchlist_ids():
             if sid.isdigit():
                 universe[sid] = {"market": "TW", "tag": "watch"}
             else:

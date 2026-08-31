@@ -81,10 +81,8 @@ def check_volume_breakout() -> List[Dict]:
 
     universe = []
     try:
-        wl = watchlist_store.load_watchlist() or []
-        for sid in wl:
-            s = str(sid).strip().upper()
-            if not s: continue
+        # load_watchlist() 回的是 dict 陣列, 不是代號字串 → 一律走 load_watchlist_ids()
+        for s in watchlist_store.load_watchlist_ids():
             universe.append((s, "TW" if s.isdigit() else "US"))
     except Exception:
         pass

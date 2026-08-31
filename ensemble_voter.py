@@ -43,7 +43,10 @@ STRATEGY_WEIGHTS = {
     "Weinstein": 1.3,    # 中長線
     "Buffett": 1.0,      # 質量, 中性
     "Speculation": 0.7,  # 投機, 權重低
-    "entry_evaluator": 1.5,  # 綜合分數, 權重高
+    # Bug fix (2026-08): 權重是用 strategy 字串的第一個空白前綴查表, 而 _vote_entry_evaluator
+    # 回的 strategy 是中文「綜合評估」, 查不到 "entry_evaluator" 這個 key → 落到 default 1.0,
+    # 權重最高的策略反而被降權。key 改成實際會被查的字串。
+    "綜合評估": 1.5,  # entry_evaluator 的 strategy 字串, 綜合分數, 權重高
 }
 
 
@@ -234,7 +237,9 @@ def _vote_speculation(stock_id: str, market: str) -> Dict:
         except Exception:
             themes = None
         if themes and isinstance(themes, dict):
-            hot_themes = themes.get("themes", [])
+            # Bug fix (2026-08): theme_analyzer.theme_score() 回的 key 是 narrative_tags,
+            # 沒有 "themes" → 這裡恆為空 list, Speculation 永遠投 HOLD, 六策略中永遠少一張 BUY 票。
+            hot_themes = themes.get("narrative_tags") or themes.get("themes") or []
             if hot_themes:
                 out["vote"] = "BUY"
                 out["reason"] = f"熱門題材: {', '.join(hot_themes[:2])}"

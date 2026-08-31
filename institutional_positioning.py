@@ -125,9 +125,14 @@ def _fetch_inst_futures() -> Dict:
     if not rows:
         return out
     # 篩台指期 TX
-    rows = [r for r in rows if r.get("futures_id") == "TX"
-            or r.get("contract_type") == "TXF"
-            or r.get("name") in ("Foreign_Investor", "Investment_Trust", "Dealer")]
+    # Bug fix (2026-08): 原本第三個條件是 `or r.get("name") in ("Foreign_Investor", ...)`,
+    # 但 MTX 小台 / TE 電子期 / TF 金融期的列同樣有這些 name → 每一列都成立,
+    # 「只留台指期 TX」的意圖完全失效, 最後算出來的是別的合約。改成只認合約代號。
+    rows = [r for r in rows
+            if str(r.get("futures_id") or r.get("contract_type") or "").upper() in ("TX", "TXF")]
+    if not rows:
+        print("[institutional_positioning] 篩不到 TX 台指期資料 (FinMind 欄位改名?)", flush=True)
+        return out
     by_date = {}
     for r in rows:
         d = r.get("date", "")
@@ -138,12 +143,14 @@ def _fetch_inst_futures() -> Dict:
         net_oi = long_oi - short_oi
         if d not in by_date:
             by_date[d] = {"Foreign_Investor": 0, "Investment_Trust": 0, "Dealer": 0}
+        # Bug fix: 原本用 `=` 覆寫 → 同一天有多列時互相蓋掉, 最後留下的是回傳順序的最後一列。
+        # 改成 `+=` 累加 (自營商本來就分「避險」「自營」多列, 本來就該加總)。
         if "Foreign" in nm or "外資" in nm:
-            by_date[d]["Foreign_Investor"] = net_oi
+            by_date[d]["Foreign_Investor"] += net_oi
         elif "Trust" in nm or "投信" in nm:
-            by_date[d]["Investment_Trust"] = net_oi
+            by_date[d]["Investment_Trust"] += net_oi
         elif "Dealer" in nm or "自營" in nm:
-            by_date[d]["Dealer"] = net_oi
+            by_date[d]["Dealer"] += net_oi
     dates = sorted(by_date.keys())[-5:]
     for d in dates:
         out["data"].append({

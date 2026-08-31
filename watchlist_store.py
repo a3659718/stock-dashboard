@@ -210,6 +210,45 @@ def load_watchlist() -> List[Dict]:
     return []
 
 
+def load_watchlist_ids(market: Optional[str] = None) -> List[str]:
+    """只取自選股的「代號字串」清單 — 給所有 alert 模組掃描 universe 用。
+
+    為什麼要有這支 (2026-08 修正):
+      load_watchlist() 回的是 dict 陣列 ({"stock_id","name","market",...}), 但 8 個 alert 模組
+      都把它當成「代號字串陣列」直接用, 兩種壞法都是靜默的:
+        (a) str(dict) → "{'STOCK_ID': '6669', ...}", .isdigit() 為 False → 被當美股代號丟給
+            yfinance, 必然抓不到;
+        (b) list(dict.fromkeys(universe + wl)) → TypeError: unhashable type: 'dict',
+            被外層 except 吞掉 → 整份自選股靜靜消失, log 完全沒有痕跡。
+      結果是使用者加進自選股的標的, 量爆/籌碼/新聞/突破/強弱勢/大盤警報全都沒真的掃到。
+      統一走這支, 之後新增模組也不會再踩到同一個坑。
+
+    market: "TW" / "US" → 只回該市場; None → 全部。
+      市場判定優先用 item 自己的 market 欄位, 沒有才退回「純數字 = 台股」的猜法。
+    """
+    out: List[str] = []
+    for item in (load_watchlist() or []):
+        try:
+            if isinstance(item, dict):
+                sid = str(item.get("stock_id", "")).strip().upper()
+                mkt = str(item.get("market", "")).strip().upper()
+            else:
+                # 相容: 萬一哪天來源退化成字串陣列
+                sid = str(item).strip().upper()
+                mkt = ""
+            if not sid:
+                continue
+            if not mkt:
+                mkt = "TW" if sid.isdigit() else "US"
+            if market and mkt != str(market).strip().upper():
+                continue
+            if sid not in out:
+                out.append(sid)
+        except Exception:
+            continue
+    return out
+
+
 def _write_sheet_grid(sheet, cols: List[str], items: List[Dict], max_rows: int) -> None:
     """單次 update() 覆寫整張表 (含 header), 完全不呼叫 clear().
 

@@ -487,7 +487,8 @@ def _scan_companion_weak_stocks_tw(top_n: int = 5, max_workers: int = 8) -> List
     ]
     # 加 user watchlist
     try:
-        wl = watchlist_store.load_watchlist() or []
+        # 原本 universe + wl 會 TypeError (wl 是 dict 陣列) 並被下面的 except 吞掉
+        wl = watchlist_store.load_watchlist_ids()
         universe = list(dict.fromkeys(universe + wl))
     except Exception:
         pass
@@ -601,7 +602,8 @@ def _scan_companion_strong_stocks_tw(top_n: int = 5, max_workers: int = 8) -> Li
         "8069", "6531", "1216", "2912",
     ]
     try:
-        wl = watchlist_store.load_watchlist() or []
+        # 原本 universe + wl 會 TypeError (wl 是 dict 陣列) 並被下面的 except 吞掉
+        wl = watchlist_store.load_watchlist_ids()
         universe = list(dict.fromkeys(universe + wl))
     except Exception:
         pass
@@ -1761,6 +1763,13 @@ def check_index_alerts() -> List[Dict]:
             # Bug fix: 原本用未定義的 alerts_today → NameError 把整個指數警報炸掉;
             #          且寫錯 key (alerts_today), 害每日上限讀的 alerts_today_count 永不累加.
             sym_state["alerts_today_count"] = alerts_count + 1
+            # Bug fix (2026-08): 這兩個欄位原本「只讀不寫」(全檔只有跨日重置寫過) —
+            #   last_bucket 恆為 0 → `bucket != last_bucket` 只要過門檻就永遠成立,
+            #     「每 X 點一格」的階梯完全失效;
+            #   last_alert_at 恆為 None → 上面那段 30 分鐘冷卻永遠不會執行。
+            # 結果是唯一還有效的節流只剩每日 4 則上限, 指數在同一格內盤整就會連吐 4 則。
+            sym_state["last_bucket"] = bucket
+            sym_state["last_alert_at"] = dt.datetime.now(dt.timezone.utc).isoformat()
 
     state["index_alerts"] = idx_state
     watchlist_store.save_monitor_state(state)

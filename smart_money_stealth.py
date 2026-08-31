@@ -160,12 +160,18 @@ def _evaluate_smart_money_stock(stock_id: str, name: str, theme: str,
         if cond_vol:
             reasons.append(f"📊 量比 {vol_ratio:.2f}x (≥1.6, 異常量)")
 
-        # 2. 今日 ≤ +2.0% (原 1.5% 太嚴)
-        cond_today = today_pct <= 2.0
+        # 2. -2.0% ≤ 今日 ≤ +2.0%
+        # Bug fix (2026-08): 原本只有上界 `today_pct <= 2.0`, 沒有下界 →
+        # 今日 -9% 的放量殺盤出貨股一樣算「還沒被注意」, 還會被印成
+        # 「📉 今日僅 -9.00% (≤+2.0%, 還沒被注意)」。潛伏吸籌的語意是「在區間內橫著」,
+        # 不是「在崩」, 所以補上 -2% 的下界。
+        cond_today = -2.0 <= today_pct <= 2.0
         if cond_today:
-            reasons.append(f"📉 今日僅 {today_pct:+.2f}% (≤+2.0%, 還沒被注意)")
-        else:
+            reasons.append(f"📉 今日僅 {today_pct:+.2f}% (±2.0% 內, 還沒被注意)")
+        elif today_pct > 2.0:
             warns.append(f"⚠️ 今日已 {today_pct:+.2f}% (>+2.0%, 不夠潛伏)")
+        else:
+            warns.append(f"⚠️ 今日 {today_pct:+.2f}% (<-2.0%, 是在殺不是在吸)")
 
         # 3. 股價在 20MA ±5%
         cond_ma = abs(ma20_deviation) <= 5
@@ -212,6 +218,13 @@ def _evaluate_smart_money_stock(stock_id: str, name: str, theme: str,
             (3 if cond_theme else 0) +
             (4 if cond_chip else 0)
         )
+        # Bug fix (2026-08): 上面註解寫「加分: 至少 1 個籌碼 或 (20MA + 整理)」, 但實作只有
+        # 一個 `score < 6` 的總分門檻, 而 cond_theme 在 scan 端就已經保證成立 (只有
+        # theme_avg >= 2.0 的族群成分股會被送進來) → 恆 +3 分。兩個必要 gate 3+2 加上這恆真的
+        # 3 分 = 8 > 6, 門檻等於不存在, 註解宣稱的加分條件從來沒被強制過。
+        # 這裡把註解寫的規則真的實作出來。
+        if not (cond_chip or (cond_ma and cond_consol)):
+            return None
         if score < 6:
             return None  # 分數不夠 (原門檻 7, 池子擴大 + 量比/今日% 微調後配合放寬)
 

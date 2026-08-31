@@ -53,12 +53,18 @@ def _score_avoid(chip: Dict) -> tuple:
         score += 1.5
         reasons.append(f"投信也賣 {abs(it_5d):,}張")
 
-    # B. 跌破月線
-    ma20_diff = price.get("距 20MA %")
+    # B. 中期走弱 (近 20 日跌幅)
+    # Bug fix (2026-08): chip_analyzer 寫入的 price key 只有
+    # close / 今日% / 5d漲跌% / 20d漲跌% / 量比 / 今日量 / 20日均量(_張)。
+    # 「距 20MA %」「5日%」「收盤」這三個字串在整個 repo 只出現在本檔, 沒有任何地方寫入
+    # → 這兩條判斷永遠拿 0 分 (滿分從 11 掉到 8), current 也恆為 None,
+    #   害 market_open_picks 的 `if sid and cur:` 恆為 False → avoid_pick 一筆都沒進 signal_tracker。
+    # 20MA 距離 chip_analyzer 沒有提供, 改用它有的 5d/20d 漲跌幅來近似「跌破月線」的意思。
+    ma20_diff = price.get("20d漲跌%")
     try:
         if ma20_diff is not None and float(ma20_diff) < -2:
             score += 2
-            reasons.append(f"跌破月線 ({float(ma20_diff):.1f}%)")
+            reasons.append(f"近 20 日 {float(ma20_diff):.1f}% (中期走弱)")
     except (TypeError, ValueError):
         pass
 
@@ -72,7 +78,7 @@ def _score_avoid(chip: Dict) -> tuple:
             score += 2
             reasons.append(f"放量下跌 {today_pct:.1f}% 量比{vol_ratio:.1f}x")
         # 5 日連跌
-        five_d = price.get("5日%")
+        five_d = price.get("5d漲跌%")
         if five_d is not None and float(five_d) < -5:
             score += 1
             reasons.append(f"近 5 日 {float(five_d):.1f}%")
@@ -107,7 +113,7 @@ def _fetch_one_avoid(sid: str, name: str, days: int = 10) -> Optional[Dict]:
             "name": name,
             "score": score,
             "reasons": " · ".join(reasons[:3]),
-            "current": price.get("收盤"),
+            "current": price.get("close"),
             "today_pct": price.get("今日%"),
         }
     except Exception as _e:

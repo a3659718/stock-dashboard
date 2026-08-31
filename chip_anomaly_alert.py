@@ -58,21 +58,24 @@ def _check_one_stock(sid: str) -> List[Dict]:
         is_streak_sell = (net_5d < 0).all()
         if not (is_streak_buy or is_streak_sell):
             return out
-        # 流通張數 (用發行張數近似, 若 FinMind 沒給, fallback)
+        # 流通張數.
+        # Bug fix (2026-08): 原本從 get_taiwan_stock_info() 找「資本額」欄位, 但那支回的是
+        # FinMind TaiwanStockInfo 的原始欄位 (stock_id / stock_name / type / industry_category /
+        # date), _ensure_cols() 也只保證前三個 —— 中文的「資本額」永遠不存在。
+        # 於是 shares_lots 恆為 0 → pct_of_outstanding 恆為 0 → 下面兩個 > 1.0 的門檻永遠
+        # 不成立 → 這個模組從上線到現在一則都沒推過, 而且外觀跟「今天沒有籌碼異常」一模一樣。
+        # 改用 data_sources.fetch_shares_outstanding() (資產負債表推算, 單位就是張),
+        # 跟 limit_up_precursor 用的是同一支。
+        shares_lots = 0
         try:
-            info = ds.get_taiwan_stock_info()
-            if info is not None and not info.empty:
-                row = info[info["stock_id"] == sid]
-                if not row.empty and "資本額" in row.columns:
-                    cap = float(row.iloc[0].get("資本額", 0))
-                    # 流通張數 ≈ 資本額 / 10 元 / 1000 股 (粗估)
-                    shares_lots = cap / 10000 if cap > 0 else 0
-                else:
-                    shares_lots = 0
-            else:
-                shares_lots = 0
-        except Exception:
-            shares_lots = 0
+            shares_map = ds.fetch_shares_outstanding((sid,)) or {}
+            shares_lots = float(shares_map.get(sid) or 0)
+        except Exception as _se:
+            print(f"[chip_anomaly] {sid} 流通張數抓不到 (non-fatal): {_se}", flush=True)
+        if shares_lots <= 0:
+            # 抓不到就明講 —— 不要讓「沒資料」偽裝成「沒有籌碼異常」
+            print(f"[chip_anomaly] {sid} 無流通張數資料 → 無法算佔比, 本檔跳過", flush=True)
+            return out
         cum_5d = net_5d.sum()
         pct_of_outstanding = abs(cum_5d) / shares_lots * 100 if shares_lots > 0 else 0
 
@@ -116,11 +119,9 @@ def check_chip_anomaly() -> List[Dict]:
 
     universe = set()
     try:
-        wl = watchlist_store.load_watchlist() or []
-        for sid in wl:
-            s = str(sid).strip().upper()
-            if s and s.isdigit():
-                universe.add(s)
+        # load_watchlist() 回 dict 陣列 → 用 load_watchlist_ids("TW") 只取台股代號
+        for s in watchlist_store.load_watchlist_ids("TW"):
+            universe.add(s)
     except Exception:
         pass
     try:

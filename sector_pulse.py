@@ -380,11 +380,19 @@ def find_stealth_followers(top_themes: int = 5) -> dict:
         return {"stealth": pd.DataFrame(), "hot_themes": themes_df.head(top_themes)}
 
     all_df = pd.concat(pool, ignore_index=True)
-    # 條件: 今日 ≤ +2% + 量比 ≥ 1.5 + 5 日 ≤ +5% (潛伏: 量先動、股還沒動)
+    # 條件: 0 < 今日% ≤ +2 + 量比 ≥ 1.5 + -3 ≤ 5日% ≤ +5 (潛伏: 量先動、股還沒動)
+    # Bug fix (2026-08): 原本三個條件都「只有上界沒有下界」, 任何崩跌中的爆量股都符合;
+    # 又因為按量比降冪排序, 跌最兇、量最大的 (通常正是恐慌殺盤) 會排在推薦名單第一名。
+    # docstring 原本就寫明要「今日漲幅 > 0 (開始發動)」, 這裡補回下界並加上 5 日跌幅下限,
+    # 排序也改成「今日漲幅為主、量比為輔」, 避免單純用量比把殺盤股拱上來。
     cond = (
-        (all_df["今日%"].fillna(0) <= 2)
+        (all_df["今日%"].fillna(0) > 0)          # ← 補: 要開始發動, 不是在跌
+        & (all_df["今日%"].fillna(0) <= 2)
         & (all_df["量比"].fillna(0) >= 1.5)
+        & (all_df["5日%"].fillna(-99) >= -3)     # ← 補: 近 5 日不能是破底走勢
         & (all_df["5日%"].fillna(0) <= 5)
     )
-    stealth = all_df[cond].sort_values("量比", ascending=False).head(15).reset_index(drop=True)
+    stealth = (all_df[cond]
+               .sort_values(["今日%", "量比"], ascending=[False, False])
+               .head(15).reset_index(drop=True))
     return {"stealth": stealth, "hot_themes": themes_df.head(top_themes)}

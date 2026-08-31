@@ -208,6 +208,11 @@ def _record_push_safe(text: str, ok: bool, info: str) -> None:
         pass
 
 
+# 本 process 成功送出的訊息數。給排程去重用: 「這次 run 到底有沒有真的推出東西」
+# 決定了要不要 claim 這個 slot —— 沒推成功就不能 claim, 否則備援 cron 會被自己擋掉。
+SEND_OK_COUNT = 0
+
+
 def send_message(text: str, disable_preview: bool = True,
                   reply_markup: Optional[dict] = None,
                   disable_notification: bool = False,
@@ -296,6 +301,8 @@ def send_message(text: str, disable_preview: bool = True,
                     _pc.mark_consumed(category)
                 except Exception as _ce:
                     print(f"[notifier] push_cap mark_consumed fail (non-fatal): {_ce}", flush=True)
+            global SEND_OK_COUNT
+            SEND_OK_COUNT += 1
             _record_push_safe(text, ok, info)
             return ok, info
         # 失敗 — 短暫 backoff 後重試 (except 永久性錯誤: chat_id 沒設 / token 錯)

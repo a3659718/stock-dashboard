@@ -238,6 +238,10 @@ def analyze_portfolio_risk() -> Dict:
         warnings.append("🟢 組合分散度良好")
 
     return {
+        # Bug fix (2026-08): stocks_w 完整算出來卻沒放進回傳值 (docstring 與空持倉分支
+        # 都宣稱有 "stocks"), 害 app.py 的 `if risk.get("stocks"):` 恆為 False →
+        # 「🏆 個股權重 Top 5」表格在有持倉時也永遠不顯示, 且沒有任何錯誤訊息。
+        "stocks": stocks_w,
         "holdings_n": len(enriched),
         "total_value": round(total_value, 2),
         "sectors": sectors,

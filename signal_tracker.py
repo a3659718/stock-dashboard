@@ -226,7 +226,11 @@ def record_signal(signal_type: str, stock_id: str, name: str = "",
             pending = [r for r in records if r.get("hit") is None]
             validated = [r for r in records if r.get("hit") is not None]
             keep_validated = max(0, _MAX_RECORDS - len(pending))
-            records[:] = pending + validated[-keep_validated:]
+            # Bug fix (2026-08): validated[-0:] 等於 validated[0:] → keep_validated 為 0 時
+            # 反而「全部保留」而不是保留 0 筆 (Python 負索引切片的經典陷阱)。
+            # pending 堆到 _MAX_RECORDS 時就會發生, records 從此無限成長,
+            # 而整包 JSON 每次都要寫進 Google Sheets 單一儲存格。
+            records[:] = pending + (validated[-keep_validated:] if keep_validated > 0 else [])
         return 1
 
     _mutate_signals_atomically(_mutate)
