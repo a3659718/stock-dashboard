@@ -1,13 +1,4 @@
-"""
-tw_screener.py
-台股四大條件篩選器：
-  1) 突破月線 (MA20) 或 季線 (MA60)
-  2) 今日成交量 >= 5 日均量的 5~10 倍
-  3) 融券今日餘額 較前日增加 >= 50 張
-  4) 投信近 30 日「首次」買超 (累積 buy-sell <=0 且今日 buy-sell > 0)
 
-回傳格式: pandas.DataFrame，欄位包含 stock_id / name / market / hits (命中條件清單)
-"""
 
 from __future__ import annotations
 
@@ -55,7 +46,9 @@ CONDITION_LABELS = {
     "break_ma":            "突破月/季線",
     "volume_burst":        "量 5–10 倍均量",
     "short_increase":      "融券增加 ≥ 50 張",
-    "invtrust_first_buy":  "投信 30 日首買",
+    "invtrust_first_buy_10": "投信 10 日首買",
+    "invtrust_first_buy_15": "投信 15 日首買",
+    "invtrust_first_buy_30": "投信 30 日首買",
     "invtrust_consecutive":"投信連續 3 天買超",
     "invtrust_5d_acc":     "5 日投信累計 ≥ 100 張",
     "capital_ratio":       "投本比 ≥ 1.5% (20日累計)",
@@ -214,7 +207,25 @@ def screen_short_increase(margin: pd.DataFrame, params: TWParams) -> pd.DataFram
 # ---------------------------------------------------------------------------
 # 4) 投信 30 日首次買超
 # ---------------------------------------------------------------------------
-def screen_invtrust_first_buy(inst: pd.DataFrame, params: TWParams) -> pd.DataFrame:
+def screen_invtrust_first_buy(inst: pd.DataFrame, params: TWParams,
+                               lookback_days: int = 30) -> pd.DataFrame:
+    """投信「N 個交易日首買」— 今天買超, 且前 N 個交易日一天都沒買超過。
+
+    lookback_days: 回看幾個「交易日」(不是日曆日)。10 / 15 / 30 各有各的意義:
+      10 日  → 最敏感, 抓剛轉向的標的, 訊號多但雜訊也多
+      15 日  → 折衷
+      30 日  → 最嚴格, 前一個半月完全沒碰過, 才算真正的「首次進場」
+
+    Bug fix (2026-08) 兩件事:
+      1. 原本函式**完全沒有限制回看窗**, 直接拿傳進來的整份 inst 當 prior。
+         而 run_all_screens 抓的是 120 個「日曆日」(≈ 82 個交易日),
+         所以「30 日首買」實際上是「過去 4 個月都沒買過」—— 遠比標籤嚴格,
+         這也是為什麼這個條件很少命中。現在用 lookback_days 真的把窗切出來。
+      2. 原本沒有「最少要有幾天歷史」的防呆。FinMind 部分失敗 / 額度用盡只回最後一天時,
+         prior 是空的 → (prior["net"] > 0).sum() 自然是 0 → 條件無條件成立,
+         全市場每一檔都會被判成「首買」。同檔的 screen_invtrust_capital_ratio 有
+         min_required_rows 保護, 這裡漏了, 現在補上。
+    """
     if inst.empty:
         return pd.DataFrame()
     # 只保留 Investment_Trust
@@ -223,16 +234,28 @@ def screen_invtrust_first_buy(inst: pd.DataFrame, params: TWParams) -> pd.DataFr
         return pd.DataFrame()
     df["net"] = df["buy"].astype(float) - df["sell"].astype(float)
 
-    rows = []
     last_date = df["date"].max()
+    # 用「全市場的交易日清單」切窗, 而不是各股自己的 —— 個股可能有缺漏日,
+    # 用自己的日期切會讓不同股票的回看長度不一致。
+    all_dates = sorted(d for d in df["date"].unique() if d < last_date)
+    window_dates = set(all_dates[-lookback_days:]) if all_dates else set()
+
+    # 資料量防呆: 回看窗至少要有這麼多天才算數, 否則「沒買過」只是因為沒資料
+    min_required_days = max(5, int(lookback_days * 0.5))
+    if len(window_dates) < min_required_days:
+        print(f"[tw_screener] 投信 {lookback_days} 日首買: 回看窗只有 {len(window_dates)} 個交易日 "
+              f"(需要 {min_required_days}) → 資料不足, 本次不產生訊號", flush=True)
+        return pd.DataFrame()
+
+    rows = []
     for sid, g in df.groupby("stock_id"):
         g = g.sort_values("date")
         if g["date"].max() != last_date:
             continue
         today_net = float(g[g["date"] == last_date]["net"].sum())
-        prior = g[g["date"] < last_date]
-        # B4 修正: 真正的「首次買超」= 過去 30 日內沒有任何一天 net > 0
-        # (原邏輯只看累計 <= 0, 會把 "5 天大買 5 天大賣淨額為負, 今天又買" 誤判為首買)
+        prior = g[g["date"].isin(window_dates)]
+        # 真正的「首次買超」= 回看窗內沒有任何一天 net > 0
+        # (只看累計 <= 0 會把「5 天大買 5 天大賣淨額為負, 今天又買」誤判為首買)
         prior_buy_days = int((prior["net"] > 0).sum())
         cum_prior = float(prior["net"].sum())
         if today_net > 0 and prior_buy_days == 0:
@@ -240,7 +263,9 @@ def screen_invtrust_first_buy(inst: pd.DataFrame, params: TWParams) -> pd.DataFr
                 {
                     "stock_id": sid,
                     "today_net_buy": int(today_net),
-                    "prior_30d_cum": int(cum_prior),
+                    "lookback_days": lookback_days,
+                    "prior_cum": int(cum_prior),
+                    "prior_days_with_data": int(prior["date"].nunique()),
                     "prior_buy_days": prior_buy_days,  # 應為 0
                 }
             )
@@ -292,11 +317,15 @@ def screen_invtrust_5d_accumulation(inst: pd.DataFrame, params: TWParams) -> pd.
         if g["date"].max() != last_date:
             continue
         last5 = g.tail(5)
-        cum = float(last5["net"].sum())
-        if cum >= params.five_day_acc_lots:
+        # Bug fix (2026-09-07): FinMind 的 buy/sell 單位是「股」, 但 five_day_acc_lots
+        # 的門檻是「張」(1 張 = 1000 股)。原本拿股比張, 投信只買 105 股 (0.105 張) 也會
+        # 命中「5 日累計 >= 100 張」, 這條篩選器等於恆真。同檔的 screen_invtrust_capital_ratio
+        # 已經正確做了 /1000, 這裡跟著對齊。
+        cum_lots = float(last5["net"].sum()) / 1000.0
+        if cum_lots >= params.five_day_acc_lots:
             rows.append({
                 "stock_id": sid,
-                "5d_cum_net": int(cum),
+                "5d_cum_net": int(cum_lots),
             })
     return pd.DataFrame(rows)
 
@@ -332,12 +361,12 @@ def screen_invtrust_capital_ratio(inst: pd.DataFrame, shares_map: dict, params: 
         if len(last_window) < min_required_rows:
             continue  # L4: 資料天數不足, 跳過
         cum = float(last_window["net"].sum())
-        if cum < 50:
+        if cum / 1000.0 < 50:
             continue  # 短期防呆: 投信只買幾張, 投本比再高也沒意義
         shares = shares_map.get(str(sid))
         if not shares or shares <= 0:
             continue
-        ratio = cum / shares * 100.0
+        ratio = (cum / 1000.0) / shares * 100.0
         if ratio >= params.capital_ratio_pct:
             rows.append({
                 "stock_id": sid,
@@ -513,7 +542,9 @@ def run_all_screens(
     # 條件依賴的資料集
     need_daily = bool({"break_ma", "volume_burst", "above_ma_uptrend",
                         "kd_golden_cross", "macd_turn_positive"} & set(enabled))
-    need_inst = bool({"invtrust_first_buy", "invtrust_consecutive",
+    need_inst = bool({"invtrust_first_buy",           # 舊 key, 相容用
+                       "invtrust_first_buy_10", "invtrust_first_buy_15", "invtrust_first_buy_30",
+                       "invtrust_consecutive",
                        "invtrust_5d_acc", "capital_ratio"} & set(enabled))
     need_margin = "short_increase" in enabled
     need_shares = "capital_ratio" in enabled
@@ -567,8 +598,14 @@ def run_all_screens(
         results["volume_burst"] = screen_volume_burst(daily, params)
     if "short_increase" in enabled:
         results["short_increase"] = screen_short_increase(margin, params)
-    if "invtrust_first_buy" in enabled:
-        results["invtrust_first_buy"] = screen_invtrust_first_buy(inst, params)
+    # 投信首買 — 三種回看窗各自獨立, 可同時勾選比較
+    for _lb in (10, 15, 30):
+        _key = f"invtrust_first_buy_{_lb}"
+        if _key in enabled:
+            results[_key] = screen_invtrust_first_buy(inst, params, lookback_days=_lb)
+    # 相容: 舊的 "invtrust_first_buy" (無後綴) 視為 30 日
+    if "invtrust_first_buy" in enabled and "invtrust_first_buy_30" not in results:
+        results["invtrust_first_buy_30"] = screen_invtrust_first_buy(inst, params, lookback_days=30)
     if "invtrust_consecutive" in enabled:
         results["invtrust_consecutive"] = screen_invtrust_consecutive_buy(inst, params)
     if "invtrust_5d_acc" in enabled:
@@ -659,17 +696,21 @@ def run_all_screens(
                     except (TypeError, ValueError):
                         return default
 
+                # Bug fix (2026-09-07): net 來自 FinMind buy-sell, 單位是「股」, 但欄名
+                # 標「(張)」、下游 notifier / app / tracker 也都當張顯示, 而 _cap_ratio
+                # 的分母 shares_map 是「張」-> 投本比會被放大 1000 倍 (例如印出 150%)。
+                # 在建 map 的時候就換算成張, 欄名與投本比一次對齊。
                 acc5_map = (
                     it.sort_values("date")
                     .groupby("stock_id")["net"]
-                    .apply(lambda s: _safe_int(s.tail(5).sum()))
+                    .apply(lambda s: _safe_int(s.tail(5).sum() / 1000.0))
                     .to_dict()
                 )
                 today_map = (
                     it[it["date"] == last_date]
                     .groupby("stock_id")["net"]
                     .last()
-                    .map(_safe_int)
+                    .map(lambda v: _safe_int(v / 1000.0 if v is not None and not pd.isna(v) else v))
                     .to_dict()
                 )
                 combined["投信5日(張)"] = combined["stock_id"].map(acc5_map)

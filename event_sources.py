@@ -1,19 +1,4 @@
-"""
-event_sources.py
-擴充 news_event_alert 的事件來源:
-  - fetch_finnhub_8k(symbol): 美股 8-K filings (Finnhub /stock/filings)
-  - fetch_tw_major_announcements(): 台股重大訊息 (FinMind TaiwanStockNews)
-  - fetch_us_press_releases(symbol): Finnhub press releases
-  - Twitter: 評估後決定 skip (沒免費 API, scraper 易被擋)
 
-API:
-  fetch_finnhub_8k(symbol, days_back=3) -> List[Dict]
-  fetch_tw_major_announcements(stock_id=None, days_back=2) -> List[Dict]
-  fetch_us_press_releases(symbol, days_back=3) -> List[Dict]
-
-回 dict schema (對齊 news_event_alert 期望):
-  {"title": str, "link": str, "publisher": str, "date": str (YYYY-MM-DD), "type": "8K"/"PR"/"TW_MAJOR"}
-"""
 from __future__ import annotations
 
 import datetime as dt
@@ -25,7 +10,6 @@ import data_sources as ds
 
 
 # ---------------------------------------------------------------------------
-# 美股 8-K filings (Finnhub)
 # ---------------------------------------------------------------------------
 def fetch_finnhub_8k(symbol: str, days_back: int = 3) -> List[Dict]:
     """抓最近 N 天的 8-K filings.
@@ -152,11 +136,10 @@ def fetch_tw_major_announcements(stock_id: Optional[str] = None,
             return []
         j = r.json() or {}
         rows = j.get("data") or []
+        rows = sorted(rows, key=lambda r: str(r.get("date", "")), reverse=True)
         out = []
         for row in rows[:30]:
             out.append({
-                # Bug fix: 原本 description 若是「存在但為 None」, None[:80] 會 TypeError 炸掉整批抓取.
-                #          用 (... or ... or "")[:80] 先擋掉 None 再切片.
                 "title": row.get("title") or (row.get("description") or "")[:80],
                 "link": row.get("link") or row.get("source_link") or "",
                 "publisher": row.get("source") or "FinMind TW News",
@@ -171,15 +154,6 @@ def fetch_tw_major_announcements(stock_id: Optional[str] = None,
         return []
 
 
-# ---------------------------------------------------------------------------
-# (評估後 skip) Twitter / X
-# ---------------------------------------------------------------------------
 def fetch_twitter_mentions(symbol: str) -> List[Dict]:
-    """❌ Twitter 已無免費 API. 第三方 scraper (snscrape, nitter) 常被 ban.
-    回 [] 並印警告.
-    若要做, 建議:
-      1. 付費 Twitter API ($100/month)
-      2. 用 Reddit r/stocks 替代 (有 PRAW 免費 API)
-      3. 用 StockTwits 免費 API
-    """
+ 
     return []

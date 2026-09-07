@@ -127,7 +127,10 @@ def scan_intraday_weak_stocks(top_n: int = WEAK_TOP_N,
     try:
         import watchlist_store
         # 原本 universe + wl 會 TypeError (wl 是 dict 陣列) 並被下面的 except 吞掉
-        wl = watchlist_store.load_watchlist_ids()
+        # Bug fix (2026-09-07): 這個 universe 只餵給 .TW/.TWO 的台股 metrics 函式,
+        # 無參數的 load_watchlist_ids() 會把美股代號也加進來 -> 每輪多打一堆
+        # 必然失敗的 NVDA.TW / NVDA.TWO 請求。只取台股。
+        wl = watchlist_store.load_watchlist_ids("TW")
         universe = list(dict.fromkeys(universe + wl))
     except Exception:
         pass

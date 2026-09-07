@@ -340,8 +340,10 @@ def _estimate_from_buysell(stock_id: str, days: int) -> Dict:
         chip = chip_analyzer.fetch_chip_data(stock_id, days=days)
         inst = chip.get("institutional", {})
         fi = inst.get("Foreign_Investor", {})
-        fi_30d = fi.get("30d_total", 0) or 0
-        fi_5d = fi.get("5d_total", 0) or 0
+        # 改讀 *_lots (張)。fallback: 舊 dict 沒有這個欄位時就地 /1000, 避免靜默變成 0。
+        # 這裡回傳的 key 就叫 fi_30d_lots / fi_5d_lots, app.py 也直接標「張」顯示。
+        fi_30d = fi.get("30d_total_lots", (fi.get("30d_total", 0) or 0) / 1000.0) or 0
+        fi_5d = fi.get("5d_total_lots", (fi.get("5d_total", 0) or 0) / 1000.0) or 0
         consec = fi.get("consecutive_days", 0) or 0
         if fi_30d > 5000:
             trend = "外資積極增持 (估)"
@@ -605,6 +607,12 @@ def fetch_fundamental_metrics(stock_id: str) -> Dict:
                     prev_year_eps = float(window.iloc[-1]["value"])
                     if prev_year_eps == 0:
                         eps_yoy_pct = None
+                    elif prev_year_eps < 0:
+                        # Bug fix (2026-09-07): 分母是負數時 (latest/prev - 1) 方向整個顛倒。
+                        # 去年 -2.0 -> 今年 -4.0 (虧損擴大一倍) 原本算出 +100% -> 被標成
+                        # 「高速成長」, 還在 entry_evaluator 拿到 +5 分。改用 |分母|,
+                        # 虧損擴大為負、虧損收斂為正。
+                        eps_yoy_pct = (latest_eps - prev_year_eps) / abs(prev_year_eps) * 100
                     else:
                         eps_yoy_pct = (latest_eps / prev_year_eps - 1) * 100
                     out["latest_eps"] = round(latest_eps, 2)

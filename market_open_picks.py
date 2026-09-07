@@ -917,7 +917,16 @@ def find_tw_beneficiaries_from_us(us_sectors_df) -> Dict:
             if sym not in tw_map:
                 continue
             theme, sids = tw_map[sym]
-            picks = [{"stock_id": s, "name": ""} for s in sids[:3]]
+            # Bug fix (2026-09-07): name 原本寫死空字串 -> 推播上只有三行光禿禿的代號
+            # 加一個尾隨空白。用台股清單補上股名 (get_taiwan_stock_info 有本地快取 fallback)。
+            _nm_map = {}
+            try:
+                _info = ds.get_taiwan_stock_info()
+                if _info is not None and not _info.empty:
+                    _nm_map = _info.set_index("stock_id")["stock_name"].to_dict()
+            except Exception:
+                _nm_map = {}
+            picks = [{"stock_id": s, "name": str(_nm_map.get(str(s), "") or "")} for s in sids[:3]]
             out[theme] = {
                 "drivers": [f"{sym} {r1:+.2f}%"],
                 "picks": picks,

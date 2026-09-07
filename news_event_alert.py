@@ -245,7 +245,13 @@ def _scan_news_for_symbol(item: Dict, alerted_hashes: Set[str]) -> List[Dict]:
                 # 8-K 命中 = 即推 (不管關鍵字; 8-K 本身就是重大事件)
                 eight_k = es.fetch_finnhub_8k(sym, days_back=2) or []
                 for k in eight_k:
-                    k["_force_alert"] = True  # 8-K 強制觸發, 不需關鍵字命中
+                    # Bug fix (2026-09-07): fetch_finnhub_8k 實際放行 8-K / 8-K/A / 10-Q /
+                    # 10-K / S-1 五種 form, 但這裡整批設 _force_alert -> 每季的 10-Q、
+                    # 每年的 10-K 都會變成一則沒有內容的「重大消息」推播 (title 只有
+                    # "[10-Q] 2026-08-27 - NVDA"), 還會吃掉 news_event 的每日額度。
+                    # 只有真正的 8-K 本身就是重大事件, 其餘照關鍵字過濾走。
+                    if (k.get("type") or "").upper() in {"8-K", "8-K/A"}:
+                        k["_force_alert"] = True
                     news.append(k)
                 # Press releases
                 pr = es.fetch_us_press_releases(sym, days_back=2) or []

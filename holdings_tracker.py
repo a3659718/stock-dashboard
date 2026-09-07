@@ -286,8 +286,14 @@ def check_stop_loss_breaches() -> List[Dict]:
         fired_near = sl_info.get("near_stop_fired_date") == today_str
 
         # 抓即時價 (5m 線最後一根, fallback daily)
+        # Bug fix (2026-09-07): 原本只試 ".TW" / ".TWO", 美股持倉一定抓不到 ->
+        # cur is None -> continue -> 美股跌破停損永遠不會發警報, 而且完全沒有 log,
+        # 外觀跟「今天沒人跌破停損」一模一樣。同一份 holdings 在 holdings_intraday_alert /
+        # portfolio_risk / chip_anomaly_alert 都有 market == "US" 分支, 只有這支漏掉。
+        _mk = str(h.get("market") or ("TW" if sid.isdigit() else "US")).upper()
+        _suffixes = [".TW", ".TWO"] if _mk == "TW" else [""]
         cur = None
-        for suffix in [".TW", ".TWO"]:
+        for suffix in _suffixes:
             df = ds.fetch_yf_history(f"{sid}{suffix}", period="2d", interval="5m")
             if df is not None and not df.empty:
                 try:
@@ -296,7 +302,7 @@ def check_stop_loss_breaches() -> List[Dict]:
                 except Exception:
                     continue
         if cur is None:
-            for suffix in [".TW", ".TWO"]:
+            for suffix in _suffixes:
                 df = ds.fetch_yf_history(f"{sid}{suffix}", period="2d", interval="1d")
                 if df is not None and not df.empty:
                     try:

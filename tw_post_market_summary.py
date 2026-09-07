@@ -23,6 +23,16 @@ def _twii_snap() -> Dict:
         df = ds.fetch_yf_history("^TWII", period="3d", interval="1d")
         if df is None or df.empty:
             return {}
+        # Bug fix (2026-08): 這是「今日總結」推播裡的大盤漲跌%, 之前完全沒檢查
+        # yfinance 回來的最後一筆日線是不是真的「今天」— 如果剛好卡到延遲 (跟
+        # index_alerts.py._fetch_systemic_snapshot 註解講的同一種 yfinance 延遲),
+        # 會把前一交易日的收盤/漲跌幅原封不動當「今日」推出去, 使用者看不出來。
+        # 用共用的 data_sources.check_daily_freshness() 檢查, 過期就標記 stale,
+        # 由 build_post_market_msg() 在訊息開頭加警語, 而不是悄悄照送。
+        # Bug fix (2026-09-07): 預設 max_staleness_days=2 表示「落後 1 天仍算新鮮」,
+        # 但這支是在 tw_close (TPE 15:03, 已收盤) 跑的, 落後 1 天正是它要防的那一種
+        # (yfinance 還沒更新今日日線 -> 把昨天的收盤/漲跌幅當今日推出去)。
+        is_fresh, latest_d = ds.check_daily_freshness(df, max_staleness_days=1)
         c = df["Close"].astype(float)
         o = df["Open"].astype(float)
         h = df["High"].astype(float)
@@ -40,6 +50,8 @@ def _twii_snap() -> Dict:
             "prev_close": round(prev, 2),
             "pct_vs_prev": round((cur / prev - 1) * 100, 2) if prev > 0 else 0,
             "range_pct": round((hi - lo) / lo * 100, 2) if lo > 0 else 0,
+            "stale": not is_fresh,
+            "latest_date": str(latest_d) if latest_d else None,
         }
     except Exception:
         return {}
@@ -58,6 +70,10 @@ def _leader_stocks() -> List[Dict]:
                     df = ds.fetch_yf_history(f"{sid}.TWO", period="3d", interval="1d")
                 if df is None or df.empty or len(df) < 2:
                     continue
+                # Bug fix (2026-08): 同 _twii_snap() 的新鮮度檢查 — 個股跟指數
+                # 有可能各自延遲的程度不同, 這裡各檔獨立檢查, 不能只靠 TWII
+                # 那一筆代表全部。
+                is_fresh, _latest_d = ds.check_daily_freshness(df, max_staleness_days=1)
                 c = df["Close"].astype(float)
                 cur = float(c.iloc[-1])
                 prev = float(c.iloc[-2])
@@ -66,6 +82,7 @@ def _leader_stocks() -> List[Dict]:
                     "stock_id": sid,
                     "current": round(cur, 2),
                     "today_pct": round(pct, 2),
+                    "stale": not is_fresh,
                 })
             except Exception:
                 continue
@@ -231,6 +248,13 @@ def build_post_market_msg() -> str:
 
     # 註: 此段已併入 15:00 台股盤後總結推播 (tw_close), 作為「今日總結 + 隔日策略」區塊。
     lines = ["📊 <b>今日總結 + 隔日策略</b>", "━━━━━━━━━━━━━━━━━"]
+    # Bug fix (2026-08): 大盤 / 龍頭股數據新鮮度警語 — 只要 twii 或任一龍頭股被
+    # check_daily_freshness() 標記過期, 就在最上面明講, 不要讓使用者誤以為
+    # 「加權 +0.8%」是今天的數字, 結果其實是昨天的 (yfinance 延遲時會這樣)。
+    if twii.get("stale") or any(ld.get("stale") for ld in leaders):
+        d = twii.get("latest_date") or "?"
+        lines.append(f"⚠️ <i>部分數據可能延遲更新 (資料日期: {d}), 請以看盤軟體實際報價為準</i>")
+        lines.append("")
     # 一句話定調 (置頂, 最醒目)
     _tldr = _post_tldr(twii, breadth)
     if _tldr:
@@ -257,10 +281,14 @@ def build_post_market_msg() -> str:
     lines.append("")
     # 強弱族群
     if sectors.get("top3"):
-        lines.append("🚀 <b>強勢族群 Top 3</b>")
+        # Bug fix (2026-09-07): top3 只是 sec_df.head(3), 沒有 > 0 過濾。全盤下跌日
+        # 會出現「🚀 強勢族群 Top 3 / ✅ 航運業 均 -3.20%」這種自相矛盾的行。
+        _all_neg = all((s.get("avg") or 0) < 0 for s in sectors["top3"])
+        lines.append("📉 <b>相對抗跌族群 Top 3</b>" if _all_neg else "🚀 <b>強勢族群 Top 3</b>")
         for s in sectors["top3"]:
+            _tag = "✅" if (s.get("avg") or 0) >= 0 else "🔻"
             lines.append(
-                f"  ✅ {_esc(s['sector'])} 均 <b>{s['avg']:+.2f}%</b> "
+                f"  {_tag} {_esc(s['sector'])} 均 <b>{s['avg']:+.2f}%</b> "
                 f"(上漲 {s['up_ratio']:.0f}%)"
             )
     if sectors.get("bot3"):
@@ -274,8 +302,9 @@ def build_post_market_msg() -> str:
             sid = _esc(ld.get("stock_id", ""))
             pct = ld.get("today_pct", 0)
             tag = "🟢" if pct >= 0 else "🔴"
+            stale_mark = " ⚠️" if ld.get("stale") else ""
             lines.append(
-                f"  {tag} <code>{sid}</code> {ld.get('current', 0):,.2f} <b>{pct:+.2f}%</b>"
+                f"  {tag} <code>{sid}</code> {ld.get('current', 0):,.2f} <b>{pct:+.2f}%</b>{stale_mark}"
             )
         lines.append("")
     # === 新增: 今日決策摘要 (微台/台指期操作專用) ===

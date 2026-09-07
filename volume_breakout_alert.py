@@ -1,26 +1,23 @@
-"""
-volume_breakout_alert.py
-量爆突破即時警報 — 專業推播 Tier 1 訊號.
 
-觸發條件 (3 同時):
-  1. vol_ratio > 3.0 (近 5 日均量 3 倍以上)
-  2. today_pct > +3% (大漲)
-  3. 收盤 / 最新價 > 近 60 日 high (突破前波高)
-
-對象: watchlist + holdings + actionable_picks pool (避免掃整池太慢)
-Tier: Tier 1 (立即響鈴推播)
-Throttle: per-(sym) per-day 1 次 (型態警報, 確認不重推)
-
-API:
-  check_volume_breakout() -> List[Dict]
-  mark_alerts_sent(alerts) -> None
-"""
 from __future__ import annotations
 
 import datetime as dt
 from typing import Dict, List
 
 import watchlist_store
+
+
+def _us_today_str() -> str:
+
+    now_utc = dt.datetime.utcnow()
+    try:
+        import index_alerts
+        dst = bool(index_alerts._is_us_in_dst(now_utc.date()))
+    except Exception:
+        dst = 3 <= now_utc.month <= 10
+    return (now_utc - dt.timedelta(hours=4 if dst else 5)).strftime("%Y-%m-%d")
+
+
 
 
 def _scan_one_stock(sid: str, market: str = "TW") -> Dict | None:
@@ -73,7 +70,7 @@ def check_volume_breakout() -> List[Dict]:
     """掃 watchlist + holdings 找量爆突破. 回 alert list."""
     state = watchlist_store.load_monitor_state()
     vb_state = state.setdefault("volume_breakout_alert", {})
-    today_str = dt.date.today().strftime("%Y-%m-%d")
+    today_str = _us_today_str()
     if vb_state.get("date") != today_str:
         vb_state.clear()
         vb_state.update({"date": today_str, "alerted": []})
@@ -116,7 +113,11 @@ def mark_alerts_sent(alerts: List[Dict]) -> None:
     try:
         state = watchlist_store.load_monitor_state()
         vb = state.setdefault("volume_breakout_alert", {})
-        today_str = dt.date.today().strftime("%Y-%m-%d")
+        # Bug fix (2026-09-07): 原本這裡用 dt.date.today() (UTC 日期), 但 check_volume_breakout()
+        # 讀的是 _us_today_str() (美東日期)。台股 session 的 monitor cron 落在 UTC 01-05,
+        # 兩者必定差一天 -> 掃描端每個 tick 都判定「換日」清空 alerted -> 同一檔每 30 分鐘重推,
+        # 還會把 push_cap 每日 6 封的次要額度燒光。兩端必須用同一個日界。
+        today_str = _us_today_str()
         if vb.get("date") != today_str:
             vb.clear()
             vb.update({"date": today_str, "alerted": []})

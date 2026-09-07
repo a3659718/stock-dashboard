@@ -114,14 +114,31 @@ THEME_KEYWORDS = {
 }
 
 
+def _kw_hit(kw: str, titles_lower: str, titles_raw: str) -> bool:
+    """關鍵字命中判定。
+
+    Bug fix (2026-09-07): 原本一律 `kw.lower() in titles`, 兩碼的 "AI" / "EV" 幾乎必中
+    任何英文標題 —— "retail" 含 AI、"revenue" 含 EV、"development" 兩個都含。
+    結果 P&G 這種消費股會被判成「AI, EV/Battery」題材, 在 _score_row() 直接
+    `score += 1.0 * len(themes)`(技術面總分才 ~6.5)。
+    2-4 碼全大寫的代號 (AI/EV/GPT/LLM/GPU/AWS/LNG/CPI/OPEC/FOMC) 改成「原始大小寫 +
+    整字」比對; 其餘關鍵字維持原本的寬鬆子字串比對, 不影響 chip -> chips 這類命中。
+    """
+    if kw.isupper() and 2 <= len(kw) <= 4:
+        import re as _re
+        return _re.search(r"\b" + _re.escape(kw) + r"\b", titles_raw) is not None
+    return kw.lower() in titles_lower
+
+
 def _theme_score_for(symbol: str, news_pool: List[Dict]) -> Dict:
     """根據新聞抓題材熱度。"""
     sym_news = [n for n in news_pool if symbol.upper() in (n.get("relatedTickers") or [])]
     sym_news.extend(ds.fetch_yahoo_news(symbol, max_n=4))
-    titles = " ".join((n.get("title") or "") for n in sym_news).lower()
+    titles_raw = " ".join((n.get("title") or "") for n in sym_news)
+    titles = titles_raw.lower()
     themes = []
     for theme, kws in THEME_KEYWORDS.items():
-        if any(k.lower() in titles for k in kws):
+        if any(_kw_hit(k, titles, titles_raw) for k in kws):
             themes.append(theme)
     return {"news_count": len(sym_news), "themes": themes, "news": sym_news[:3]}
 

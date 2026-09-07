@@ -37,7 +37,17 @@ def check_trend_template(symbol: str) -> Dict:
     try:
         import data_sources as ds
         df = ds.fetch_yf_history(symbol, period="1y", interval="1d")
-        if df is None or df.empty or len(df) < 210:
+        # Bug fix (2026-09-07): 下面 ma_200_prev 用 rolling(200).mean().iloc[-22],
+        # 需要至少 221 根才不是 NaN。原本只擋 <210, 資料落在 210~220 時 ma_200_prev=NaN,
+        # `nan > nan` = False -> 條件 3「200MA 一個月上升」被無條件吃掉, pass_8_of_8 永遠 False。
+        if df is None or df.empty or len(df) < 222:
+            # Bug fix (2026-09): 原本直接回預設 out (pass_n=0), 跟「真的 8 條都不過」無法區分。
+            # ensemble_voter 只把 None 當作無法判斷, 0 會落到 else 分支投 AVOID, 而 Minervini
+            # 的權重是全表最高的 1.5 → yfinance 被限流時會把結論從 BUY 硬翻成 HOLD/AVOID,
+            # 理由還寫「Trend Template 僅 0/8 條 (動能不足)」, 看起來像分析結果而不是沒資料。
+            out["pass_n"] = None
+            out["no_data"] = True
+            out["err"] = f"資料不足 ({0 if df is None or df.empty else len(df)} 根, 需 222)"
             return out
         c = df["Close"].astype(float)
         cur = float(c.iloc[-1])
@@ -113,14 +123,18 @@ def filter_minervini_picks(picks: List[Dict], min_pass: int = 7) -> List[Dict]:
             continue
         res = check_trend_template(sym)
         # 加 minervini 欄位
-        p["minervini_pass_n"] = res.get("pass_n", 0)
+        # Bug fix (2026-09-07): 資料不足時 check_trend_template 會明確寫入
+        # out["pass_n"] = None, 所以 res.get("pass_n", 0) 回的是 None 不是 0
+        # -> `None >= min_pass` 直接 TypeError, sort 的 key 也會炸。
+        pn = res.get("pass_n")
+        p["minervini_pass_n"] = pn
         p["minervini_rs_rating"] = res.get("rs_rating")
         p["minervini_8_of_8"] = res.get("pass_8_of_8", False)
-        if res.get("pass_n", 0) >= min_pass:
+        if pn is not None and pn >= min_pass:
             filtered.append(p)
     # 排序: 8/8 → 7/8 → score
     filtered.sort(key=lambda x: (
-        x.get("minervini_pass_n", 0),
+        x.get("minervini_pass_n") or 0,
         x.get("score", 0) or x.get("entry_score", 0) or 0,
     ), reverse=True)
     return filtered

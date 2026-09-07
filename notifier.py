@@ -16,13 +16,7 @@ import data_sources as ds
 
 
 def _esc(s) -> str:
-    """HTML escape 任何非結構性字串 (Gemini 輸出 / 新聞標題 / Trump 言論等).
 
-    Telegram parse_mode=HTML 對 `<`, `>`, `&` 嚴格要求，這些字若出現在 user-facing
-    內容裡會讓整封訊息 HTTP 400. 對 None / 數字也安全 — 統一轉字串再 escape.
-
-    回傳: 已 escape 的字串. 若原本是 None / "" 回傳空字串.
-    """
     if s is None:
         return ""
     try:
@@ -32,11 +26,7 @@ def _esc(s) -> str:
 
 
 def _esc_attr(s) -> str:
-    """escape 給 HTML 屬性值用 (e.g. <a href="...">) — 連 " ' & < > 都 escape.
 
-    新聞網址常含 `&` (?a=x&b=y), 直接塞進 href 會被 Telegram 判成壞 entity → 400,
-    連結消失。屬性 context 必須連引號一起 escape。
-    """
     if s is None:
         return ""
     try:
@@ -46,7 +36,6 @@ def _esc_attr(s) -> str:
 
 
 def _strip_caret(sym: str) -> str:
-    """剝 ^TWII → TWII (yfinance ticker 顯示給用戶看的清理)."""
     if not sym:
         return ""
     s = str(sym)
@@ -54,11 +43,7 @@ def _strip_caret(sym: str) -> str:
 
 
 def _safe_pct(v, fmt: str = "+.2f", default: str = "—", suffix: str = "%") -> str:
-    """安全格式化百分比. v 為 None / NaN / 非數字時回 default.
 
-    例: _safe_pct(1.234) -> "+1.23%", _safe_pct(None) -> "—",
-        _safe_pct(0, fmt=".2f") -> "0.00%"
-    """
     try:
         if v is None:
             return default
@@ -97,12 +82,7 @@ def _safe_float(v, default: float = 0.0) -> float:
 
 
 def _truncate_tg_msg(out: str, max_chars: int = 20000) -> str:
-    """以前這裡把訊息硬砍到 4000 字 → 內容尾巴 (常是 Gemini 結論/隔日策略) 被截掉,
-    就是用戶看到「被字數擋到」的原因。
 
-    改法: send_message() 現在會自動把超過 TG 4096 上限的訊息「拆成多封」送出 (不丟內容),
-    所以這裡不再需要在 fmt 階段截斷。保留一個很高的上限 (20000) 只當「跑飛」的安全網,
-    正常內容一律原封不動回傳, 交給 send_message 分段。"""
     if not out:
         return ""
     try:
@@ -120,17 +100,13 @@ def _u16_len(s: str) -> int:
 
 
 def _tpe_now_str() -> str:
-    """現在的台北時間 HH:MM — 給推播標題用「實際產生時間」而非寫死的排程時刻。
-    因為 GitHub Actions 排程常延遲, 寫死「16:00」但 17:32 才送達會對不上;
-    改用實際時間, 標題永遠跟收到的時間一致。"""
+
     import datetime as _dt
     return (_dt.datetime.utcnow() + _dt.timedelta(hours=8)).strftime("%H:%M")
 
 
 def _balance_html_tags(s: str) -> str:
-    """補齊未閉合的常見 Telegram HTML tag (b/i/code/pre/u/s).
-    Telegram HTML 模式要求 tag 成對, 截斷後可能少了 </b> 之類 → 補在尾端.
-    """
+
     import re as _re
     for tag in ("b", "i", "code", "pre", "u", "s"):
         opens = len(_re.findall(rf"<{tag}>", s))
@@ -161,21 +137,7 @@ def _looks_like_html_parse_error(resp_text: str) -> bool:
 
 
 def build_stock_action_keyboard(stock_id: str, market: str = "TW") -> dict:
-    """建一組 inline keyboard, 給個股推播附加「快捷動作」按鈕.
 
-    callback_data 短碼定義 (scripts/tg_callback_listener.py 負責配對處理):
-      wl:<mkt>:<sid>   加入自選
-      ai:<mkt>:<sid>   AI 深入分析
-      sl:<mkt>:<sid>   設停損 (依現價算 -8% 建議停損)
-      tv:<sid>         開 TradingView (url button, 不需 handler)
-
-    callback button 由 tg_callback_listener long-poll getUpdates 處理;
-    listener 沒跑時 url button (TradingView) 仍可直接跳轉, callback button 會
-    顯示轉圈 (Telegram 端逾時), 但不會崩, 也不影響主訊息.
-
-    註: callback_data 帶 market, 讓 handler 知道用台股還是美股資料源.
-        舊格式 wl:<sid> (無 market) listener 仍向後相容 (由 sid 是否純數字推斷).
-    """
     mkt = "US" if str(market).upper() == "US" else "TW"
     if mkt == "US":
         tv_url = f"https://www.tradingview.com/symbols/{stock_id}/"
@@ -219,22 +181,7 @@ def send_message(text: str, disable_preview: bool = True,
                   category: Optional[str] = None,
                   _stamped: bool = False,
                   **_kwargs) -> tuple[bool, str]:
-    """直接呼叫 Bot API。回傳 (成功, 訊息).
 
-    強化點:
-      1. token / chat_id 自動 strip 前後空白
-      2. HTML parse 失敗 → 自動 retry 一次純文字 (避免單一字元擋住整則推播)
-      3. 失敗時把更多診斷資訊 (chat_id 長度、message 前 80 字) 包進 info
-      4. reply_markup: optional inline keyboard (來自 build_stock_action_keyboard)
-      5. 對 None / 空 text early return, 避免 text[:80] 在診斷字串炸 TypeError
-      6. 自動寫入 system_health.push_history (供 admin dashboard 顯示)
-      7. disable_notification=True → silent push (不響鈴, 用於普通新聞分流)
-      8. category: 若有傳 (e.g. "volume_breakout"), 算 daily cap; 沒傳 = 主推不算 cap
-    """
-    # === 統一在「所有推播的共同出口」加上實際送出時間戳 ===
-    # 為什麼放這裡: 每一筆推播 (不論哪個 fmt_*) 都經過 send_message, 在此加一次 → 全部一致、
-    # 不遺漏、也不用改幾十個格式函式。GitHub 排程延遲不可控, 這行讓「通知上的時間」永遠等於
-    # 你實際收到的時間。_stamped 旗標防止分段遞迴 (下方) 重複加。
     if text and not _stamped:
         try:
             text = text.rstrip() + f"\n\n🕐 <i>{_tpe_now_str()} 送出</i>"
@@ -243,7 +190,6 @@ def send_message(text: str, disable_preview: bool = True,
         _stamped = True
 
     # === 自動分段: 超過 TG 4096 上限就拆多封送出, 不再硬截斷丟內容 ===
-    # (取代舊的 fmt 階段 _truncate 硬砍。長內容 → 多封, 重點不會被字數擋掉。)
     if text and _u16_len(text) > 4000:
         parts = _split_tg_msg(text, max_chars=3800)  # 3800 留 emoji (surrogate) 餘裕
         ok_all, infos = True, []
@@ -260,7 +206,6 @@ def send_message(text: str, disable_preview: bool = True,
             infos.append(f"part{_i+1}:{info_p}")
         return ok_all, f"split×{len(parts)} | " + " | ".join(infos)
 
-    # === 深夜靜音 (TPE 02:00-06:00) — 用戶要求: 推但不響鈴, 不中斷睡眠 ===
     try:
         import datetime as _dt_q
         _hr_tpe = (_dt_q.datetime.utcnow() + _dt_q.timedelta(hours=8)).hour
@@ -270,13 +215,6 @@ def send_message(text: str, disable_preview: bool = True,
     except Exception:
         pass
 
-    # === 次要 alert daily cap (用戶要求: cap 6 封/日) ===
-    # 只有傳 category 的 caller 算 cap; 主推 (us_open / 反轉 / pre_market 等) 不傳 → 不算
-    # (2026-08 修正: 改用 would_allow() 唯讀檢查, 送出「確定成功」後才呼叫 mark_consumed()
-    # 真正扣額度 — 取代舊版 check_and_consume() 那種「檢查當下就先 +1」的作法。舊版的問題:
-    # 如果剛好遇到網路抖動 / TG API 暫時 503, 下面 3 次 retry 全部失敗, 額度已經被這封
-    # 「其實沒送出去」的訊息燒掉, 導致當天後面真正送得出去的次要 alert 反而被 cap 擋下,
-    # 使用者卻一封都沒收到。would_allow/mark_consumed 是 push_cap.py 現在建議的新 API。)
     if category:
         try:
             import push_cap as _pc
@@ -305,7 +243,6 @@ def send_message(text: str, disable_preview: bool = True,
             SEND_OK_COUNT += 1
             _record_push_safe(text, ok, info)
             return ok, info
-        # 失敗 — 短暫 backoff 後重試 (except 永久性錯誤: chat_id 沒設 / token 錯)
         if any(k in info for k in ("尚未設定", "chat not found", "Forbidden", "Unauthorized")):
             break  # 永久錯不重試
         if attempt < 2:
@@ -525,7 +462,8 @@ def fmt_us_top_picks(df, fg: dict, top_n: int = 10) -> str:
         overheat_v = row.get("過熱警示")
         lines.append(
             f"{i+1}. <b><code>{_esc(sym)}</code></b>  "
-            f"日 {_esc(row.get('daily_%'))}% / 20d {_esc(row.get('20d_%'))}% · 分數 {_esc(sc)}"
+            # Bug fix (2026-09-07): 20d_% 在 K 線不足 21 根時是 None -> NaN -> "nan%"
+            f"日 {_safe_pct(row.get('daily_%'))} / 20d {_safe_pct(row.get('20d_%'))} · 分數 {_esc(sc)}"
             + (f"\n   題材: {_esc(theme_v)}" if theme_v else "")
             + (f"\n   👑 大戶: {_esc(expert_v)}" if expert_v else "")
             + (f"\n   ⚠️ {_esc(overheat_v)}" if overheat_v else "")
@@ -534,10 +472,7 @@ def fmt_us_top_picks(df, fg: dict, top_n: int = 10) -> str:
 
 
 def _fmt_leader_stock_line(sr, seen_stocks: set):
-    """單檔龍頭股格式化 (共用給 fmt_strong_sectors 的「證交所分類」跟「熱門題材」
-    兩段用, 原本這段程式碼一模一樣被複製貼上兩次 — smoke test 的重複區塊偵測抓到,
-    抽成共用函式避免以後兩邊改一邊忘記改另一邊). 回傳格式化好的行字串, 或 None
-    (代表這檔股票該跳過: 沒有 stock_id, 或整份訊息裡已經出現過)."""
+
     sid = str(sr.get("stock_id", "")).strip()
     if not sid or sid in seen_stocks:
         return None
@@ -564,14 +499,7 @@ def _fmt_leader_stock_line(sr, seen_stocks: set):
 
 def fmt_strong_sectors(sectors_df, leaders_map: dict = None, themes_df=None,
                        theme_leaders: dict = None) -> str:
-    """強勢族群 TG 推播 — 包含族群排名 + 每族群推薦股票.
 
-    參數:
-      sectors_df: 證交所產業分類熱度 (compute_strong_sectors 的 sectors)
-      leaders_map: 對應的各產業 leaders DataFrame (compute_strong_sectors 的 stocks/leaders)
-      themes_df: 熱門題材熱度 (compute_hot_themes 的 themes)
-      theme_leaders: 各題材的 leaders (compute_hot_themes 的 leaders)
-    """
     lines = []
     seen_stocks: set = set()  # 跨族群/題材 dedup, 同一支股一份就好
 
@@ -644,10 +572,7 @@ def _fmt_prediction_block(prediction: dict, accuracy: dict) -> list:
 
 
 def _fmt_laggards_block(laggards: dict, laggards_ai: dict, market: str = "TW") -> list:
-    """強勢族群落後股 + AI 跟漲機會分析 (簡潔風格).
-    laggards: {theme: {theme_avg, leaders, laggards}}
-    laggards_ai: {stock_id: {chance, reason}}
-    """
+
     if not laggards:
         return []
 
@@ -748,17 +673,7 @@ _EXT_SIGNALS_NOT_ATTEMPTED = object()  # sentinel: 呼叫端沒有先做有界�
 
 
 def _fmt_external_signals_block(signals=_EXT_SIGNALS_NOT_ATTEMPTED) -> list:
-    """油價 + macro 指標摘要 (簡短版，TG 用).
 
-    BUG FIX (稽核發現): 原本這裡自己現抓 (序列: 油價 → 5 檔 macro → Trump),
-    完全沒有計入呼叫端 (fmt_tw_open_picks / fmt_us_open_picks, 都是「要優先且
-    準時送出」的主推播) 對時效的要求, 等於格式化函式裡偷偷藏了 7 次外部連線。
-    現在改成: 優先用呼叫端已經透過 news_sources.fetch_external_signals_bounded()
-    有界時間抓好、放進 data["external_signals"] 的結果 (可能是空 dict, 代表
-    有界時間內沒抓完, 這裡就照樣印「抓不到就跳過」, 不會又自己重抓一次拖時間)。
-    只有在完全沒人做過預抓 (呼叫端還是舊的直接呼叫方式, signals 維持 sentinel
-    預設值) 時, 才 fallback 回原本「自己現抓」的行為, 保留舊呼叫方式的相容性。
-    """
     if signals is _EXT_SIGNALS_NOT_ATTEMPTED:
         try:
             import news_sources
@@ -913,9 +828,11 @@ def fmt_tw_open_picks(data: dict, ai_text: str = "") -> str:
                 today = s.get("今日%")
                 ratio = s.get("量比")
                 five = s.get("5日%")
+                # Bug fix (2026-09-07): sector_pulse 在資料不足時寫 None, 進 DataFrame
+                # 變 NaN, _esc(nan) -> "nan%"。改用 _safe_pct (None/NaN -> "—")。
                 lines.append(
                     f"  • <b><code>{_esc(sid)}</code></b> {_esc(nm)}  "
-                    f"今日 {_esc(today)}% · 5d {_esc(five)}%"
+                    f"今日 {_safe_pct(today)} · 5d {_safe_pct(five)}"
                 )
                 cat = catalysts.get(str(sid))
                 if cat:
@@ -1054,6 +971,13 @@ def fmt_monitor_alerts(watchlist_alerts: list, index_alerts: list, crypto_alerts
 
     # crypto_alerts 已停用 (用戶要求取消加密貨幣)
     # if crypto_alerts: skip
+
+    # Bug fix (2026-09-07): 這支函式原本只有「沒警報時 return ""」, 有警報的路徑
+    # 一個 return 都沒有 -> 回 None -> app.py:1367 的「Send 警報 to TG」永遠顯示
+    # 「沒有可推送內容」, 畫面上明明列了觸發清單卻送不出去。
+    # (8/29 稽核用 ast.walk 數 return 時把巢狀 _f() 的 2 個 return 一起算進去,
+    #  誤判成 false positive, 這裡實測 fmt_monitor_alerts(...) 回傳 None 確認。)
+    return _truncate_tg_msg("\n".join(lines).rstrip())
 
 
 def fmt_weekend_recap(data: dict) -> str:
@@ -1314,9 +1238,7 @@ def _fmt_potential_picks_block(picks: list, hide_low_rr: bool = True,
         e_low = _fmt_num(el_raw)
         e_high = _fmt_num(eh_raw)
         target = _fmt_num(p.get("target_price", 0))
-        target_pct = _safe_int_or_dash(p.get("target_pct", 0))
         stop = _fmt_num(p.get("stop_loss", 0))
-        stop_pct = _safe_int_or_dash(p.get("stop_pct", 0))
         win_prob = _esc(p.get("win_prob", ""))
         hold = _esc(p.get("hold_period", ""))
         reason = _esc(p.get("reason", ""))
@@ -1339,8 +1261,11 @@ def _fmt_potential_picks_block(picks: list, hide_low_rr: bool = True,
             out.append(f"   {zone}")
         out.append(f"   現價 {cur} / 進場區間 {e_low}~{e_high}")
         # target_pct / stop_pct 仍可能是 "—"; format spec 只在數字時套用 +
-        tp_str = f"{target_pct:+}" if isinstance(target_pct, int) else target_pct
-        sp_str = f"{stop_pct:+}" if isinstance(stop_pct, int) else stop_pct
+        # Bug fix (2026-09-07): _safe_int_or_dash 用 int() 往零截斷, 18.4% 印成 18%、
+        # -7.2% 印成 -7%, 跟同一段的價格 (2 位小數) / R:R (2 位小數) 精度不一致。
+        # 改用 _safe_pct 保留 1 位小數 (它自己會處理 None/NaN -> "—")。
+        tp_str = _safe_pct(p.get("target_pct"), "+.1f", suffix="")
+        sp_str = _safe_pct(p.get("stop_pct"), "+.1f", suffix="")
         out.append(f"   目標 {target} ({tp_str}%) / 停損 {stop} ({sp_str}%)")
         out.append(f"   上漲機率 {win_prob} · 建議持有 {hold}")
         # 部位規模建議 (依 user 設定的帳戶資金 + 單筆風險 %)
@@ -1402,10 +1327,10 @@ def fmt_us_close_analysis(data: dict) -> str:
             name = r.get("sector", "")
             # 防 None: fetch_sector_rotation 在資料不足時把 1d_% 寫成 None,
             # `.get(key, 0)` 不會在「value is None」回 default
+            # Bug fix (2026-09-07): float('nan') 也是 float 的 instance, isinstance
+            # 檢查放行 -> f"{nan:.2f}" 印出 "nan%"。改用 _safe_pct 一次處理 None/NaN/inf。
             r1_raw = r.get("1d_%")
-            r1 = r1_raw if isinstance(r1_raw, (int, float)) else 0
-            sign = "+" if r1 >= 0 else ""
-            lines.append(f"  {_esc(sym)} {_esc(name)}: {sign}{r1:.2f}%")  # bug fix: 原本印未四捨五入的長浮點
+            lines.append(f"  {_esc(sym)} {_esc(name)}: {_safe_pct(r1_raw)}")
 
     # 5 支台股潛力股 + 目標價
     lines.extend(_fmt_potential_picks_block(data.get("potential_picks") or []))
@@ -1425,10 +1350,12 @@ def fmt_us_close_analysis(data: dict) -> str:
             lines.append("")
             lines.append(f"<b>[{_esc(theme)}]</b> 受美股 {drivers_str} 帶動")
             for p in picks:
-                sid = p["stock_id"]
-                nm = p["name"]
+                # Bug fix (2026-09-07): 原本用 p["stock_id"] / p["name"] 直接索引,
+                # producer schema 一變就 KeyError 炸掉整封 us_close 推播。
+                sid = p.get("stock_id", "")
+                nm = p.get("name", "")
                 reason = reasons.get(sid, "")
-                lines.append(f"  <b><code>{_esc(sid)}</code></b> {_esc(nm)}")
+                lines.append(f"  <b><code>{_esc(sid)}</code></b> {_esc(nm)}".rstrip())
                 if reason:
                     lines.append(f"     {_esc(reason)}")
 
@@ -1633,10 +1560,12 @@ def fmt_tw_close_analysis(data: dict) -> str:
             reason = d.get("reason", "")
             head = f"  <b><code>{_esc(sid)}</code></b> {_esc(name)}"
             if cur is not None:
-                sign = "+" if (today or 0) > 0 else ""
-                head += f"  {_esc(cur)} ({sign}{_esc(today)}%)"
+                # Bug fix (2026-09-07): today_pct 可能是 None (抓不到當日 K),
+                # 原本印成 "301.0 (%)"; target_pct 可能是負值 (Gemini 沒 clamp),
+                # 原本硬接 "+" 印成 "預期 +-1.20%"。
+                head += f"  {_fmt_num(cur)} ({_safe_pct(today)})"
             lines.append(head)
-            lines.append(f"     上漲機率 <b>{_esc(up_prob)}%</b> · 預期 +{target:.2f}%")
+            lines.append(f"     上漲機率 <b>{_esc(up_prob)}%</b> · 預期 {_safe_pct(target)}")
             if reason:
                 lines.append(f"     {_esc(reason)}")
 
@@ -2527,10 +2456,12 @@ def fmt_news_event_alerts(alerts: list, impact_analysis: str = "") -> str:
                 f"{t_emoji} [{market}] <code>{sym}</code>  <i>{t_text}</i>  "
                 f"<i>{src_text}</i>  {hits_display}"
             )
+            # Bug fix (2026-09-07): title 在上面已經 _esc 過一次, 這裡再 _esc 一次
+            # 會把 "&amp;" 變成 "&amp;amp;" -> 使用者看到 "AT&amp;T"、"&lt;guidance&gt;"。
             if link:
-                lines.append(f'  <a href="{_esc_attr(link)}">{_esc(title)}</a>')
+                lines.append(f'  <a href="{_esc_attr(link)}">{title}</a>')
             else:
-                lines.append(f"  {_esc(title)}")
+                lines.append(f"  {title}")
             lines.append("")
         if _extra > 0:
             lines.append(f"<i>…同級另有 {_extra} 則未列出（點上方連結看主要幾則即可）</i>")
@@ -3006,7 +2937,10 @@ def fmt_holdings_accuracy(acc: dict) -> str:
         v = by_prob.get(k, {})
         if v.get("total"):
             pct = round(v["correct"] / v["total"] * 100, 1)
-            parts.append(f"{k}: {v['correct']}/{v['total']} ({pct}%)")
+            # Bug fix (2026-09-07): bucket 名稱含裸 "<" / ">" (holdings_tracker.accuracy_summary
+            # 寫死的 key)。"<50%" 會被 Telegram 當成 HTML start tag -> 400 ->
+            # _send_message_inner 退成純文字重送 -> 整封「持倉日報」的 <b>/<code> 全被剝掉。
+            parts.append(f"{_esc(k)}: {v['correct']}/{v['total']} ({pct}%)")
     if parts:
         lines.append("  分機率區間: " + " · ".join(parts))
     return "\n".join(lines)
@@ -3190,9 +3124,10 @@ def fmt_us_open_picks(data: dict, ai_text: str = "") -> str:
                 sym = s.get("symbol", "")
                 today = s.get("今日%")
                 twenty = s.get("20日%")
+                # Bug fix (2026-09-07): 20日% 在 K 線不足時是 None -> NaN -> "nan%"
                 lines.append(
                     f"  • <b><code>{_esc(sym)}</code></b>  "
-                    f"今日 {_esc(today)}% · 20d {_esc(twenty)}%"
+                    f"今日 {_safe_pct(today)} · 20d {_safe_pct(twenty)}"
                 )
                 ev = events.get(str(sym))
                 if ev and ev.get("summary") and ev["summary"] != "—":
@@ -3207,9 +3142,10 @@ def fmt_us_open_picks(data: dict, ai_text: str = "") -> str:
             today = s.get("今日%")
             twenty = s.get("20日%")
             score = s.get("growth_score")
+            # Bug fix (2026-09-07): 這區塊本來就在掃近期 IPO, K 線不足 21 根是常態
             lines.append(
                 f"  • <b><code>{_esc(sym)}</code></b>  "
-                f"今日 {_esc(today)}% · 20d {_esc(twenty)}% · {_esc(score)}/10"
+                f"今日 {_safe_pct(today)} · 20d {_safe_pct(twenty)} · {_esc(score)}/10"
             )
             ev = events.get(str(sym))
             if ev and ev.get("summary") and ev["summary"] != "—":
@@ -3273,7 +3209,8 @@ def fmt_stealth_picks(stealth_df, hot_themes_df=None) -> str:
         five = row.get("5日%", "—")
         ratio = row.get("量比", "—")
         lines.append(f"{i+1}. <b><code>{_esc(sid)}</code></b> {_esc(name)}  [{_esc(theme)}]")
-        lines.append(f"   今日 {_esc(today)}% / 5d {_esc(five)}% ")
+        # Bug fix (2026-09-07): 同上, None/NaN 會印成 "nan%"
+        lines.append(f"   今日 {_safe_pct(today)} / 5d {_safe_pct(five)}")
         cat = row.get("催化劑")
         if cat and str(cat).strip() and str(cat).strip() != "—":
             pass  # 催化劑已移除
@@ -3384,6 +3321,10 @@ def fmt_watchlist_alert(stock_id: str, name: str, hits: list, latest_date: str,
             v = row.get("投信5日(張)")
             sign = "+" if isinstance(v, (int, float)) and v > 0 else ""
             inst_parts.append(f"5日累計 {sign}{_fmt_num(v)}張")
+        # Bug fix (2026-09-07): 投本比原本縮在「投信5日」的 if 裡 ->
+        # (a) 5日有值但投本比 None 時, 硬印一格「投本比 —」;
+        # (b) 5日 None 但投本比有值時, 投本比整個消失。兩者是各自獨立計算的。
+        if row.get("投本比%") is not None:
             inst_parts.append(f"投本比 {_fmt_num(row.get('投本比%'), suffix='%')}")
         if inst_parts:
             body.append("  💰 " + " · ".join(inst_parts))
@@ -3703,7 +3644,7 @@ def fmt_trump_policy_alerts(alerts: list, gemini_analysis="") -> str:
             link = a0.get("link", "")
             sym_tag = f"[{sym}] " if sym and sym != "GENERAL" else ""
             if link:
-                lines.append(f"📰 {sym_tag}<a href=\"{link}\">{title}</a>")
+                lines.append(f"📰 {sym_tag}<a href=\"{_esc_attr(link)}\">{title}</a>")
             else:
                 lines.append(f"📰 {sym_tag}{title}")
             lines.append("")
@@ -3717,10 +3658,7 @@ def fmt_trump_policy_alerts(alerts: list, gemini_analysis="") -> str:
             lines.append(f"🇹🇼 <b>台股影響</b>: {tw_imp}")
         if us_imp or tw_imp:
             lines.append("")
-        # 用戶要求: 刪掉「全球商品影響」block (黃金/原油/美元/美債 4 項)
-        # — 訊息瘦身, 只留美股/台股影響 + 操作建議
 
-        # 操作建議 — 三段式
         long_play = _esc(g.get("long_play", ""))
         short_play = _esc(g.get("short_play", ""))
         pos_advice = _esc(g.get("position_advice", ""))
@@ -3748,7 +3686,7 @@ def fmt_trump_policy_alerts(alerts: list, gemini_analysis="") -> str:
             link = a.get("link", "")
             sym_tag = f"[{sym}] " if sym and sym != "GENERAL" else ""
             if link:
-                lines.append(f"📰 {sym_tag}<a href=\"{link}\">{title}</a>")
+                lines.append(f"📰 {sym_tag}<a href=\"{_esc_attr(link)}\">{title}</a>")
             else:
                 lines.append(f"📰 {sym_tag}{title}")
         if isinstance(gemini_analysis, str) and gemini_analysis:

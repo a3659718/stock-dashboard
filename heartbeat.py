@@ -170,6 +170,16 @@ def _check_state_persistence() -> Tuple[bool, str]:
 # ---------------------------------------------------------------------------
 # 主要 entry
 # ---------------------------------------------------------------------------
+def _esc_hb(s) -> str:
+    """把探針回來的原始字串 escape 掉再放進 HTML 訊息 (見 build_heartbeat_message 註解)."""
+    try:
+        import notifier as _nf
+        return _nf._esc(s)
+    except Exception:
+        import html as _h
+        return _h.escape(str(s if s is not None else ""), quote=False)
+
+
 def build_heartbeat_message() -> Tuple[str, bool]:
     """跑全部 health check, 組成 TG 訊息 (HTML).
 
@@ -200,13 +210,16 @@ def build_heartbeat_message() -> Tuple[str, bool]:
         f"<i>{timestamp}</i>",
         "",
         "<b>外部 API 狀態</b>",
-        f"  {('✅' if yf_ok else '❌')} yfinance — {yf_info}",
-        f"  {('✅' if fm_ok else '❌')} FinMind — {fm_info}",
-        f"  {('✅' if gm_ok else '❌')} Gemini — {gm_info}",
-        f"  {('✅' if tg_ok else '❌')} Telegram — {tg_info}",
+        # Bug fix (2026-09-07): *_info 帶的是原始 HTTP response body / 例外字串。
+        # 這封訊息「只有在不健康時才推」, 而 502/503/Cloudflare 攔截頁一律是 HTML
+        # (<html><head><title>502...) -> Telegram parse 失敗 -> 整封退成純文字。
+        f"  {('✅' if yf_ok else '❌')} yfinance — {_esc_hb(yf_info)}",
+        f"  {('✅' if fm_ok else '❌')} FinMind — {_esc_hb(fm_info)}",
+        f"  {('✅' if gm_ok else '❌')} Gemini — {_esc_hb(gm_info)}",
+        f"  {('✅' if tg_ok else '❌')} Telegram — {_esc_hb(tg_info)}",
         "",
         "<b>State 持久化</b>",
-        f"  {('✅' if st_ok else '⚠️')} {st_info}",
+        f"  {('✅' if st_ok else '⚠️')} {_esc_hb(st_info)}",
     ]
 
     if etf_status:

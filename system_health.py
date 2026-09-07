@@ -65,20 +65,43 @@ def _extract_module_status(monitor_state: Dict) -> List[Dict]:
     """逐個 alert module 抽 state 摘要."""
     results = []
 
+    # Bug fix (2026-09): 這張表原本 8 個模組有 6 個永遠顯示「🔵 未啟動」——
+    #   1. strong_sector_alert / morning_brief / market_close_brief / tw_mid 根本不是
+    #      monitor_state 的頂層 key, 它們是 push_dedup 的 slot 名稱 (存在 slot_dedup 裡)。
+    #   2. intraday_reversal / weak_open 雖然有 state, 但 per-symbol 的時間欄位叫
+    #      last_drawdown_at / last_rebound_at, 不在下面查表的候選清單裡。
+    #   3. holdings_intraday_alert 的 count 欄位是 stocks_alerted, 不是 alerted。
+    # 修法: 多一欄 slot (從 slot_dedup 取最後 claim 時間), 並補上缺的欄位名。
+    slot_dedup = monitor_state.get("slot_dedup") or {}
+
     modules = [
-        # (key, label, 內部時間鍵, 內部 count 鍵)
-        ("intraday_reversal", "🔁 盤中反轉", "last_alert_at", None),
-        ("weak_open", "📉 開盤即弱", "last_alert_at", None),
-        ("strong_sector_alert", "🚀 強勢族群", "last_batch_at", "sectors_alerted"),
-        ("holdings_intraday_alert", "⚠️ 持倉風險", "last_alert_at", "alerted"),
-        ("news_event_alert", "📰 事件新聞", "last_batch_at", "alerted"),
-        ("morning_brief", "🌅 晨報", "last_sent_at", None),
-        ("market_close_brief", "🌆 收盤摘要", "last_sent_at", None),
-        ("tw_mid", "🇹🇼 TW 中盤", "last_sent_at", None),
+        # (key, label, 內部時間鍵, 內部 count 鍵, push_dedup slot 名)
+        ("intraday_reversal", "🔁 盤中反轉", "last_drawdown_at", None, None),
+        ("weak_open", "📉 開盤即弱", "last_alert_at", None, None),
+        ("strong_sector_alert", "🚀 強勢族群", "last_batch_at", "sectors_alerted", None),
+        ("holdings_intraday_alert", "⚠️ 持倉風險", "last_alert_at", "stocks_alerted", None),
+        ("news_event_alert", "📰 事件新聞", "last_batch_at", "alerted", None),
+        ("morning_brief", "🌅 晨報", "last_sent_at", None, "morning_brief"),
+        ("market_close_brief", "🌆 收盤摘要", "last_sent_at", None, "tw_close"),
+        ("tw_mid", "🇹🇼 TW 中盤", "last_sent_at", None, "tw_mid"),
     ]
 
-    for key, label, time_key, count_key in modules:
+    for key, label, time_key, count_key, slot in modules:
         sub = monitor_state.get(key, {}) or {}
+        if not sub and slot:
+            # 這個模組沒有自己的 state, 但有 push_dedup slot → 用最後一次 claim 當「最後執行」
+            _claim = slot_dedup.get(slot)
+            _at = _parse_iso(_claim) if isinstance(_claim, str) else None
+            results.append({
+                "module": label, "key": key,
+                "last_fired": _at.isoformat() if _at else None,
+                "last_fired_ago": _ago(_at),
+                "today_count": 1 if _at and (_now_utc() - _at).total_seconds() < 86400 else 0,
+                "status": ("🟢 活躍" if _at and (_now_utc() - _at).total_seconds() < 1800
+                            else "🟡 今日有跑" if _at and (_now_utc() - _at).total_seconds() < 86400
+                            else "⚪ 閒置" if _at else "🔵 未啟動"),
+            })
+            continue
         if not sub:
             results.append({
                 "module": label, "key": key,
@@ -89,17 +112,29 @@ def _extract_module_status(monitor_state: Dict) -> List[Dict]:
 
         # 嘗試找 last fired (可能是 isoformat 或 nested)
         last_at = None
-        for tk in [time_key, "last_alert_at", "last_batch_at", "last_sent_at", "last_fired_at"]:
+        # 補上 index_alerts 實際會寫的兩個時間欄位 (原本查不到 → 恆為「未啟動」)
+        _TIME_KEYS = [time_key, "last_alert_at", "last_batch_at", "last_sent_at",
+                      "last_fired_at", "last_drawdown_at", "last_rebound_at"]
+        for tk in _TIME_KEYS:
             v = sub.get(tk) if isinstance(sub, dict) else None
             if isinstance(v, str):
                 last_at = _parse_iso(v)
                 break
-            if isinstance(v, dict):  # 巢狀 e.g. {symbol: {last_alert_at}}
-                for s_sub in v.values():
-                    if isinstance(s_sub, dict) and s_sub.get(tk):
-                        d = _parse_iso(s_sub.get(tk))
-                        if d and (last_at is None or d > last_at):
-                            last_at = d
+        # Bug fix (2026-09-07): 真實 state 的形狀是 sub[symbol][last_drawdown_at],
+        # 也就是「外層 symbol、內層時間欄位」。原本先做 sub.get(tk) 再往下鑽, 而 sub 的
+        # key 是 "^TWII" 不是欄位名 -> v 恆為 None, 巢狀分支永遠進不去, intraday_reversal
+        # 修完仍然顯示「🔵 未啟動」。改成直接走 sub 自己的 values()。
+        if last_at is None and isinstance(sub, dict):
+            for s_sub in sub.values():
+                if not isinstance(s_sub, dict):
+                    continue
+                for tk in _TIME_KEYS:
+                    sv = s_sub.get(tk)
+                    if not isinstance(sv, str):
+                        continue
+                    d = _parse_iso(sv)
+                    if d and (last_at is None or d > last_at):
+                        last_at = d
 
         # today count
         today_count = 0
@@ -320,7 +355,10 @@ def diagnose_cron_health(monitor_state: Dict) -> Dict:
             "last_cron_ago": "—",
             "last_ping_ago": _ago(last_ping_ts),
             "lag_sec": None,
+            # Bug fix (2026-09): 這條 return 用 is_within_window, 正常那條用 in_session,
+            # 而 app.py:3894 讀的是 is_within_window → 該提示永遠不顯示。兩個都給, 值一致。
             "is_within_window": False,
+            "in_session": False,
             "is_weekend": False,
         }
 
@@ -357,6 +395,7 @@ def diagnose_cron_health(monitor_state: Dict) -> Dict:
         "last_ping_ago": _ago(last_ping_ts) if last_ping_ts else "—",
         "lag_sec": int(cron_lag_sec),
         "in_session": in_session,
+        "is_within_window": in_session,   # 同義別名 — app.py 讀的是這個
         "is_weekend": is_weekend,
     }
 

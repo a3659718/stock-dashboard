@@ -26,6 +26,25 @@ SECTOR_CONCENTRATION_CRIT_PCT = 70.0  # ≥ 70% → 嚴重警告
 SINGLE_STOCK_WARN_PCT = 25.0          # 單檔 ≥ 25% → 警告
 SINGLE_STOCK_CRIT_PCT = 40.0          # ≥ 40% → 嚴重
 
+# Bug fix (2026-09-07): value = 收盤價 × 股數, 但台股是新台幣、美股是美元, 原本直接
+# 相加算權重 -> 台股部位被誇大約 31 倍、美股被壓縮 31 倍 -> 「🔴 單檔過大 2330 佔 92%」
+# 這種假警報會直接印進美股盤後推播。這裡統一換算成新台幣再算權重。
+_USDTWD_FALLBACK = 31.5   # 抓不到匯率時的保守值 (只影響權重比例, 不影響絕對金額判讀)
+
+
+def _usdtwd() -> float:
+    """USD/TWD 匯率; 抓不到回 fallback."""
+    try:
+        import data_sources as ds
+        df = ds.fetch_yf_history("TWD=X", period="5d", interval="1d")
+        if df is not None and not df.empty:
+            v = float(df["Close"].astype(float).iloc[-1])
+            if 20.0 < v < 45.0:      # sanity: 匯率不該離譜
+                return v
+    except Exception:
+        pass
+    return _USDTWD_FALLBACK
+
 
 # 相關性映射 (簡化 — 同 sector 視為高相關)
 US_SECTOR_TO_PROXY = {
@@ -119,7 +138,8 @@ def analyze_portfolio_risk() -> Dict:
         return {"holdings_n": 0, "warnings": ["📭 尚未設定持倉"], "sectors": [], "stocks": []}
 
     # HIGH bug fix: 抓最新價 + shares 沒設用「假設 10 萬投入」當 proxy
-    DEFAULT_BUDGET_PER_STOCK = 100000  # 沒 shares 假設每檔投 10 萬
+    DEFAULT_BUDGET_PER_STOCK = 100000  # 沒 shares 假設每檔投 10 萬 (新台幣)
+    _fx = _usdtwd()                    # 美股部位換算成台幣用
     enriched = []
     for h in holdings:
         sid = str(h.get("stock_id", "")).strip().upper()
@@ -149,12 +169,16 @@ def analyze_portfolio_risk() -> Dict:
             shares = float(shares) if shares else None
         except (TypeError, ValueError):
             shares = None
+        # shares fallback 的預算是「新台幣 10 萬」, 美股股價是美元 -> 要先換算,
+        # 否則 100000 / 184 = 543 股 NVDA (約 1,700 萬台幣), 權重整個歪掉。
+        _budget = DEFAULT_BUDGET_PER_STOCK if mk == "TW" else (DEFAULT_BUDGET_PER_STOCK / _fx)
         if shares is None or shares <= 0:
             if cur_price and cur_price > 0:
-                shares = DEFAULT_BUDGET_PER_STOCK / cur_price
+                shares = _budget / cur_price
             else:
                 shares = 1.0
-        value = (cur_price if cur_price else 100) * shares
+        # 統一換算成新台幣後才能跨市場比權重
+        value = (cur_price if cur_price else 100) * shares * (1.0 if mk == "TW" else _fx)
         sector = _fetch_sector_for_stock(sid, mk)
         family = _classify_family(sector, mk)
         # MED bug fix: ETF (00xx) 歸 "ETF" family

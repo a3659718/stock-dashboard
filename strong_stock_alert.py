@@ -51,10 +51,17 @@ def check_market_surge() -> Optional[Dict]:
             # 54 根 5m K, 所以盤中任何時刻這個視窗都會跨到昨天 → twii_pct 其實是
             # 「距今 4 小時 10 分前的漲幅」, 含整段隔夜跳空, 高估或低估都可能。
             # 同檔的 _stock_strength_metrics() 有正確做日期過濾, 只有這裡漏了。
+            # Bug fix (2026-09-07): 上一版用 twii.index.date 做日期過濾, 但 data_sources
+            # .fetch_yf_history() 內部已經 df.reset_index() -> index 是 RangeIndex,
+            # hasattr(index, "date") 恆為 False -> 每次都掉進 tail(50) fallback,
+            # 也就是修法完全沒生效。改用跟 _stock_strength_metrics() 一樣的欄位判定。
             try:
-                _idx = twii.index
-                _dates = _idx.date if hasattr(_idx, "date") else None
-                today_bars = twii[_dates == _dates[-1]] if _dates is not None else twii.tail(50)
+                import pandas as _pd
+                _dcol = "Datetime" if "Datetime" in twii.columns else twii.columns[0]
+                _d = _pd.to_datetime(twii[_dcol]).dt.date
+                today_bars = twii[_d == _d.iloc[-1]]
+                if len(today_bars) < 2:
+                    today_bars = twii.tail(50)
             except Exception:
                 today_bars = twii.tail(50)
             if len(today_bars) >= 2:
@@ -159,7 +166,10 @@ def scan_strong_stocks_now(top_n: int = 10, max_workers: int = 8) -> List[Dict]:
     try:
         import watchlist_store
         # 原本 universe + wl 會 TypeError (wl 是 dict 陣列) 並被下面的 except 吞掉
-        wl = watchlist_store.load_watchlist_ids()
+        # Bug fix (2026-09-07): 這個 universe 只餵給 .TW/.TWO 的台股 metrics 函式,
+        # 無參數的 load_watchlist_ids() 會把美股代號也加進來 -> 每輪多打一堆
+        # 必然失敗的 NVDA.TW / NVDA.TWO 請求。只取台股。
+        wl = watchlist_store.load_watchlist_ids("TW")
         universe = list(dict.fromkeys(universe + wl))
     except Exception:
         pass
@@ -347,7 +357,10 @@ def scan_intraday_strong_stocks(top_n: int = INTRADAY_STRONG_TOP_N,
     try:
         import watchlist_store
         # 原本 universe + wl 會 TypeError (wl 是 dict 陣列) 並被下面的 except 吞掉
-        wl = watchlist_store.load_watchlist_ids()
+        # Bug fix (2026-09-07): 這個 universe 只餵給 .TW/.TWO 的台股 metrics 函式,
+        # 無參數的 load_watchlist_ids() 會把美股代號也加進來 -> 每輪多打一堆
+        # 必然失敗的 NVDA.TW / NVDA.TWO 請求。只取台股。
+        wl = watchlist_store.load_watchlist_ids("TW")
         universe = list(dict.fromkeys(universe + wl))
     except Exception:
         pass
