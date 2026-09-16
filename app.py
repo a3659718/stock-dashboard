@@ -208,7 +208,9 @@ st.markdown(
 # ---------------------------------------------------------------------------
 with st.sidebar:
     st.title("⚙️ 設定")
-    st.caption(f"今天: {dt.date.today().strftime('%Y-%m-%d')}")
+    # Bug fix (2026-09): 用 dt.date.today() 是容器的 UTC 日期, 台北 00:00-08:00 會比
+    # 頂端 banner (已用 Asia/Taipei) 少一天, 兩處同時顯示不同日期。
+    st.caption(f"今天: {(dt.datetime.utcnow() + dt.timedelta(hours=8)).strftime('%Y-%m-%d')}")
 
     # 快取強制清除 — 盤中懷疑資料 stale 可一鍵重抓
     cc1, cc2 = st.columns([3, 2])
@@ -538,7 +540,11 @@ with tab_overview:
         try:
             import entry_evaluator as _ee_ov
             import watchlist_store as _ws_ov
-            wl = (_ws_ov.load_watchlist() or [])[:5]
+            # Bug fix (2026-09): load_watchlist() 回的是 dict 陣列, 直接丟給 quick_evaluate
+            # 會在 detect_market 的 (symbol or "").strip() 上 AttributeError, 被它自己的
+            # except 吞掉並回 entry_label="—" → shown_any 恆為 False → 這一區永遠顯示
+            # 「自選股目前無 BUY/HOLD 訊號」。改用 load_watchlist_ids()。
+            wl = (_ws_ov.load_watchlist_ids() or [])[:5]
             if not wl:
                 st.info("自選股空, 請先到「📋 自選股」加幾支")
             else:
@@ -1383,7 +1389,11 @@ with tab_hold:
             risk = portfolio_risk.analyze_portfolio_risk()
             if risk.get("holdings_n", 0) > 0:
                 # 警告區塊 (大字醒目)
-                for w in risk.get("warnings", []):
+                # Bug fix (2026-09): warnings 是給 Telegram HTML parse_mode 用的, 含 <b>...</b>。
+                # Streamlit 預設不解析原始 HTML, 使用者會看到帶尖括號的字面文字, 先剝掉標籤。
+                import re as _re_pr
+                _warns = [_re_pr.sub(r"</?b>", "", x) for x in (risk.get("warnings", []) or [])]
+                for w in _warns:
                     if "🔴" in w:
                         st.error(w, icon="🔴")
                     elif "🟡" in w:
@@ -1649,9 +1659,10 @@ with tab_tw:
                         if not ok:
                             _release_send_once(dedup_key)
 
-    # 8 個條件 checkbox（分兩列）
+    # 條件 checkbox（每列 4 個, 依 CONDITION_LABELS 自動排版）
     cond_keys = list(tw_screener.CONDITION_LABELS.keys())
-    default_on = {"break_ma", "volume_burst", "short_increase", "invtrust_first_buy"}
+    # 投信首買預設用 10 日 (最敏感); 15 / 30 日想比較時自己勾
+    default_on = {"break_ma", "volume_burst", "short_increase", "invtrust_first_buy_10"}
     cb_cols = st.columns(4)
     enabled_conditions = []
     for i, k in enumerate(cond_keys):
@@ -1851,9 +1862,13 @@ with tab_pulse:
         limit_up_btn = st.button("🎯 漲停前兆", use_container_width=True, type="primary",
                                   help="不限定題材要先熱, 全題材池掃「安靜吸籌」的價量+籌碼型態, 含進出場價")
     with cF:
-        send_pulse_tg = st.button("✈️ Send to TG", use_container_width=True,
+        # 這顆只送「產業分類 / 熱門題材」. 漲停前兆、大戶偷進場各自有專屬 Send 按鈕
+        # (在各自結果區塊下方) — 標題寫清楚, 避免再誤按這顆而以為沒反應.
+        send_pulse_tg = st.button("✈️ Send 族群/題材", use_container_width=True,
                                   disabled=not notifier.is_configured(),
-                                  key="send_pulse_tg")
+                                  key="send_pulse_tg",
+                                  help="只送「📊 產業分類」/「🔥 熱門題材」的結果。"
+                                        "漲停前兆 / 大戶偷進場請用各自結果下方的 Send 按鈕。")
 
     if smart_btn:
         try:
@@ -2098,6 +2113,21 @@ with tab_pulse:
                         f"**R:R** {_f2(p.get('rr'))}"
                     )
 
+            # Bug fix: 上方那排的「✈️ Send to TG」(key=send_pulse_tg) 只吃 pulse/themes,
+            # 大戶偷進場的結果在 st.session_state["smart_stealth"], 之前完全沒有推播路徑 →
+            # 按了只會掉進「還沒有資料」的 warning. 這裡補一顆獨立按鈕, 貼在結果下面
+            # (而不是頂上那排), rerun 後不會被捲走. formatter 早就寫好了, 只是沒被呼叫.
+            send_smart_tg = st.button(
+                "✈️ Send 大戶偷進場 to TG", use_container_width=True,
+                key="send_smart_tg", disabled=not notifier.is_configured(),
+            )
+            if send_smart_tg:
+                try:
+                    import smart_money_stealth as _sms_fmt
+                    _send_tg(_sms_fmt.fmt_smart_stealth_msg(smart_picks), "大戶偷進場")
+                except Exception as _e:
+                    st.error(f"推播失敗: {type(_e).__name__}: {_e}")
+
     # === 🎯 漲停前兆 / 潛伏吸籌 (limit_up_precursor) ===
     if "limit_up_precursor" in st.session_state:
         st.markdown("### 🎯 漲停前兆 / 潛伏吸籌")
@@ -2140,6 +2170,23 @@ with tab_pulse:
                     mc = p.get("market_cap_est")
                     if mc is not None:
                         st.caption(f"估計市值約 {mc/1e8:.0f} 億 · 週轉率 {_f2lup(p.get('turnover_pct'))}%")
+
+            # Bug fix: 這才是「按漲停前兆之後按 Send to TG 沒反應」的根因 —
+            # 上方那排的 send_pulse_tg 只檢查 pulse.sectors / themes.themes, 漲停前兆的
+            # 結果存在 st.session_state["limit_up_precursor"], 不在檢查範圍 → 直接落到
+            # 「還沒有資料」warning, 而那行印在本頁最下面, rerun 後捲不到 = 看起來沒反應.
+            # limit_up_precursor.fmt_limit_up_precursor_msg() 本來就寫好了 (原註解寫
+            # 「先寫好備用」), 只是從來沒有任何地方呼叫它. 這裡把它接上.
+            send_lup_tg = st.button(
+                "✈️ Send 漲停前兆 to TG", use_container_width=True,
+                key="send_lup_tg", disabled=not notifier.is_configured(),
+            )
+            if send_lup_tg:
+                try:
+                    import limit_up_precursor as _lup_fmt
+                    _send_tg(_lup_fmt.fmt_limit_up_precursor_msg(lup_picks), "漲停前兆")
+                except Exception as _e:
+                    st.error(f"推播失敗: {type(_e).__name__}: {_e}")
 
     if "hot_patterns" in st.session_state:
         st.markdown("### 🔥 熱門題材 3 型態")
@@ -2332,7 +2379,17 @@ with tab_pulse:
         _has_themes = (_themes_check is not None and hasattr(_themes_check, 'empty')
                         and not _themes_check.empty)
         if not (_has_sectors or _has_themes):
-            st.warning("⚠️ 還沒有資料 — 請先按上方「強勢族群」或「熱門題材」按鈕跑分析")
+            # Bug fix: 原本只有 st.warning, 而這行印在本分頁最底部 — 使用者按了頂上那排的
+            # Send to TG 之後 rerun 捲回頂端, 根本看不到這句 → 誤以為「按了沒反應」.
+            # 照 _send_tg() 的作法補 st.toast (浮層, 不受捲動位置影響), 並講清楚這顆
+            # 按鈕只送族群/題材, 漲停前兆 / 大戶偷進場要用各自結果下方那顆.
+            st.toast("這顆只送「族群/題材」— 漲停前兆請用結果下方那顆按鈕", icon="⚠️")
+            st.warning(
+                "⚠️ 還沒有資料 — 這顆「Send to TG」只送「📊 產業分類」/「🔥 熱門題材」的結果，"
+                "請先按那兩顆跑分析。\n\n"
+                "若你要推的是「🎯 漲停前兆」或「🕵️ 大戶偷進場」，請用各自結果區塊下方的"
+                "專屬 Send 按鈕。"
+            )
         else:
             try:
                 msg = notifier.fmt_strong_sectors(
@@ -3372,7 +3429,11 @@ with tab_mood:
         with col_r1:
             rot_mkt = st.radio("市場", ["US", "TW"], index=0, key="rot_mkt", horizontal=True)
             rot_btn = st.button("🔄 重抓", key="rot_refresh", use_container_width=True)
-        if rot_btn or "sector_rot_cache" not in st.session_state:
+        # Bug fix (2026-09): cache 沒把市場納入判斷 → 切換 TW/US 後不按「重抓」的話,
+        # 畫面標題是新市場、內容卻還是舊市場的 ETF。改成市場一變就重算。
+        if (rot_btn or "sector_rot_cache" not in st.session_state
+                or st.session_state.get("sector_rot_cache_mkt") != rot_mkt):
+            st.session_state["sector_rot_cache_mkt"] = rot_mkt
             with st.spinner("計算 sector rotation..."):
                 try:
                     import sector_rotation as _sr
@@ -3748,8 +3809,12 @@ with tab_entry:
     # 入場結論 + AI 已在本頁頂端顯示; 這裡只讀取結果呈現詳細指標 (不重算, 避免雙倍 Gemini)
     result = st.session_state.get("entry_result")
     if result:
-        if result.get("error"):
-            st.error(result["error"])
+        # Bug fix (2026-09): evaluate_entry() 失敗時回的 key 是 "err" 不是 "error"
+        # (見 entry_evaluator.py:607), 原本只檢查 "error" → 永遠 False → 拿空的 snap
+        # 去 render, 整區 10 個 metric 全是「—」而且沒有任何錯誤說明。
+        _err = result.get("err") or result.get("error")
+        if _err:
+            st.error(_err)
         else:
             snap = result.get("snap", {})
             peers = result.get("peers", {})
@@ -3832,7 +3897,9 @@ with tab_entry:
             cR1, cR2, cR3 = st.columns(3)
             cR1.metric("支撐 (MA20)", f"{ma20:,.2f}" if ma20 else "—")
             cR2.metric("阻力 (52w 高)", f"{high52:,.2f}" if high52 else "—")
-            cR3.metric("中期目標 / 52w 低", f"{high52:,.2f}" if high52 else (f"{low52:,.2f}" if low52 else "—"))
+            # Bug fix (2026-09): 標籤寫「52w 低」但主分支用的是 high52, 因為 high52 幾乎一定
+            # 算得出來, 這一格永遠等於左邊的「阻力 (52w 高)」, low52 等於白算。
+            cR3.metric("支撐 (52w 低)", f"{low52:,.2f}" if low52 else "—")
             st.caption("※ 技術面參考位 (由均線/區間反推), 非保證目標; 實際進出以本頁頂端 AI 進出場建議 + 個人風控為準.")
             # (AI 分析已在本頁頂端顯示, 此處不重複)
 
