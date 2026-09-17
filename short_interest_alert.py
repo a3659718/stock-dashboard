@@ -166,7 +166,10 @@ def fetch_short_interest_snapshot() -> Dict:
         elif sev == "medium":
             verdict_score -= 1
 
-    if ms.get("ratio_pct"):
+    # Bug fix (2026-09-18): ratio_pct = 0.0 是 falsy, 但 0% 券資比正是「散戶空單歸零」
+    # 的最極端情況, 原本會整段跳過 → verdict 顯示「中性」, 卻同時在明細印出
+    # 「券資比 <8% 散戶過度樂觀」(:203 用的是 is not None), 同一封訊息自相矛盾。
+    if ms.get("ratio_pct") is not None:
         r = ms["ratio_pct"]
         if r >= 35:
             verdict_score += 2  # 反向偏多

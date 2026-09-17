@@ -150,16 +150,37 @@ def _handle_sl(market: str, sid: str):
     if not price:
         return "⚠️ 抓不到現價, 無法設停損", None
     stop = round(price * (1 - STOP_PCT), 2)
-    # 存進 monitor_state["stop_loss"][sid]
+    # Bug fix (2026-09): 原本存進 monitor_state["stop_loss"][sid] (頂層 key),
+    # 但真正做跌破監控的 holdings_tracker.check_stop_loss_breaches() 讀的是
+    # monitor_state["holdings_tracker"]["stop_loss"][sid], 而且欄位名也不同
+    # (它要的是 "stop_loss" 而非 "stop")。全 repo 沒有任何地方讀頂層那個 key →
+    # 使用者在 TG 按了「設停損」、收到確認訊息, 之後真的跌破卻永遠不會有警報。
+    # 改成寫進 holdings_tracker 讀得到的位置, 並補上它需要的欄位。
     try:
         import watchlist_store, datetime as _dt
         st = watchlist_store.load_monitor_state() or {}
-        sl_map = st.get(_STOP_KEY) or {}
-        sl_map[str(sid).upper()] = {
-            "market": market, "ref_price": price, "stop": stop,
-            "pct": STOP_PCT, "ts": _dt.datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        tracker = st.setdefault("holdings_tracker", {})
+        sl_map = tracker.setdefault("stop_loss", {})
+        _key = str(sid).upper()
+        _prev = sl_map.get(_key) or {}
+        sl_map[_key] = {
+            # holdings_tracker 讀的欄位
+            "stop_loss": stop,
+            "name": _prev.get("name", ""),
+            "set_date": _dt.date.today().strftime("%Y-%m-%d"),
+            # Bug fix (2026-09-07): holdings_tracker.check_stop_loss_breaches() 的
+            # 一日一次去重完全靠這兩個欄位, 而 update_stop_loss_state() 有特地保留它們。
+            # 這條 TG 按鈕路徑漏抄 -> 使用者在收到停損警報後按「設停損」, fired 紀錄被
+            # 抹掉, 同一天下一班 cron 會再推一次一模一樣的警報。
+            "fired_date": _prev.get("fired_date", ""),
+            "near_stop_fired_date": _prev.get("near_stop_fired_date", ""),
+            # 保留原本的診斷欄位, 不影響讀取端
+            "market": market, "ref_price": price, "stop": stop, "pct": STOP_PCT,
+            "ts": _dt.datetime.utcnow().isoformat(timespec="seconds") + "Z",
+            "source": "tg_button",
         }
-        st[_STOP_KEY] = sl_map
+        tracker["stop_loss"] = sl_map
+        st["holdings_tracker"] = tracker
         watchlist_store.save_monitor_state(st)
     except Exception as e:
         print(f"[tg_listener] sl save {sid} err: {e}", flush=True)

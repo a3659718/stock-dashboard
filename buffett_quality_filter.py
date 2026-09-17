@@ -36,7 +36,10 @@ def check_quality(symbol: str) -> Dict:
 
         roe = f.get("returnOnEquity") or f.get("roe")
         if roe is not None:
-            roe_pct = float(roe) * 100 if abs(roe) < 1 else float(roe)
+            # Bug fix (2026-09-18): yfinance 的 returnOnEquity 一律是小數 (0.15 = 15%),
+            # 原本 abs(roe) < 1 的啟發式會把 ROE >= 100% 的公司 (AAPL ≈ 1.5) 當成 1.5%,
+            # 反而扣 3 分「品質差」。門檻放寬到 10 (=1000%) 只為擋住萬一傳進來的百分比值。
+            roe_pct = float(roe) * 100 if abs(float(roe)) <= 10 else float(roe)
             out["roe"] = round(roe_pct, 2)
             if roe_pct >= 15:
                 score += 5; reasons.append(f"✅ ROE {roe_pct:.2f}% (優質)")

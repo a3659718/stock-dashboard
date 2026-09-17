@@ -109,8 +109,14 @@ def _vote_minervini(stock_id: str, market: str) -> Dict:
             if ma150 > ma200: cond_passed += 1
             if cur >= high_52w * 0.75: cond_passed += 1
             if cur >= high_52w * 0.95: cond_passed += 1
-            ma200_30d_ago = c.tail(30).iloc[0] if len(c) >= 30 else cur
-            if ma200 > ma200_30d_ago: cond_passed += 1
+            # Bug fix (2026-09-18): 原本 ma200_30d_ago = c.tail(30).iloc[0] 是「30 個交易日
+            # 前的單日收盤價」, 拿來跟 MA200 比 → 上升趨勢股(收盤遠高於 MA200)判 False、
+            # 下跌趨勢股判 True, 整條「MA200 趨勢向上」與本意相反。改成比 MA200 自己的
+            # 前後值; 資料不足 222 根時這條計 False (不再白送一分)。
+            if len(c) >= 222:
+                _ma200_s = c.rolling(200).mean()
+                if float(_ma200_s.iloc[-1]) > float(_ma200_s.iloc[-22]):
+                    cond_passed += 1
 
             if cond_passed >= 7:
                 out["vote"] = "BUY"

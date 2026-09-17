@@ -60,7 +60,10 @@ def main():
     import data_sources as ds
     chk("yfinance ^TWII 5d", lambda: not ds.fetch_yf_history("^TWII", period="5d").empty)
     chk("yfinance ^SOX 5d", lambda: not ds.fetch_yf_history("^SOX", period="5d").empty)
-    chk("yfinance NVDA news", lambda: len(ds.fetch_yahoo_news("NVDA", max_n=3)) >= 0)
+    # Bug fix (2026-09): 原本是 `>= 0`, 對任何 list 都成立 —— fetch_yahoo_news 自己有
+    # try/except, 抓不到時回空 list, 所以 Yahoo 新聞完全掛掉時這條檢查仍然印 ✓。
+    # 依賴新聞的 news_event_alert / trump_policy_alert / theme_analyzer 會一起靜默失效。
+    chk("yfinance NVDA news", lambda: len(ds.fetch_yahoo_news("NVDA", max_n=3)) > 0)
     chk("yfinance fear&greed", lambda: bool(ds.fetch_fear_greed()))
     chk("FinMind TaiwanStockInfo", lambda: not ds.get_taiwan_stock_info().empty)
 

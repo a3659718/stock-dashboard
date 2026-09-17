@@ -83,23 +83,39 @@ def _run_with_timeout(fn, name: str, timeout_sec: int = 30, default=None):
     """跑一個函式, 給 timeout. 若超時或拋異常, log + return default.
 
     用 ThreadPoolExecutor 不用 signal (signal 在 thread / Windows 不能用).
+
+    Bug fix (2026-08): 原本把 executor 包在 `with` 裡 —— ThreadPoolExecutor.__exit__ 會
+    呼叫 shutdown(wait=True), 而執行中的 future 無法 cancel, 所以 `return default` 之後
+    函式仍會阻塞到 fn() 自然跑完。timeout 從來沒有生效過, 只有那行 log 會準時印出來
+    (實測: timeout=2s、工作 8s → log 在 2.0s 印出, 函式 8.0s 才 return)。
+    後果: monitor 裡任一個 check 被 yfinance 限流卡住, 排在後面的持倉停損警報 (Tier 0)
+    等等就會因為 workflow 的 timeout-minutes 到期而整批沒跑, 而 log 顯示「已 timeout 跳過」。
+    改成手動建立 executor + shutdown(wait=False), 讓逾時的工作留在背景, 主流程立刻往下走。
+    (daemon thread 會隨 process 結束被回收, 不會拖住 job。)
     """
     import concurrent.futures as _cf
+    ex = None
     try:
-        with _cf.ThreadPoolExecutor(max_workers=1) as ex:
-            fut = ex.submit(fn)
-            try:
-                return fut.result(timeout=timeout_sec)
-            except _cf.TimeoutError:
-                print(f"[monitor timeout] {name} > {timeout_sec}s, skip", flush=True)
-                # 不能 cancel running thread, 讓它自然結束 (背景跑完無影響)
-                return default
-            except Exception as e:
-                print(f"[monitor error] {name}: {type(e).__name__}: {str(e)[:100]}", flush=True)
-                return default
+        ex = _cf.ThreadPoolExecutor(max_workers=1)
+        fut = ex.submit(fn)
+        try:
+            return fut.result(timeout=timeout_sec)
+        except _cf.TimeoutError:
+            print(f"[monitor timeout] {name} > {timeout_sec}s, skip (背景執行緒放生, 主流程繼續)",
+                  flush=True)
+            return default
+        except Exception as e:
+            print(f"[monitor error] {name}: {type(e).__name__}: {str(e)[:100]}", flush=True)
+            return default
     except Exception as e:
         print(f"[monitor wrapper fail] {name}: {e}", flush=True)
         return default
+    finally:
+        if ex is not None:
+            try:
+                ex.shutdown(wait=False)   # 關鍵: 不等 — 這正是原本卡住的地方
+            except Exception:
+                pass
 
 
 def _summarize_tw_for_ai(data: dict) -> str:
@@ -214,10 +230,7 @@ def _run_us_open_main(market: str) -> bool:
             print(f"Gemini exception: {e}", flush=True)
             ai_text = ""
     try:
-        # BUG FIX (稽核發現): fmt_us_open_picks 內部的國際訊號區塊 (油價/DXY/10Y/VIX/
-        # Trump) 原本是格式化當下才自己序列現抓 7 次外部連線, 跟這支函式最上面
-        # 「主推要優先且準時送出, 不能被慢工卡住」的設計互相矛盾。這裡改成有界時間
-        # (5 秒) 平行預抓, 抓不完就跳過不等, 讓主推的準時性不會被外部訊號來源拖累。
+  
         try:
             import news_sources as _ns
             data["external_signals"] = _ns.fetch_external_signals_bounded(timeout_sec=5.0)
@@ -255,7 +268,6 @@ def main() -> int:
     # 一天只該推一次的 slot (tw_open / us_close / morning_recap …) 若因 cron drift
     # 被誤路由 / 兩個相鄰 cron 落進同一 slot → 同一則內容一天推兩次。這裡在送出前
     # claim 一次, window 內已送過就跳過。monitor 等「本來就多跑」的不套; 手動觸發
-    # (workflow_dispatch) 也不套, 讓你能強制補推。fail-open: dedup 壞掉一律照送。
     try:
         import os as _os
         _is_manual = _os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
@@ -265,19 +277,40 @@ def main() -> int:
         # 遲到的 cron run 會在 1~2 小時後把同一則再推一次 (50 分 window 擋不住)。
         _DEDUP_WINDOW_MIN = 300
         if _pd.should_guard(market):
+
             if _is_manual:
                 # 手動 / 本機準時觸發: 不被 dedup 擋 (要能強制補推), 但一定要「登記」,
                 # 否則後面遲到的 cron run 會重複推同一則。
                 try:
-                    _pd.reset(market)
-                    _pd.claim_slot(market, window_min=_DEDUP_WINDOW_MIN)
-                    print(f"[push_dedup] 手動觸發 '{market}' — 不擋, 但已登記 claim "
+                    # force_claim 而不是 reset()+claim_slot(): reset 在 merge-on-save 下
+                    # 一句誤導的「已送過, 跳過」log, 而且 claim 時間不會更新成這次手動的時間。
+                    _pd.force_claim(market)
+                    print(f"[push_dedup] 手動觸發 '{market}' — 不擋, 已重新登記 claim "
                           f"({_DEDUP_WINDOW_MIN} 分內遲到的 cron 會被擋掉)", flush=True)
                 except Exception as _ce:
                     print(f"[push_dedup] 手動 claim 失敗 (non-fatal): {_ce}", flush=True)
-            elif not _pd.claim_slot(market, window_min=_DEDUP_WINDOW_MIN):
-                print(f"[push_dedup] '{market}' 視為重複 (cron 延遲/drift), 本次跳過。", flush=True)
+            elif _pd.was_claimed_recently(market, window_min=_DEDUP_WINDOW_MIN):
+                # 唯讀檢查 — 前面已經有一次「成功推出去」的 run, 這次是重複觸發
+                print(f"[push_dedup] '{market}' 稍早已成功推播過, 本次跳過。", flush=True)
                 return 0
+            else:
+                # 還沒人推過 → 這次去跑。等真的送出成功了才登記 claim,
+                # 中途失敗就不登記, 讓備援 cron 還有第二次機會。
+                import atexit as _atexit
+                _send_before = getattr(notifier, "SEND_OK_COUNT", 0)
+
+                def _claim_if_actually_pushed(_m=market, _b=_send_before):
+                    try:
+                        if getattr(notifier, "SEND_OK_COUNT", 0) > _b:
+                            _pd.force_claim(_m)
+                            print(f"[push_dedup] '{_m}' 本次有成功推播 → 登記 claim", flush=True)
+                        else:
+                            print(f"[push_dedup] '{_m}' 本次一封都沒推出去 → 不登記, "
+                                  f"備援 cron 仍可補推", flush=True)
+                    except Exception as _ce:
+                        print(f"[push_dedup] claim on exit 失敗 (non-fatal): {_ce}", flush=True)
+
+                _atexit.register(_claim_if_actually_pushed)
     except Exception as _de:
         print(f"[push_dedup] 守衛例外, fail-open 照跑: {_de}", flush=True)
 
@@ -290,10 +323,12 @@ def main() -> int:
             print(f"=== Holiday Check ===")
             print(f"monitor mode: 24x7 執行，不檢查假日")
             print(f"=====================\n")
-        elif market in ("heartbeat",):
-            # heartbeat 每天跑, 不檢查假日
+        elif market in ("heartbeat", "crypto_picks"):
+            # heartbeat 每天跑; crypto 24/7 無休市 — 都不檢查股市假日。
+            # (Bug fix 2026-08: crypto_picks 原本落到下面的 else, 被當成美股 →
+            #  美股休市日 crypto 推播整天不送, 但幣圈根本沒休市。)
             print(f"=== Holiday Check ===")
-            print(f"heartbeat mode: 每日執行, 不檢查假日")
+            print(f"{market}: 不受股市假日影響, 照常執行")
             print(f"=====================\n")
         elif market == "weekend_recap":
             # 只在 Sat / Sun fire
@@ -318,8 +353,17 @@ def main() -> int:
             print(f"=====================\n")
         else:
             # Bug fix: pre_market_* / morning_action_tw 等都是台股, 不是 US
+            # Bug fix (2026-08): 原本用 startswith 猜, 猜不到的一律當美股 →
+            #   limit_up_precursor (台股篩選器) / ipo_weekly (台股新股) 被拿美股行事曆判假日:
+            #   台股休市那天照跑 (資料是錯的), 美股休市那天反而整個跳過。
+            #   改成「明列台股 slot」的白名單, 只有真的看美股的才走 US。
+            _TW_SLOTS = {
+                "tw_post_market", "morning_action_tw",
+                "limit_up_precursor",  # 台股題材股篩選
+                "ipo_weekly",          # 台股新股上市
+            }
             if (market.startswith("tw") or market.startswith("pre_market")
-                    or market == "tw_post_market" or market == "morning_action_tw"):
+                    or market in _TW_SLOTS):
                 market_for_holiday = "TW"
             else:
                 market_for_holiday = "US"
@@ -682,6 +726,28 @@ def main() -> int:
             traceback.print_exc()
         return 0
 
+    # === 🎯 漲停前兆單獨觸發 (手動測試用; 正常走 tw_close 盤後那一段) ===
+    if market == "limit_up_precursor":
+        try:
+            import limit_up_precursor as _lup
+            picks = _lup.scan_limit_up_precursor(top_n=8)
+            print(f"[limit_up_precursor] 掃到 {len(picks)} 檔", flush=True)
+            if not picks:
+                print("[limit_up_precursor] 今日無符合標的 → 不送", flush=True)
+                return 0
+            msg = _lup.fmt_limit_up_precursor_msg(picks)
+            if not msg:
+                print("[limit_up_precursor] fmt 回傳空字串 → 不送", flush=True)
+                return 0
+            ok, info = notifier.send_message(msg, disable_preview=True)
+            print(f"[limit_up_precursor] sent ok={ok} info={info}", flush=True)
+            return 0 if ok else 2
+        except Exception as _e:
+            import traceback
+            print(f"[limit_up_precursor] failed: {_e}", flush=True)
+            traceback.print_exc()
+            return 1
+
     # === 🌅 pre_market_morning 推播 (TPE 08:15 / 08:30) ===
     if market in ("pre_market_815", "pre_market_830"):
         try:
@@ -749,6 +815,13 @@ def main() -> int:
                         # Hidden Bug #6 fix: 接 send_message 的 return tuple 並 log
                         ok_etf, info_etf = notifier.send_message(msg_etf)
                         print(f"[active_etf] TG result for {etf_code}: ok={ok_etf} info={info_etf}", flush=True)
+                        # 推成功才把 last_data_date 推進去; 失敗就留著, 下一輪會重試。
+                        if ok_etf:
+                            if active_etf_monitor.commit_pending(diff):
+                                print(f"[active_etf] {etf_code} state committed", flush=True)
+                        else:
+                            print(f"[active_etf] {etf_code} 推播失敗 → 不更新 state, "
+                                  f"下次執行會重試這次的換股", flush=True)
                 else:
                     print("[active_etf] no changes detected (data_date unchanged)", flush=True)
             except Exception as _e:
@@ -902,6 +975,30 @@ def main() -> int:
             print(f"[tw_close] 盤後總結(合併)優先送出: ok={ok_c} {info_c}", flush=True)
             _tw_main_sent = True
 
+        # === 🎯 漲停前兆 / 潛伏吸籌 — 盤後推一封 (2026-08 新增: 原本只在 dashboard) ===
+        # 為什麼放 15:00 盤後: 這個篩選器吃「今天完整的日線 + 籌碼」, 盤中資料還沒收完,
+        # 掃出來的收斂/量價背離判斷會失真。盤後掃 → 隔天開盤才布局, 時間也對得上。
+        # 為什麼不套 push_cap 的 category: 這是使用者指名要的主推, 不該跟次要 alert
+        # 搶那 6 封的每日額度而被默默擋掉 (擋掉時只有 log, 你在 TG 端完全看不出來)。
+        try:
+            import limit_up_precursor as _lup
+            _lup_picks = _lup.scan_limit_up_precursor(top_n=8)
+            if _lup_picks:
+                _lup_msg = _lup.fmt_limit_up_precursor_msg(_lup_picks)
+                if _lup_msg:
+                    ok_lup, info_lup = notifier.send_message(_lup_msg, disable_preview=True)
+                    print(f"[limit_up_precursor] {len(_lup_picks)} 檔 sent ok={ok_lup} {info_lup}",
+                          flush=True)
+                else:
+                    print("[limit_up_precursor] fmt 回傳空字串 → 不送", flush=True)
+            else:
+                # 一定要印原因 — 「今天沒訊號」跟「掃描壞掉」在 TG 端看起來一模一樣 (都是沒收到)。
+                print("[limit_up_precursor] 今日無符合標的 (收斂+量價背離+未大漲) → 不送", flush=True)
+        except Exception as _lupe:
+            import traceback
+            print(f"[limit_up_precursor] failed (non-fatal): {_lupe}", flush=True)
+            traceback.print_exc()
+
         # 盤後籌碼-價量 12 模式分析 — 額外推一封 (極強看好/警示/看壞 標的)
         try:
             import chip_price_divergence as _cpd
@@ -916,10 +1013,14 @@ def main() -> int:
                 print(f"  cpd: upside_screener fetch failed: {_e}", flush=True)
             try:
                 import watchlist_store as _ws
-                wl = _ws.load_watchlist() or []
+                # Bug fix (2026-09-07): load_watchlist() 回 dict 陣列, 這裡 list(dict.fromkeys(
+                # list_of_str + list_of_dict)) 會 TypeError: unhashable type: 'dict',
+                # 被下面沒有 log 的 except 吞掉 -> 自選股從來沒進過盤後籌碼-價量分析。
+                # 8/29 那輪改了 8 個呼叫點, 漏了這一個。
+                wl = _ws.load_watchlist_ids("TW")
                 cpd_stocks = list(dict.fromkeys(cpd_stocks + wl))
-            except Exception:
-                pass
+            except Exception as _wle:
+                print(f"  cpd: watchlist merge failed: {_wle}", flush=True)
             if cpd_stocks:
                 print(f"  Running chip-price divergence on {len(cpd_stocks)} stocks", flush=True)
                 cpd_results = _cpd.analyze_batch(cpd_stocks)
@@ -1272,10 +1373,7 @@ def main() -> int:
         # 盤中監控: 自選股 / 大盤點數 / 加密貨幣
         print("Running monitor mode (intraday alerts)...")
 
-        # ===== 防禦性 early-exit (省 GH Actions 額度) =====
-        # 為什麼: cron 已限定在 session 時段, 但 GH cron 可能 drift 跨小時誤觸發.
-        #         若觸發時所有 market 都沒 session 且不在 crypto 時段, 跑完整流程是 ~30s
-        #         浪費 (yfinance / state I/O 等). 直接 exit 0 跳過.
+
         try:
             import index_alerts as _ia_pre
             import datetime as _dt
@@ -1284,8 +1382,8 @@ def main() -> int:
             in_any_session = any(
                 _ia_pre._is_market_in_session(c) for c in ["TW", "JP", "KR", "US"]
             )
-            # Bug fix: 加密貨幣已停用, 不再保留 crypto_hour fallback
-            if not in_any_session:
+            _is_weekend = now_utc.weekday() >= 5
+            if not in_any_session and not _is_weekend:
                 print(
                     f"Monitor mode: 無 market session "
                     f"(UTC hour={cur_hour}). Early-exit 省 ~30s API. "
@@ -1377,7 +1475,6 @@ def main() -> int:
         try:
             import index_alerts as _ia_wo
             weak_open_alerts = _ia_wo.check_weak_open_alerts() or []
-            # M1 fix: 同 sym 同 tick reversal 已推 → suppress weak_open, 避免重複 2 封
             #         (reversal 訊息語境更完整, 含 severity/速度/同向股)
             if weak_open_alerts and reversal_alerts:
                 rev_syms = {a.get("symbol") for a in reversal_alerts}
@@ -1396,8 +1493,14 @@ def main() -> int:
                 try:
                     import alert_priority as _ap_wo
                     # weak_open 含 type=weak/strong, direction 對應 down/up
-                    weak_subset = [a for a in weak_open_alerts if a.get("type") in ("weak",)]
-                    strong_subset = [a for a in weak_open_alerts if a.get("type") in ("strong",)]
+                    # Bug fix (2026-09-18): 產生端 (index_alerts.py:1231/1254) 寫的是
+                    # "weak_open"/"strong_open", 這裡原本只比對 "weak"/"strong" →
+                    # 兩個 subset 恆為空, 開盤即弱/即強一則都送不出去, 而且 index_alerts
+                    # 已經把 weak_alerted 存檔, 當天額度直接燒掉。兩種名稱都接受。
+                    weak_subset = [a for a in weak_open_alerts
+                                   if a.get("type") in ("weak", "weak_open")]
+                    strong_subset = [a for a in weak_open_alerts
+                                     if a.get("type") in ("strong", "strong_open")]
                     weak_subset = _ap_wo.filter_dedup_picks(weak_subset, "weak_open", "down")
                     strong_subset = _ap_wo.filter_dedup_picks(strong_subset, "strong_open", "up")
                     weak_open_alerts = weak_subset + strong_subset
@@ -1415,7 +1518,7 @@ def main() -> int:
                 try:
                     import alert_priority as _ap_wo2
                     for a in weak_open_alerts:
-                        d = "down" if a.get("type") == "weak" else "up"
+                        d = "down" if a.get("type") in ("weak", "weak_open") else "up"
                         _ap_wo2.mark_picks_pushed([a],
                                                     "weak_open" if d == "down" else "strong_open", d)
                 except Exception:
@@ -1429,11 +1532,6 @@ def main() -> int:
         # 不再呼叫 check_index_alerts(), 省每次 monitor tick 5 個指數的 yfinance fetch
         bucket_alerts = []
 
-        # === Phase 1 送出: 把 crash + 反轉 + 開盤即弱 合併成 TG (可能多封) ===
-        # Bug fix (重大): 之前這三類只「偵測 + 標記已推」(reversal 在 1132 行先標保險),
-        #   但「組合 + send」整段在某次重構被刪掉 → 費半反轉 / 系統性大跌 / 開盤即弱 全部被
-        #   偵測卻從未送出, 而且還被標成已推 → 下次直接被去重濾掉。這裡把缺失的送出補回來。
-        # 反轉 / 開盤即弱強 也接 Gemini: 若 crash 沒觸發 AI 但反轉/開盤即弱強有觸發, 補一份 AI 快評
         if not crash_ai_text and (reversal_alerts or weak_open_alerts) and ai_analyzer.gemini_available():
             try:
                 _okr, _rev_ai = ai_analyzer.analyze_reversal_alerts(reversal_alerts, weak_open_alerts)
@@ -1463,11 +1561,7 @@ def main() -> int:
             print(f"[combined intraday] send failed (non-fatal): {_ce}", flush=True)
             traceback.print_exc()
 
-        # === 新增: 大盤大漲 → 強勢股推播 (跨 tick 去重, 每天每 trigger 只推一次) ===
-        # 關鍵: 先初始化 ssa_result。否則 check_and_push_if_surge() 一旦 raise (FinMind 掛時很常見),
-        # except 雖吞掉原例外, 但 ssa_result 從未綁定 → 下方 line 1318 `if ssa_result:` 會 NameError
-        # 且「不在 try 內」→ 整個 monitor run exit 1, 後面所有 monitor 推播 (強弱勢股/台指期/自選股/
-        # 持倉/新聞事件/量爆/籌碼異常) 全部被連坐掉。
+
         ssa_result = None
         try:
             import strong_stock_alert as _ssa
@@ -1477,10 +1571,7 @@ def main() -> int:
         except Exception as _e:
             print(f"[strong stock alert] check failed (non-fatal): {_e}", flush=True)
 
-        # === 常態 intraday 強勢個股推播 (帶 timeout 防卡死) ===
-        # 合併重疊: 「大盤大漲警報」本身已含『當下強勢股』。若本 tick 已推大盤大漲,
-        #           就跳過常態強勢股, 避免同一批強勢股在兩封訊息重複出現;
-        #           大盤平淡 (surge 未觸發) 時才推常態強勢股。
+
         if ssa_result:
             print("[intraday strong] 本 tick 已推大盤大漲(含當下強勢股) → 跳過常態強勢股避免重複",
                   flush=True)
@@ -1508,28 +1599,13 @@ def main() -> int:
         if tx_result:
             print(f"[tx_futures] {tx_result}", flush=True)
 
-        # === watchlist_triggers 整合到 16:00 盤後 ===
-        # 盤中不再獨立推播 (避免盤中分心), 改成 tw_post_market_summary 一次顯示當天累積觸發
-        # 仍 check + 寫 state, 給盤後用
+
         try:
             import watchlist_triggers as _wt
             fired = _wt.check_triggers() or []
             if fired:
                 print(f"[watchlist_triggers] {len(fired)} fired (queued for 15:00 summary)", flush=True)
-                # 累積到 state, 給 15:00 tw_close 併入的 tw_post_market_summary 讀取
-                # (tw_post_market_summary.build_post_market_msg() 讀的 key 是
-                # "trigger_type", 見該檔案第 333 行).
-                # Bug fix: 這裡原本用 f.get("trigger_type") 當來源值, 但 check_triggers()
-                # 回傳的 dict 裡這個欄位其實叫 "type" (見 watchlist_triggers.py) —
-                # "trigger_type" 這個 key 在 fired dict 裡根本不存在, 所以存進去的值
-                # 永遠是 None。後果: (1) 去重比對變成「只要同一檔股票就視為重複」,
-                # 同股不同條件類型的第二個觸發會被誤判成已存在而漏記; (2)
-                # tw_post_market_summary 彙總訊息裡這個欄位永遠顯示空白, 使用者看不出
-                # 到底是哪種條件觸發的。改成從實際存在的 "type" 欄位取值, 但儲存的 key
-                # 名稱維持 "trigger_type" 不變 (跟 tw_post_market_summary 的讀取端一致)。
-                # 同時只有在這裡的 state 保存確認成功後, 才呼叫 mark_triggers_fired()
-                # 真正解除警戒 — 保存失敗的話這批 fired 保持 armed, 下次 monitor
-                # tick 還會再抓到, 不會讓使用者的警報悄悄消失。
+
                 try:
                     import watchlist_store
                     state = watchlist_store.load_monitor_state()
@@ -1560,18 +1636,7 @@ def main() -> int:
         except Exception as _wte:
             print(f"[watchlist_triggers] check failed (non-fatal): {_wte}", flush=True)
 
-        # === 4: 持倉 intraday 風險警報 (今日 ≤ -3% / 從早高回吐 ≥ 5% / 跌破停損) ===
-        # Bug fix (重大, 2026-08): 這一段【只偵測、只印 log, 從來沒有送出過】。
-        #   holdings_intraday_alerts 這個變數在整個檔案裡只出現在本區塊 (賦值 + print),
-        #   唯一能送它的 notifier.fmt_combined_intraday_super(holdings_intraday_alerts=...)
-        #   呼叫點在上面 ~1444 行、比這裡早一百多行, 而且根本沒傳這個參數。
-        #   結果: alert_priority 裡評為 Tier 0 (最高優先/立即動作) 的持倉風險警報
-        #   ——「持股當日跌超過 3%」「從當日高點回吐 5%」「跌破停損價」——
-        #   一封都推不出去, mark_alerts_sent() 也從未被呼叫。
-        #   這裡補上「偵測到就自己送一封」, 不塞回上面的合併訊息:
-        #   (a) 那個合併訊息已經送完了, 塞回去要搬動大段程式碼、風險高;
-        #   (b) 持倉風險是 Tier 0, 本來就該獨立一封、獨立通知音, 不該跟大盤警報混在一起。
-        #   送成功才 mark_alerts_sent → 送失敗下一個 tick 會重試, 不會靜默漏掉一整天。
+    
         holdings_intraday_alerts = []
         try:
             import holdings_intraday_alert as _hi
@@ -1598,7 +1663,6 @@ def main() -> int:
             print(f"[holdings intraday] check failed (non-fatal): {_e}", flush=True)
             traceback.print_exc()
 
-        # === 5 (新): 事件型新聞推播 (Trump/FDA/buyback/併購 等命中關鍵字) ===
         news_event_alerts = []
         try:
             import news_event_alert as _ne
@@ -1626,9 +1690,7 @@ def main() -> int:
                     print(f"[news event] impact analyzer failed (skip): {_ie}", flush=True)
                     impact_block = ""
 
-                # 用戶要求: 急報(HIGH) + 注意(MED) 都只送「有 AI 分析」的版本。若這批含 HIGH/MED
-                # 事件卻拿不到 AI 分析 (Gemini 失敗/不可用), 不送這封無 AI 版, 回滾 claim 讓下個 tick
-                # (Gemini 恢復時) 補送完整版; 純 LOW 一般快訊無 AI 屬正常, 照送不受影響。
+
                 _need_ai = any(a.get("urgency") in ("HIGH", "MED") for a in news_event_alerts)
                 ne_msg = notifier.fmt_news_event_alerts(news_event_alerts,
                                                           impact_analysis=impact_block)

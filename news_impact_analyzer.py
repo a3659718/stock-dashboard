@@ -94,8 +94,10 @@ def analyze_news_impact(alerts: List[Dict]) -> str:
         from notifier import _esc
         text_esc = _esc(text)
     except Exception:
-        text_esc = (text.replace("<", "&lt;").replace(">", "&gt;")
-                        .replace("&", "&amp;"))
+        # Bug fix (2026-09-18): & 必須先換, 否則 "<" -> "&lt;" 之後再把 & 換成 &amp;
+        # 會變成 "&amp;lt;", Telegram 顯示成字面的 &lt;15 (AI 分析常寫「VIX <15」)。
+        text_esc = (text.replace("&", "&amp;")
+                        .replace("<", "&lt;").replace(">", "&gt;"))
 
     # 包裝成 TG HTML 區塊 (標頭精簡, 省字給內容)
     return (

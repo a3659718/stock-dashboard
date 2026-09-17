@@ -33,6 +33,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import data_sources as ds
 import notifier
+# Bug fix (2026-09-07): 本檔原本把 Yahoo 新聞標題 / 連結 / 股名原封不動塞進 HTML 訊息。
+# 英文財經標題含 "&" (AT&T / S&P / M&A) 與 "<...>" 是常態, Yahoo 連結也一定帶 "&" query,
+# 會讓 Telegram 400 -> notifier 退成純文字重送 -> 整封晨報的粗體/連結全失效, 還會被
+# 正則把 "<NVDA>" 這種字連內容一起刪掉。統一用 notifier 既有的 escape helper。
+from notifier import _esc as _E, _esc_attr as _EA
 
 
 # Telegram 訊息上限 4096 chars (HTML)
@@ -184,9 +189,9 @@ def _section_ai_news() -> str:
             publisher = n.get("publisher", "")
             link = n.get("link")
             if link:
-                lines.append(f"  • <a href=\"{link}\">{title}</a> <i>({publisher})</i>")
+                lines.append(f"  • <a href=\"{_EA(link)}\">{_E(title)}</a> <i>({_E(publisher)})</i>")
             else:
-                lines.append(f"  • {title} <i>({publisher})</i>")
+                lines.append(f"  • {_E(title)} <i>({_E(publisher)})</i>")
         return "\n".join(lines)
     except Exception:
         return ""
@@ -222,9 +227,9 @@ def _section_macro_news() -> str:
             publisher = n.get("publisher", "")
             link = n.get("link")
             if link:
-                lines.append(f"  • <a href=\"{link}\">{title}</a> <i>({publisher})</i>")
+                lines.append(f"  • <a href=\"{_EA(link)}\">{_E(title)}</a> <i>({_E(publisher)})</i>")
             else:
-                lines.append(f"  • {title} <i>({publisher})</i>")
+                lines.append(f"  • {_E(title)} <i>({_E(publisher)})</i>")
         return "\n".join(lines)
     except Exception:
         return ""
@@ -255,7 +260,7 @@ def _section_tw_picks() -> str:
             cat_zh = {
                 "early_stage": "起漲", "momentum": "動能", "reversal": "反轉"
             }.get(cat, cat)
-            line = f"  {i}. <b>{sid} {name}</b> [{cat_zh}] 分{score} 空間~{upside}%"
+            line = f"  {i}. <b>{_E(sid)} {_E(name)}</b> [{_E(cat_zh)}] 分{_E(score)} 空間~{_E(upside)}%"
             if lv.get("entry_low") and lv.get("target") and lv.get("stop"):
                 line += f"\n     進{lv['entry_low']}~{lv.get('entry_high')} 目{lv['target']} 損{lv['stop']}"
             lines.append(line)
@@ -263,7 +268,7 @@ def _section_tw_picks() -> str:
             reasons = p.get("reasons", [])
             if reasons:
                 short_reason = reasons[0][:60]
-                lines.append(f"     ✓ {short_reason}")
+                lines.append(f"     ✓ {_E(short_reason)}")
 
         # === 帳本: 把今天推出去的 Top 5 記下來, 明早晨報驗收「隔一個交易日有沒有漲」 ===
         # price_is_last_close=True: 08:00 台股還沒開盤, upside_screener 給的「現價」
@@ -379,8 +384,11 @@ def _section_events() -> str:
 # ---------------------------------------------------------------------------
 # 組裝 + 推播
 # ---------------------------------------------------------------------------
-# 晨報的「排程目標時間」(TPE 分鐘數) — 只用來算延遲幾分, 改 cron 時请同步。
+# 晨報的「排程目標時間」(TPE 分鐘數) — 只用來算延遲幾分, 改 cron 時請同步。
 SCHEDULED_TPE_MIN = 8 * 60  # 08:00 TPE
+# 去重時間窗: 主 cron + 備援 cron 之間可能差 1~2 小時 (GitHub 排隊延遲),
+# 窗要夠大才擋得住; 5 小時內只推一封晨報。
+DEDUP_WINDOW_MIN = 300
 
 
 def compose_brief() -> str:
@@ -419,6 +427,32 @@ def main():
     if not notifier.is_configured():
         print("[morning_brief] TG 未設定, 略過", flush=True)
         return 1
+
+    # === 排程去重守衛 ===
+    # 為什麼晨報也需要: GitHub Actions 的 cron 排隊延遲不可控 (常 1~2 小時),
+    # 所以 morning_brief.yml 現在排了「主 + 2 條備援」共 3 條 cron —— 哪條先跑到就哪條推,
+    # 後面的被這個守衛擋掉。沒有這道守衛, 備援 cron 會讓你一早收到三封一樣的晨報。
+    # 手動 workflow_dispatch 不被擋 (要能強制補推), 但一樣會登記 claim,
+    # 免得本機準時觸發推完後, 遲到的 cron 又推一次。
+    # fail-open: 守衛自己出任何錯都照送, 寧可重複也不漏推。
+    try:
+        import os as _os
+        import push_dedup as _pd
+        _slot = "morning_brief"
+        _is_manual = _os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
+        if _is_manual:
+            # 用 force_claim: reset() 在 merge-on-save 下刪不掉已持久化的 claim
+            _pd.force_claim(_slot)
+            print("[morning_brief] 手動觸發 — 不擋, 已重新登記 claim", flush=True)
+        elif _pd.was_claimed_recently(_slot, window_min=DEDUP_WINDOW_MIN):
+            # 唯讀檢查。注意「已成功推過」才算數 —— claim 是在下面送出成功後才登記的,
+            # 若 08:02 那班在組稿階段就掛了, 這裡不會被擋, 08:13 / 08:27 的備援 cron
+            # 仍然補得上。 (若在這裡就先 claim, 備援等於被自己廢掉。)
+            print("[morning_brief] 今天已推過晨報 (備援 cron 重複觸發) → 跳過", flush=True)
+            return 0
+    except Exception as _de:
+        print(f"[morning_brief] dedup 守衛例外, fail-open 照送: {_de}", flush=True)
+
     print("[morning_brief] 組裝晨報…", flush=True)
     t0 = time.time()
     msg = compose_brief()
@@ -427,6 +461,12 @@ def main():
     ok, info = notifier.send_message(msg, disable_preview=True)
     if ok:
         print(f"[morning_brief] ✓ 推播成功", flush=True)
+        # 推成功了才登記 claim → 備援 cron 之後才會被擋掉
+        try:
+            import push_dedup as _pd2
+            _pd2.force_claim("morning_brief")
+        except Exception as _ce:
+            print(f"[morning_brief] claim 登記失敗 (non-fatal): {_ce}", flush=True)
         return 0
     else:
         print(f"[morning_brief] ✗ 推播失敗: {info}", flush=True)

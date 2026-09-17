@@ -27,7 +27,8 @@ from typing import Dict, List
 
 # 門檻 (可調)
 BASIS_ANOMALY = 60.0        # 升貼水 ±60 點 = 異常
-RETAIL_EXTREME_PCT = 70.0   # 散戶單邊 ≥70% = 極端反指標
+RETAIL_EXTREME_PCT = 70.0   # (保留, 目前未使用 — FinMind 沒有給散戶多空「比例」)
+RETAIL_EXTREME_NET = 8000   # 小台散戶淨留倉 ±8000 口 = 極端反指標 (與 producer 的 signal 門檻一致)
 INST_FLIP_DAYS = 2          # 法人連 N 日轉向
 
 COOLDOWN_MIN = 90            # 90 min 內不重複推同種
@@ -63,9 +64,14 @@ def _classify_basis(basis: float, twii: float) -> Dict:
 
 def _check_basis_alert(snap: Dict) -> Dict:
     """檢查升貼水異常."""
+    # Bug fix (2026-09): 原本讀 "twii_close" / "spot_price", 但
+    # institutional_positioning._fetch_futures_basis() 回的只有 basis / basis_pct / signal,
+    # 從來沒有這兩個 key → twii 恆為 None → _classify_basis 直接回 neutral → 永不觸發。
+    # producer 端已補上 "spot", 這裡改讀它 (舊 key 保留當 fallback)。
     basis_info = snap.get("basis") or {}
     basis = basis_info.get("basis")
-    twii = basis_info.get("twii_close") or basis_info.get("spot_price")
+    twii = (basis_info.get("spot") or basis_info.get("twii_close")
+            or basis_info.get("spot_price"))
     if basis is None:
         return {}
     cls = _classify_basis(basis, twii)
@@ -85,14 +91,20 @@ def _check_basis_alert(snap: Dict) -> Dict:
 
 def _check_inst_flip_alert(snap: Dict) -> Dict:
     """檢查法人多空淨額連續轉向."""
-    fut = snap.get("inst_futures") or {}
-    # FinMind TaiwanFutOpt 抓的 net_oi (open_interest_net) — 看趨勢
+    # Bug fix (2026-09): 兩個 key 都錯 —
+    #   1. snapshot 裡的 key 是 "futures" 不是 "inst_futures" → fut 恆為 {}
+    #   2. producer 從來沒有算過 "foreign_net_change_5d"
+    # 它有的是 fut["data"] (最近 5 個交易日的 foreign_oi) 與 fut["foreign_net_oi"] (最新一日),
+    # 所以 5 日變化在這裡自己從 data 頭尾算。
+    fut = snap.get("futures") or snap.get("inst_futures") or {}
     foreign_net = fut.get("foreign_net_oi")
     if foreign_net is None:
         return {}
-    foreign_change = fut.get("foreign_net_change_5d")
-    if foreign_change is None:
+    series = [d.get("foreign_oi") for d in (fut.get("data") or [])
+              if d.get("foreign_oi") is not None]
+    if len(series) < 2:
         return {}
+    foreign_change = float(series[-1]) - float(series[0])
     if foreign_change >= 5000:
         return {
             "type": "inst_flip_bullish",
@@ -116,28 +128,31 @@ def _check_inst_flip_alert(snap: Dict) -> Dict:
 
 def _check_retail_extreme_alert(snap: Dict) -> Dict:
     """檢查散戶反指標."""
+    # Bug fix (2026-09): 原本讀 "long_pct" / "short_pct", 但
+    # institutional_positioning._fetch_retail_mtx() 回的是 {"retail_net": 口數, "signal": str},
+    # 根本沒有百分比欄位 → 兩個值恆為 None → 直接 return {} → 這條訊號永不觸發。
+    # 改用它真的有的「散戶淨留倉口數」, 門檻沿用 producer 自己在 signal 裡用的 ±8000 口。
     retail = snap.get("retail_mtx") or {}
-    long_pct = retail.get("long_pct")
-    short_pct = retail.get("short_pct")
-    if long_pct is None and short_pct is None:
+    retail_net = retail.get("retail_net")
+    if retail_net is None:
         return {}
-    if long_pct is not None and long_pct >= RETAIL_EXTREME_PCT:
+    if retail_net >= RETAIL_EXTREME_NET:
         return {
             "type": "retail_long_extreme",
             "tier": 2,
             "signal": "bearish_contra",
             "action": "微台偏空 (散戶反指標)",
             "title": "小台散戶過度看多",
-            "reason": f"散戶多單佔 {long_pct:.1f}% (≥{RETAIL_EXTREME_PCT}%), 反指標見頂",
+            "reason": f"散戶淨留多 {retail_net:+,.0f} 口 (≥{RETAIL_EXTREME_NET:,}), 反指標見頂",
         }
-    if short_pct is not None and short_pct >= RETAIL_EXTREME_PCT:
+    if retail_net <= -RETAIL_EXTREME_NET:
         return {
             "type": "retail_short_extreme",
             "tier": 2,
             "signal": "bullish_contra",
             "action": "微台偏多 (散戶反指標)",
             "title": "小台散戶過度看空",
-            "reason": f"散戶空單佔 {short_pct:.1f}% (≥{RETAIL_EXTREME_PCT}%), 反指標見底",
+            "reason": f"散戶淨留空 {retail_net:+,.0f} 口 (≤-{RETAIL_EXTREME_NET:,}), 反指標見底",
         }
     return {}
 
@@ -176,7 +191,14 @@ def check_tx_futures_alerts() -> List[Dict]:
     except Exception as e:
         print(f"[tx_futures] snapshot fail: {e}", flush=True)
         return []
-    twii = (snap.get("basis") or {}).get("twii_close")
+    # Bug fix (2026-09-18): institutional_positioning._fetch_futures_basis() 回的 key
+    # 是 "spot" (見該檔 :227/:259), 沒有 "twii_close" → twii 恆為 None →
+    # _entry_advice() 直接 return {} → 進場價/停損/目標/R:R 永遠不會出現在推播上。
+    # 同檔 _check_basis_alert() 早就改讀 spot 了, 這行漏改。
+    _basis_info = snap.get("basis") or {}
+    twii = (_basis_info.get("spot")
+            or _basis_info.get("twii_close")
+            or _basis_info.get("spot_price"))
     # 1. 升貼水
     a1 = _check_basis_alert(snap)
     if a1: alerts.append(a1)

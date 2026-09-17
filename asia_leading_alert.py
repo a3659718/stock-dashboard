@@ -60,14 +60,29 @@ def _fetch_intraday_pct_vs_open(symbol: str) -> Dict:
         c = df["Close"].astype(float)
         cur = float(c.iloc[-1])
         # 今日 open = 今日第一根 bar 的 open
+        # Bug fix (2026-09-18): data_sources.fetch_yf_history() 內部做過 reset_index(),
+        # 回來的 df 是 RangeIndex → hasattr(df.index, "date") 恆為 False → 永遠走 else,
+        # op 變成「最後一根 5m K 自己的開盤價」, pct_vs_open 只是單根 5 分鐘漲跌幅,
+        # 幾乎不可能到 ±1% → 這則警報從上線到現在一則都沒推過。
+        # 改成用日期欄位切出今日 bars 再取第一根 Open (同 strong_stock_alert.py 的作法)。
         try:
-            if hasattr(df.index, "date"):
+            import pandas as _pd
+            _dt_col = None
+            for _c in ("Datetime", "Date", "date", "index"):
+                if _c in df.columns:
+                    _dt_col = _c
+                    break
+            if _dt_col is not None:
+                _ts = _pd.to_datetime(df[_dt_col], errors="coerce")
+                _today = _ts.iloc[-1].date()
+                today_df = df[_ts.dt.date == _today]
+                op = (float(today_df["Open"].iloc[0]) if not today_df.empty
+                      else float(df["Open"].iloc[-1]))
+            elif hasattr(df.index, "date"):
                 today = df.index[-1].date()
                 today_df = df[df.index.date == today]
-                if not today_df.empty:
-                    op = float(today_df["Open"].iloc[0])
-                else:
-                    op = float(df["Open"].iloc[-1])
+                op = (float(today_df["Open"].iloc[0]) if not today_df.empty
+                      else float(df["Open"].iloc[-1]))
             else:
                 op = float(df["Open"].iloc[-1])
         except Exception:

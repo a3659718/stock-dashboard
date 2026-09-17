@@ -494,8 +494,11 @@ def time_ago(iso_str: str) -> str:
     if not iso_str:
         return ""
     try:
+        # Bug fix (2026-09-18): fromisoformat 去掉 Z 之後是 tz-naive, 減 aware 會丟
+        # TypeError → 100% 落進 except 回 iso_str[:16], 「N 小時前」從來沒顯示過。
+        # 統一用 naive UTC (與同檔 :91/:197 的 36 小時過濾一致)。
         d = dt.datetime.fromisoformat(iso_str.replace("Z", ""))
-        delta = dt.datetime.now(dt.timezone.utc) - d
+        delta = dt.datetime.utcnow() - d
         sec = int(delta.total_seconds())
         if sec < 60:
             return f"{sec} 秒前"
@@ -513,8 +516,11 @@ def _humanize_iso_time(iso_str: str) -> str:
     if not iso_str:
         return ""
     try:
+        # Bug fix (2026-09-18): fromisoformat 去掉 Z 之後是 tz-naive, 減 aware 會丟
+        # TypeError → 100% 落進 except 回 iso_str[:16], 「N 小時前」從來沒顯示過。
+        # 統一用 naive UTC (與同檔 :91/:197 的 36 小時過濾一致)。
         d = dt.datetime.fromisoformat(iso_str.replace("Z", ""))
-        delta = dt.datetime.now(dt.timezone.utc) - d
+        delta = dt.datetime.utcnow() - d
         sec = int(delta.total_seconds())
         if sec < 60:
             return f"{sec} 秒前"

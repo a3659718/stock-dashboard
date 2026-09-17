@@ -64,7 +64,9 @@ def _theme_avg_close(stock_ids: List[str], days: int = 10) -> Optional[pd.Series
         return None
     df = pd.concat(series_list, axis=1)
     # 每檔股自己 normalize 到 1 (0 日收盤為基期), 再取平均 — 避免高價股主導
-    df_norm = df.div(df.iloc[0]).fillna(method="ffill")
+    # Bug fix (2026-09-18): fillna(method="ffill") 在 pandas 3.0 已移除 (TypeError),
+    # 一旦升級整個「萌芽族群」區塊會靜默消失 (外層 caller 只印一行 log)。改用 .ffill()。
+    df_norm = df.div(df.iloc[0]).ffill()
     return df_norm.mean(axis=1)
 
 
@@ -118,8 +120,11 @@ def _check_smart_money_flow(theme_ids: List[str], min_buyers: int = 3) -> Option
             it = inst.get("Investment_Trust") or {}
             fi_consec = fi.get("consecutive_days", 0) or 0
             fi_5d = fi.get("5d_total", 0) or 0
-            it_5d = it.get("5d_total", 0) or 0
+            it_5d = it.get("5d_total_lots", (it.get("5d_total", 0) or 0) / 1000.0) or 0
             fi_in = fi_consec >= 3 and fi_5d > 0
+            # Bug fix (2026-09): docstring 寫「投信 5d > 1000 張」, 但 it_5d 來自
+            # chip_analyzer 的 5d_total, 單位是「股」(FinMind 原始值, 沒有 /1000)。
+            # 原本的 1000 只等於 1 張 → 只要投信淨買不是零就算「卡位」, 訊號恆真。
             it_in = it_5d >= 1000
             if fi_in:
                 fi_buyers.append(sid)

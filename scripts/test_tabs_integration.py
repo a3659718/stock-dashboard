@@ -69,7 +69,7 @@ def main():
         import tw_screener
         labels = tw_screener.CONDITION_LABELS
         # app.py line 1418 expects these conditions
-        required = ("break_ma", "volume_burst", "short_increase", "invtrust_first_buy",
+        required = ("break_ma", "volume_burst", "short_increase", "invtrust_first_buy_10",
                     "invtrust_consecutive", "invtrust_5d_acc", "capital_ratio",
                     "above_ma_uptrend", "kd_golden_cross", "macd_turn_positive")
         for k in required:
