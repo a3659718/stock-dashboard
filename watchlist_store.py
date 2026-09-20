@@ -21,6 +21,7 @@ import copy
 import datetime as dt
 import json
 import os
+import re
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -110,6 +111,71 @@ def _read_persisted_raw() -> Dict:
     return {}
 
 
+# ---------------------------------------------------------------------------
+# monitor_state 體積防線 (2026-09-20)
+# ---------------------------------------------------------------------------
+# 背景: 整份 monitor_state 以一個 JSON 字串存在 Google Sheet 的「單一儲存格」(A1),
+# 而 Google Sheets 單格上限是 50,000 字元。state 裡有 5 個「以日期當 key」的累積器
+# 完全沒有任何清理, 每個交易日各長一個 key:
+#     tx_futures_alert[YYYY-MM-DD]              (tx_futures_alert.py:267)
+#     strong_stock_alert[YYYY-MM-DD]            (strong_stock_alert.py:293)
+#     intraday_strong_alert[YYYY-MM-DD]         (strong_stock_alert.py:533)
+#     intraday_weak_alert[YYYY-MM-DD]           (short_candidates.py:244)
+#     trump_policy_alert.daily_count[YYYY-MM-DD](trump_policy_alert.py:632)
+# 再加上原本用 indent=2 序列化 (實測比 compact 大 ~40%), 估算約 500 字元/交易日 →
+# 一年 ~12 萬字元 → 幾個月內就會撐爆 50,000。
+#
+# 撐爆後的失效模式才是真正危險的地方: update_acell 拋例外只被 except 印一行 log,
+# 但「讀取」仍然成功 (A1 還留著最後一份合法 blob) → 全系統從此讀到一份凍結的 state:
+#   - push_cap 每次看到 date 不符 → 重置 count=0 → 每日推播上限等於取消
+#   - slot_dedup / alert_dedup 凍結 → 備援 cron 與跨類去重各自重推
+# 也就是「某一天開始被推播洗版, 而 log 裡只有一行 gsheets update failed」。
+#
+# 這裡集中處理三件事, 讓它不再是靜默失敗:
+#   1. 緊湊序列化 (separators) — 對現況實測省 ~29%, 日期 key 越多省越多
+#   2. 泛用 prune — 掃出所有「YYYY-MM-DD」形狀的 key 依保留天數清掉 (含未來新增的)
+#   3. 體積告警 — 超過軟門檻就大聲印出來, 不要等它撞上硬上限
+_STATE_SOFT_LIMIT = 35000      # 超過就告警
+_STATE_HARD_LIMIT = 50000      # Google Sheets 單格硬上限
+_DATE_KEY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+# 保留天數例外 — 跟該模組自己的邏輯一致 (holdings_tracker 自己就留 60 天給準確率統計)
+_PRUNE_RETENTION_DAYS = {"holdings_tracker.predictions": 60}
+_PRUNE_DEFAULT_DAYS = 21
+
+
+def _prune_date_keys(state: Dict) -> int:
+    """清掉 state 裡所有「以日期當 key」且過期的項目, 回傳清掉幾個。
+
+    只處理深度 1 與 2 (state[k] 或 state[k][k2] 本身是 {日期: ...} 的 dict),
+    其餘結構一概不動。日期以 TPE 為準 (與各模組寫入時一致)。
+    這支是泛用的 — 日後任何新模組再開一個日期累積器, 不必改這裡就會被涵蓋。
+    """
+    removed = 0
+    today = (dt.datetime.utcnow() + dt.timedelta(hours=8)).date()
+
+    def _prune_one(d: Dict, path: str) -> int:
+        keys = [k for k in d.keys() if isinstance(k, str) and _DATE_KEY_RE.match(k)]
+        if not keys:
+            return 0
+        days = _PRUNE_RETENTION_DAYS.get(path, _PRUNE_DEFAULT_DAYS)
+        cutoff = (today - dt.timedelta(days=days)).strftime("%Y-%m-%d")
+        cnt = 0
+        for k in keys:
+            if k < cutoff:
+                d.pop(k, None)
+                cnt += 1
+        return cnt
+
+    for k, v in list(state.items()):
+        if not isinstance(v, dict):
+            continue
+        removed += _prune_one(v, k)
+        for k2, v2 in list(v.items()):
+            if isinstance(v2, dict):
+                removed += _prune_one(v2, f"{k}.{k2}")
+    return removed
+
+
 def _flush_state(state: Dict) -> None:
     """實際寫入 state (本地檔案 + GSheet). 跟舊版 save_monitor_state 邏輯相同.
 
@@ -143,7 +209,22 @@ def _flush_state(state: Dict) -> None:
             state = merged
     except Exception as _me:
         print(f"[watchlist_store] monitor_state merge skip (non-fatal): {_me}", flush=True)
-    blob = json.dumps(state, ensure_ascii=False, indent=2)
+    # 體積防線 (見上方 _prune_date_keys 的說明): 先清過期日期 key, 再緊湊序列化。
+    try:
+        _pruned = _prune_date_keys(state)
+        if _pruned:
+            print(f"[watchlist_store] monitor_state prune: 清掉 {_pruned} 個過期日期 key",
+                  flush=True)
+    except Exception as _pe:
+        print(f"[watchlist_store] monitor_state prune skip (non-fatal): {_pe}", flush=True)
+    # separators 去掉 indent 的空白 — 同樣內容, 對現況實測省 ~29%。
+    # (要人眼看 monitor_state.json 時用 `python -m json.tool monitor_state.json`)
+    blob = json.dumps(state, ensure_ascii=False, separators=(",", ":"))
+    if len(blob) > _STATE_SOFT_LIMIT:
+        print(f"[watchlist_store] ⚠️ monitor_state 已達 {len(blob)} 字元 / 上限 "
+              f"{_STATE_HARD_LIMIT} (Google Sheets 單格)。超過上限後 GSheet 寫入會失敗而"
+              f"讀取仍成功 → 去重表與每日上限會凍結在舊值, 症狀是推播洗版。"
+              f"請檢查是哪個 key 在長大。", flush=True)
     try:
         _atomic_write_text(MONITOR_STATE_FILE, blob)
     except Exception as _e:

@@ -57,12 +57,45 @@ TW_THEMES: Dict[str, List[str]] = {
 # ---------------------------------------------------------------------------
 # 流動性 universe (給「依產業分類」用)
 # ---------------------------------------------------------------------------
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=1800, show_spinner=False)
 def universe_with_industry(top_n: int = 200) -> pd.DataFrame:
+    """回「成交值最大的 top_n 檔台股 + 產業分類」。
+
+    Bug fix (2026-09-20): 原本是 info.head(top_n) —— 但 ds.get_taiwan_stock_info()
+    回的是依股票代號遞增的清單, 完全沒有依流動性排序。於是三個呼叫端
+        closing_analyzer.analyze_foreign_dumping()   max_scan=80
+        closing_analyzer.pick_next_day_breakout()    max_scan=150
+        avoid_signals.find_avoid_picks()             max_scan=80
+    掃到的其實是 1101 台泥 → 1216 統一 那一段水泥/食品/塑膠/紡織股, 2330 / 2454 /
+    2317 / 3231 這些真正會有外資出貨與籌碼訊號的權值股永遠不在候選池內 ——
+    而且輸出外觀跟「今天沒有訊號」一模一樣, 完全看不出來。
+
+    改成用全市場成交值排序 (ds.fetch_tw_liquidity_rank(), 一次 FinMind 請求),
+    並先排除 ETF/權證/全額交割 (否則 0050/0056 這類會直接佔滿前幾名, 但它們不是
+    這些呼叫端要找的標的)。排序資料拿不到時退回舊行為, 確保不會比現況更糟。
+    """
     info = ds.get_taiwan_stock_info()
     if info.empty:
         return pd.DataFrame()
-    return info.head(top_n).reset_index(drop=True)
+    try:
+        tradeable = ds.filter_tradeable_stocks(info, exclude_etf=True)
+        if tradeable.empty:
+            tradeable = info
+    except Exception:
+        tradeable = info
+    try:
+        rank = ds.fetch_tw_liquidity_rank()
+        if rank is not None and not rank.empty:
+            order = {str(s): i for i, s in enumerate(rank["stock_id"].astype(str))}
+            sub = tradeable.copy()
+            sub["_rk"] = sub["stock_id"].astype(str).map(order)
+            sub = sub.dropna(subset=["_rk"]).sort_values("_rk")
+            if len(sub) >= min(top_n, 30):
+                return sub.head(top_n).drop(columns=["_rk"]).reset_index(drop=True)
+            print(f"[sector_pulse] 流動性排序只對到 {len(sub)} 檔, 退回代號順序", flush=True)
+    except Exception as e:
+        print(f"[sector_pulse] 流動性排序失敗, 退回代號順序: {e}", flush=True)
+    return tradeable.head(top_n).reset_index(drop=True)
 
 
 # ---------------------------------------------------------------------------

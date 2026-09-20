@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import datetime as dt
 import time
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
 import requests
@@ -207,6 +207,49 @@ def filter_tradeable_stocks(info: pd.DataFrame, exclude_etf: bool = True) -> pd.
         sub = sub[~sub["stock_name"].astype(str).str.contains(r"\*", na=False)]
         sub = sub[~sub["stock_name"].astype(str).str.contains("DR$", na=False)]  # 排除 TDR
     return sub.reset_index(drop=True)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_tw_liquidity_rank(days: int = 10) -> pd.DataFrame:
+    """全市場近 N 個日曆日的「平均成交值(元)」排行 — 一次 API call, 不逐檔抓。
+
+    回 DataFrame[stock_id, avg_amount], 依 avg_amount 由大到小; 失敗回空 DataFrame。
+
+    為什麼需要這支 (2026-09-20):
+      sector_pulse.universe_with_industry() 的 docstring 與呼叫端都說它回的是
+      「流動性最佳的 top N 台股」, 但實作只是 info.head(top_n) —— 而
+      get_taiwan_stock_info() 回的清單是依股票代號遞增排序的, 所以 top 80 實際上是
+      1101 台泥 ~ 1216 統一 那一段, 2330 / 2454 / 2317 永遠不在候選池內。
+      這裡提供真正的流動性排序依據。不帶 data_id 時 FinMind 會回整個市場,
+      一次請求就夠, 比逐檔抓 1000 次便宜非常多。
+    """
+    try:
+        _today_tw = (dt.datetime.utcnow() + dt.timedelta(hours=8)).date()
+        start = (_today_tw - dt.timedelta(days=days)).strftime("%Y-%m-%d")
+        end = _today_tw.strftime("%Y-%m-%d")
+        df = _finmind_get("TaiwanStockPrice", start_date=start, end_date=end)
+        if df is None or df.empty or "stock_id" not in df.columns:
+            return pd.DataFrame()
+        amt_col = next((c for c in ("Trading_money", "Trading_Money", "trading_money")
+                        if c in df.columns), None)
+        if amt_col is None:
+            # 欄名不同版本可能不一致 → 退而用「成交量 × 收盤價」估成交值
+            vol_col = next((c for c in ("Trading_Volume", "trading_volume") if c in df.columns), None)
+            close_col = next((c for c in ("close", "Close") if c in df.columns), None)
+            if not (vol_col and close_col):
+                print("[data_sources] liquidity_rank: 找不到成交值/成交量欄位", flush=True)
+                return pd.DataFrame()
+            df["_amt"] = (pd.to_numeric(df[vol_col], errors="coerce")
+                          * pd.to_numeric(df[close_col], errors="coerce"))
+            amt_col = "_amt"
+        df[amt_col] = pd.to_numeric(df[amt_col], errors="coerce")
+        out = (df.groupby("stock_id")[amt_col].mean()
+                 .reset_index().rename(columns={amt_col: "avg_amount"}))
+        out = out.dropna(subset=["avg_amount"])
+        return out.sort_values("avg_amount", ascending=False).reset_index(drop=True)
+    except Exception as e:
+        print(f"[data_sources] fetch_tw_liquidity_rank failed: {e}", flush=True)
+        return pd.DataFrame()
 
 
 # ---------------------------------------------------------------------------
@@ -479,6 +522,33 @@ def fetch_yf_history(symbol: str, period: str = "6mo", interval: str = "1d",
     # === 寫 cache ===
     _YF_FETCH_CACHE[cache_key] = (now, result_df.copy() if not result_df.empty else result_df)
     return result_df
+
+
+def check_daily_freshness(df: pd.DataFrame, max_staleness_days: int = 2,
+                           today: Optional[dt.date] = None) -> Tuple[bool, Optional[dt.date]]:
+    """檢查日線 df 最後一筆的日期夠不夠新鮮 (yfinance 偶爾會延遲/回舊資料).
+
+    回 (is_fresh, latest_date)。
+
+    背景: 這個「差距 >= N 天視為過期」檢查, 原本在 index_alerts.py 的
+    _fetch_systemic_snapshot 跟 entry_timing.py 各自土砲一份、邏輯幾乎一樣。
+    這裡抽成共用版本, 給其他還沒做這個檢查、但一樣會被 yfinance 延遲影響的
+    模組 (例如 tw_post_market_summary.py 的「大盤 / 龍頭股今日%」) 直接用,
+    避免同一個 bug 在第 3、4...個地方各自重新發明一次、也各自漏掉。
+
+    today 沒傳時預設用 TPE (UTC+8) 校正過的日期 — 跟 holiday_check.py /
+    entry_timing.py 同一套邏輯, 不是 dt.date.today() 的 UTC 日期。
+    """
+    if df is None or df.empty:
+        return False, None
+    try:
+        date_col = "Date" if "Date" in df.columns else df.columns[0]
+        latest_d = pd.to_datetime(df[date_col]).dt.date.iloc[-1]
+    except Exception:
+        return False, None
+    if today is None:
+        today = (dt.datetime.utcnow() + dt.timedelta(hours=8)).date()
+    return (today - latest_d).days < max_staleness_days, latest_d
 
 
 def _yf_cache_stats() -> Dict:

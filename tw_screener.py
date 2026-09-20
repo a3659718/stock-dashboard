@@ -733,19 +733,25 @@ def run_all_screens(
         # === 流動性 / 股價門檻過濾 (強勢股例外) ===
         if not daily.empty and (params.min_avg_volume > 0 or params.min_price > 0):
             d_clean = daily.drop_duplicates(subset=["stock_id", "date"], keep="last")
+            # Bug fix (2026-09-20): FinMind TaiwanStockPrice.Trading_Volume 的單位是
+            # 「股」(見 chip_analyzer.py:144 的同一段說明, 那邊已經做了 /1000 換算),
+            # 但 params.min_avg_volume 的語意是「張」(app.py 的 widget 標籤也寫「張」),
+            # 預設 500。原本直接拿「股」去比 500 → 實際門檻只有 0.5 張, 「排除冷門股」
+            # 這道閘門從來沒有生效過: 日均 3 張的水餃股只要命中任一技術條件就會進
+            # combined 並被推播。這裡先換算成張再比。
             avg5_vol_map = d_clean.groupby("stock_id")["Trading_Volume"].apply(
-                lambda s: float(s.iloc[-6:-1].mean()) if len(s) >= 6 else 0.0
+                lambda s: float(s.iloc[-6:-1].mean()) / 1000.0 if len(s) >= 6 else 0.0
             ).to_dict()
-            combined["_avg5_vol"] = combined["stock_id"].map(avg5_vol_map).fillna(0)
+            combined["_avg5_vol_lots"] = combined["stock_id"].map(avg5_vol_map).fillna(0)
             today_pct = combined.get("今日%")
-            cond_volume = combined["_avg5_vol"] >= params.min_avg_volume
+            cond_volume = combined["_avg5_vol_lots"] >= params.min_avg_volume
             cond_price = combined["現價"].fillna(0) >= params.min_price if "現價" in combined else True
             if params.keep_strong_anyway and today_pct is not None:
                 cond_strong = today_pct.fillna(0) >= 5.0
             else:
                 cond_strong = pd.Series([False] * len(combined), index=combined.index)
             keep = (cond_volume & cond_price) | cond_strong
-            combined = combined[keep].drop(columns=["_avg5_vol"]).reset_index(drop=True)
+            combined = combined[keep].drop(columns=["_avg5_vol_lots"]).reset_index(drop=True)
     else:
         combined = pd.DataFrame(columns=["stock_id", "stock_name", "market", "hit", "hit_count", "hits_label"])
 

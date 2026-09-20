@@ -18,6 +18,47 @@ def _us_today_str() -> str:
     return (now_utc - dt.timedelta(hours=4 if dst else 5)).strftime("%Y-%m-%d")
 
 
+def _tpe_today_str() -> str:
+    return (dt.datetime.utcnow() + dt.timedelta(hours=8)).strftime("%Y-%m-%d")
+
+
+def _market_today_str(market: str) -> str:
+    """依標的所屬市場回它自己的「今天」。
+
+    Bug fix (2026-09-20): 這支模組的 universe 同時含台股與美股 (watchlist +
+    holdings), 但去重 state 原本整包共用一個「美東日期」(_us_today_str)。
+    台股 session 的 monitor cron 落在 UTC 01:08~04:38, 而夏令時 (UTC-4) 下美東要到
+    UTC 04:00 才換日 —— 日界正好落在台股盤中 (TPE 12:08):
+
+        tick (UTC)      _us_today_str()   TPE
+        01:08 ~ 03:38   昨天              09:08 ~ 11:38
+        04:08 / 04:38   今天              12:08 / 12:38   ← 這裡「換日」
+
+    而觸發條件 (今日 +3%、量比 ≥3、突破 60 日高) 是用日線算的, 早上成立整天都成立,
+    所以 12:08 那個 tick 會清空 alerted 後把早上推過的每一檔原封不動再推一次,
+    同時再燒一輪 push_cap 的每日次要額度。改成各自用自己市場的日界。
+    """
+    return _us_today_str() if str(market).upper() == "US" else _tpe_today_str()
+
+
+def _bucket(vb: dict, market: str) -> dict:
+    """取得該市場的當日去重 bucket (跨日自動重置)。
+
+    state shape: {"TW": {"date": ..., "alerted": [...]}, "US": {...}}
+    舊版是單層 {"date":..., "alerted":[...]} —— 這裡遇到會自動汰換掉, 最多只損失
+    「切換當天」的一次去重, 不會誤推歷史資料。
+    """
+    mk = "US" if str(market).upper() == "US" else "TW"
+    b = vb.get(mk)
+    if not isinstance(b, dict):
+        b = {}
+    today = _market_today_str(mk)
+    if b.get("date") != today:
+        b = {"date": today, "alerted": []}
+    vb[mk] = b
+    vb.pop("date", None)        # 舊版單層殘留
+    vb.pop("alerted", None)
+    return b
 
 
 def _scan_one_stock(sid: str, market: str = "TW") -> Dict | None:
@@ -70,11 +111,9 @@ def check_volume_breakout() -> List[Dict]:
     """掃 watchlist + holdings 找量爆突破. 回 alert list."""
     state = watchlist_store.load_monitor_state()
     vb_state = state.setdefault("volume_breakout_alert", {})
-    today_str = _us_today_str()
-    if vb_state.get("date") != today_str:
-        vb_state.clear()
-        vb_state.update({"date": today_str, "alerted": []})
-    alerted: set = set(vb_state.get("alerted") or [])
+    # 去重 bucket 依市場分開 (見 _market_today_str 的說明)
+    alerted_by_mkt = {mk: set(_bucket(vb_state, mk).get("alerted") or [])
+                      for mk in ("TW", "US")}
 
     universe = []
     try:
@@ -101,8 +140,12 @@ def check_volume_breakout() -> List[Dict]:
         futs = {ex.submit(_scan_one_stock, s, m): s for s, m in universe}
         for fut in as_completed(futs):
             r = fut.result()
-            if r and r["symbol"] not in alerted:
-                alerts.append(r)
+            if not r:
+                continue
+            mk = "US" if str(r.get("market", "TW")).upper() == "US" else "TW"
+            if r["symbol"] in alerted_by_mkt[mk]:
+                continue
+            alerts.append(r)
 
     return alerts
 
@@ -113,18 +156,15 @@ def mark_alerts_sent(alerts: List[Dict]) -> None:
     try:
         state = watchlist_store.load_monitor_state()
         vb = state.setdefault("volume_breakout_alert", {})
-        # Bug fix (2026-09-07): 原本這裡用 dt.date.today() (UTC 日期), 但 check_volume_breakout()
-        # 讀的是 _us_today_str() (美東日期)。台股 session 的 monitor cron 落在 UTC 01-05,
-        # 兩者必定差一天 -> 掃描端每個 tick 都判定「換日」清空 alerted -> 同一檔每 30 分鐘重推,
-        # 還會把 push_cap 每日 6 封的次要額度燒光。兩端必須用同一個日界。
-        today_str = _us_today_str()
-        if vb.get("date") != today_str:
-            vb.clear()
-            vb.update({"date": today_str, "alerted": []})
-        a_set = set(vb.get("alerted") or [])
+        # Bug fix (2026-09-07): 讀寫兩端必須用同一個日界 (原本一端 UTC 一端美東,
+        #   每個 tick 都判定換日 → 同一檔每 30 分鐘重推)。
+        # Bug fix (2026-09-20): 再進一步 — 同一個日界對「台股 + 美股混合」的 universe
+        #   仍然是錯的, 美東日界會落在台股盤中。改成每個市場各自一個 bucket。
         for a in alerts:
-            a_set.add(a.get("symbol", ""))
-        vb["alerted"] = sorted(a_set)
+            b = _bucket(vb, a.get("market", "TW"))
+            s = set(b.get("alerted") or [])
+            s.add(a.get("symbol", ""))
+            b["alerted"] = sorted(s)
         state["volume_breakout_alert"] = vb
         watchlist_store.save_monitor_state(state)
     except Exception as e:
@@ -139,10 +179,11 @@ def unmark_alerts_sent(alerts: List[Dict]) -> None:
     try:
         state = watchlist_store.load_monitor_state()
         vb = state.get("volume_breakout_alert") or {}
-        a_set = set(vb.get("alerted") or [])
         for a in alerts:
-            a_set.discard(a.get("symbol", ""))
-        vb["alerted"] = sorted(a_set)
+            b = _bucket(vb, a.get("market", "TW"))
+            s = set(b.get("alerted") or [])
+            s.discard(a.get("symbol", ""))
+            b["alerted"] = sorted(s)
         state["volume_breakout_alert"] = vb
         watchlist_store.save_monitor_state(state)
     except Exception as e:
