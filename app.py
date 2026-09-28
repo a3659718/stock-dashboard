@@ -18,6 +18,7 @@ import ai_analyzer
 import app_styles
 import backtest
 import data_sources as ds
+import dashboard_actions
 import earnings_calendar
 import market_open_picks
 import news_picks
@@ -318,9 +319,8 @@ with st.sidebar:
 
     fm_ok = bool(ds.get_finmind_token())
     tg_ok = notifier.is_configured()
-    fm_pkg = ds.finmind_available()
     st.markdown(
-        f"- FinMind 套件: {'✅' if fm_pkg else '❌ (未安裝/Python 版本不相容)'}  \n"
+        "- FinMind：REST API（不需安裝 SDK）  \n"
         f"- FinMind Token: {'✅' if fm_ok else '❌'}  \n"
         f"- Telegram: {'✅' if tg_ok else '❌'}"
     )
@@ -338,12 +338,7 @@ with st.sidebar:
             "FINMIND_TOKEN = \"eyJ0eXAi...\""
         )
 
-    if not fm_pkg:
-        st.error(
-            "❗ FinMind 套件沒裝起來，最常見原因是 Python 版本是 3.14（套件還沒支援）。"
-            "請到 App ⋮ → Settings → 把 Python version 改成 3.11 後 Save。"
-        )
-    elif not (fm_ok and tg_ok):
+    if not (fm_ok and tg_ok):
         st.info(
             "尚未設定 secrets？請參考 README，到 Streamlit Cloud > App > Settings > Secrets 貼上："
             "`FINMIND_TOKEN`、`TELEGRAM_BOT_TOKEN`、`TELEGRAM_CHAT_ID` (可選 `FINNHUB_TOKEN`、`US_WATCHLIST`)"
@@ -624,6 +619,10 @@ with _tab_stock_outer:
 
     # === 🎯 入場結論置頂 (#3): 按「完整分析」後先算入場評估, 頂端先秀結論 + 目標價 + AI ===
     if analyze_btn and sid_input.strip():
+        # 新分析開始即清掉舊結果，失敗時不混用不同股票/不同時間的資料。
+        for _key in ("entry_result", "last_stock", "last_ai",
+                     f"deep_{sid_input.strip()}", f"ensemble_{sid_input.strip()}"):
+            st.session_state.pop(_key, None)
         try:
             import entry_evaluator as _ee_top
             with st.spinner(f"入場評估 {sid_input.strip()} 中…"):
@@ -1475,6 +1474,7 @@ with tab_hold:
                 )
                 if ok:
                     st.success(f"已加入 {h_sid}")
+                    st.session_state.pop("h_results", None)
                     st.rerun()
                 else:
                     st.error("加入失敗 (可能已達 15 檔上限)")
@@ -1505,6 +1505,7 @@ with tab_hold:
                 with cR2:
                     if st.button("移除", key=f"hdel_{sid}"):
                         holdings_store.remove_holding(sid)
+                        st.session_state.pop("h_results", None)
                         st.rerun()
 
     st.divider()
@@ -1518,6 +1519,7 @@ with tab_hold:
                                disabled=not (current_h and notifier.is_configured()))
 
     if run_analysis:
+        st.session_state.pop("h_results", None)
         with st.spinner("分析中…(每檔約 5-10 秒)"):
             try:
                 results = holdings_analyzer.analyze_all_holdings()
@@ -1689,6 +1691,7 @@ with tab_tw:
         )
 
     if run_btn:
+        st.session_state.pop("tw_result", None)
         try:
             progress_bar = st.progress(0, text="準備掃描…")
             def _update_progress(stage: str, pct: int):
@@ -1713,6 +1716,8 @@ with tab_tw:
         except Exception as e:
             st.error(f"掃描失敗：{e}")
 
+    view = None
+    latest_str = "N/A"
     res = st.session_state.get("tw_result")
     if not res:
         st.info("按上方「重新整理」開始掃描。")
@@ -1829,12 +1834,10 @@ with tab_tw:
                         st.session_state["_tw_last_sent"] = fingerprint
                         st.toast("已自動推送 Telegram", icon="✈️")
 
-            if send_tg_btn:
-                if view is None or (hasattr(view, "empty") and view.empty):
-                    st.warning("⚠️ 還沒有資料 — 請先選條件 + 按執行篩選")
-                else:
-                    msg = notifier.fmt_tw_combined(view, latest_str, market_label="台股篩選")
-                    _send_tg(msg, "台股篩選")
+    if send_tg_btn:
+        msg = "" if view is None or view.empty else notifier.fmt_tw_combined(
+            view, latest_str, market_label="台股篩選")
+        _send_tg(msg, "台股篩選")
 
 
 # =============================================================================
@@ -1861,14 +1864,38 @@ with tab_pulse:
     with cE:
         limit_up_btn = st.button("🎯 漲停前兆", use_container_width=True, type="primary",
                                   help="不限定題材要先熱, 全題材池掃「安靜吸籌」的價量+籌碼型態, 含進出場價")
+        send_lup_top = st.button(
+            "✈️ Send 漲停前兆 to TG", key="send_lup_top",
+            use_container_width=True,
+            help="送出最近一次漲停前兆掃描結果，不需重新掃描。",
+        )
+        if send_lup_top:
+            import limit_up_precursor as _lup_top
+            _send_tg(_lup_top.fmt_limit_up_precursor_msg(
+                st.session_state.get("limit_up_precursor") or []), "漲停前兆")
     with cF:
-        # 這顆只送「產業分類 / 熱門題材」. 漲停前兆、大戶偷進場各自有專屬 Send 按鈕
-        # (在各自結果區塊下方) — 標題寫清楚, 避免再誤按這顆而以為沒反應.
-        send_pulse_tg = st.button("✈️ Send 族群/題材", use_container_width=True,
-                                  disabled=not notifier.is_configured(),
+        send_pulse_tg = st.button("✈️ Send to TG", use_container_width=True,
                                   key="send_pulse_tg",
-                                  help="只送「📊 產業分類」/「🔥 熱門題材」的結果。"
-                                        "漲停前兆 / 大戶偷進場請用各自結果下方的 Send 按鈕。")
+                                  help="送出本頁最近選擇的分析；產業分類與熱門題材維持合併推送。")
+
+    for _pressed, _result_key in (
+        (pulse_btn, "pulse"), (theme_btn, "themes"), (stealth_btn, "stealth"),
+        (smart_btn, "smart_stealth"), (limit_up_btn, "limit_up_precursor"),
+    ):
+        if _pressed:
+            st.session_state["_pulse_send_target"] = _result_key
+            st.session_state.pop(_result_key, None)
+            if _result_key == "smart_stealth":
+                st.session_state.pop("hot_patterns", None)
+    _send_target = dashboard_actions.pulse_send_target(st.session_state)
+    st.caption(f"通用 Send 將送出：{dashboard_actions.PULSE_SEND_LABELS[_send_target]}（最近選擇的分析）")
+    if send_pulse_tg:
+        try:
+            _msg, _label = dashboard_actions.format_pulse_send(st.session_state)
+            _send_tg(_msg, _label)
+        except Exception as _e:
+            st.toast("推播失敗，請查看錯誤訊息", icon="🚫")
+            st.error(f"推播失敗: {type(_e).__name__}: {_e}")
 
     if smart_btn:
         try:
@@ -2171,12 +2198,7 @@ with tab_pulse:
                     if mc is not None:
                         st.caption(f"估計市值約 {mc/1e8:.0f} 億 · 週轉率 {_f2lup(p.get('turnover_pct'))}%")
 
-            # Bug fix: 這才是「按漲停前兆之後按 Send to TG 沒反應」的根因 —
-            # 上方那排的 send_pulse_tg 只檢查 pulse.sectors / themes.themes, 漲停前兆的
-            # 結果存在 st.session_state["limit_up_precursor"], 不在檢查範圍 → 直接落到
-            # 「還沒有資料」warning, 而那行印在本頁最下面, rerun 後捲不到 = 看起來沒反應.
-            # limit_up_precursor.fmt_limit_up_precursor_msg() 本來就寫好了 (原註解寫
-            # 「先寫好備用」), 只是從來沒有任何地方呼叫它. 這裡把它接上.
+            # 保留原有專用入口，與頂部通用按鈕共用同一份掃描結果。
             send_lup_tg = st.button(
                 "✈️ Send 漲停前兆 to TG", use_container_width=True,
                 key="send_lup_tg", disabled=not notifier.is_configured(),
@@ -2371,35 +2393,6 @@ with tab_pulse:
        and (_themes_check is None or (hasattr(_themes_check, 'empty') and _themes_check.empty)):
         st.info("按上方按鈕開始分析 (盤前/休市時 yfinance 資料可能尚未更新)。")
 
-    if send_pulse_tg:
-        # BUG FIX: 原本條件只看 _sectors_check, 用戶只按「熱門題材」時 send 不會跑
-        # 改成「sectors 有 OR themes 有」就送 (fmt_strong_sectors 內部會處理可選欄位)
-        _has_sectors = (_sectors_check is not None and hasattr(_sectors_check, 'empty')
-                         and not _sectors_check.empty)
-        _has_themes = (_themes_check is not None and hasattr(_themes_check, 'empty')
-                        and not _themes_check.empty)
-        if not (_has_sectors or _has_themes):
-            # Bug fix: 原本只有 st.warning, 而這行印在本分頁最底部 — 使用者按了頂上那排的
-            # Send to TG 之後 rerun 捲回頂端, 根本看不到這句 → 誤以為「按了沒反應」.
-            # 照 _send_tg() 的作法補 st.toast (浮層, 不受捲動位置影響), 並講清楚這顆
-            # 按鈕只送族群/題材, 漲停前兆 / 大戶偷進場要用各自結果下方那顆.
-            st.toast("這顆只送「族群/題材」— 漲停前兆請用結果下方那顆按鈕", icon="⚠️")
-            st.warning(
-                "⚠️ 還沒有資料 — 這顆「Send to TG」只送「📊 產業分類」/「🔥 熱門題材」的結果，"
-                "請先按那兩顆跑分析。\n\n"
-                "若你要推的是「🎯 漲停前兆」或「🕵️ 大戶偷進場」，請用各自結果區塊下方的"
-                "專屬 Send 按鈕。"
-            )
-        else:
-            try:
-                msg = notifier.fmt_strong_sectors(
-                    _sectors_check, leaders_map=_leaders_check,
-                    themes_df=_themes_check, theme_leaders=_leaders_map_check,
-                )
-                _send_tg(msg, "強勢族群/熱門題材")
-            except Exception as _e:
-                st.error(f"推播失敗: {type(_e).__name__}: {_e}")
-
     # ========== 🔎 隱藏概念股探勘 (從新聞反向挖) ==========
     st.divider()
     st.markdown("### 🔎 隱藏概念股探勘")
@@ -2519,6 +2512,7 @@ with tab_growth:
                 st.error(f"清 cache 失敗: {_ce}")
 
     if growth_btn:
+        st.session_state.pop("growth", None)
         try:
             with st.spinner("評估題材股 K 線健康度中…約 30 秒"):
                 st.session_state["growth"] = news_picks.run_news_growth_picks(top_n=10)
@@ -3118,7 +3112,7 @@ with tab_stock:
 with tab_us:
     st.subheader("🇺🇸 美股 Top 10 可進場 (像台股今日可行動)")
     st.caption(
-        "從 us_screener 候選池過篩, 篩 entry_score ≥ 55 的可進場個股, "
+        "從 us_screener 候選池過篩, 篩動能調整後入場分數 ≥ 65 的可進場個股, "
         "卡片含 3 層目標 / 進場區間 / 停損 / 財報日警示 / 同類股 ETF 強度. "
         "候選池可在 Streamlit secrets 加入 `US_WATCHLIST=AAPL,MSFT,...` 自訂。"
     )
@@ -3152,6 +3146,8 @@ with tab_us:
         us_btn = True   # 觸發下方 if us_btn
 
     if us_btn:
+        for _key in ("us_result", "us_actionable", "us_actionable_ts"):
+            st.session_state.pop(_key, None)
         # 立刻給用戶看到 button 有反應
         st.toast("開始掃描美股, 請等 60-90 秒…", icon="🚀")
         try:
@@ -3180,7 +3176,7 @@ with tab_us:
                     if _n_act > 0:
                         st.toast(f"✅ 完成! Top {_n_act} 可進場", icon="🎯")
                     else:
-                        st.info("ℹ️ 候選池有資料, 但沒檔通過入場篩選 (entry_score < 55)")
+                        st.info("ℹ️ 候選池有資料, 但沒檔通過入場篩選 (動能調整後入場分數 < 65)")
                 except Exception as _ae:
                     st.warning(f"actionable 精選失敗 (fallback table): {_ae}")
                     st.session_state["us_actionable"] = []
@@ -3290,7 +3286,7 @@ with tab_us:
                     st.markdown(f"- ⚠️ {w}")
         st.caption("⚠️ 僅供參考, 不構成投資建議. 請自行做研究與風控.")
 
-    # === 完整候選池 (含 entry_score < 55 的票) — 收摺疊 ===
+    # === 完整候選池 (含 entry_score < 65 的票) — 收摺疊 ===
     if top_picks is not None and not top_picks.empty:
         with st.expander(f"📊 完整候選池 ({len(top_picks)} 檔, 含 WAIT/AVOID)", expanded=False):
             show_df = top_picks.drop(columns=["近期新聞"], errors="ignore")
@@ -3344,10 +3340,12 @@ with tab_us:
 
     # Send to TG handler — 拉出 if/else 外確保 top_picks empty 時也能顯示 warning
     if send_us_tg:
-        if top_picks is None or (hasattr(top_picks, "empty") and top_picks.empty):
-            st.warning("⚠️ 還沒抓到 picks — 請先按「更新美股 Top 10」")
+        if us_actionable_list:
+            _send_tg(notifier.fmt_us_actionable_picks(us_actionable_list), "美股可進場精選")
+        elif top_picks is None or (hasattr(top_picks, "empty") and top_picks.empty):
+            _send_tg("", "美股 Top 10")
         else:
-            _send_tg(notifier.fmt_us_top_picks(top_picks, fg), "美股 Top 10")
+            _send_tg(notifier.fmt_us_top_picks(top_picks, fg), "美股候選池（無可進場精選）")
 
     # =========================================================================
     # 🚀 美股潛在爆發股 (us_upside_screener, 5 大類, 含「壓縮待噴」漲停前兆型)
@@ -3467,6 +3465,7 @@ with tab_mood:
     mood_btn = st.button("🔄 抓取市場情緒", use_container_width=True, type="primary",
                          key="mood_btn_main")
     if mood_btn:
+        st.session_state["us_result_mood"] = {}
         try:
             with st.spinner("抓取市場情緒資料…"):
                 # 用獨立 key, 不覆蓋 tab_us 的 us_result
@@ -3474,7 +3473,7 @@ with tab_mood:
         except Exception as e:
             st.error(f"抓取失敗：{e}")
     # 優先用 mood 自己的, 沒按過時 fallback 拿 tab_us 的 (避免重抓燒 quota)
-    us = st.session_state.get("us_result_mood") or st.session_state.get("us_result", {}) or {}
+    us = st.session_state.get("us_result_mood", st.session_state.get("us_result", {})) or {}
     fg = us.get("fear_greed", {})
     sectors_us = us.get("sectors")
     news_pool: List = us.get("news") or []
@@ -3547,6 +3546,7 @@ with tab_mood:
         news_show_count = st.number_input("顯示筆數", 5, 50, 20, step=5, key="news_show_n")
 
     if refresh_news_btn:
+        st.session_state.pop("world_news", None)
         try:
             import news_sources
             with st.spinner("抓取全球新聞..."):
@@ -3679,6 +3679,7 @@ with tab_bt:
     bt_universe_n = st.slider("抽樣股票數 (越多越慢)", 30, 300, 120, step=30, key="bt_universe_n")
     bt_btn = st.button("🚀 跑回測", use_container_width=True, type="primary", key="bt_run")
     if bt_btn:
+        st.session_state.pop("bt_result", None)
         if not bt_conds:
             st.warning("請至少選一個回測條件")
         else:
@@ -3701,37 +3702,40 @@ with tab_bt:
                             conditions=bt_conds,
                             days_back=bt_lookback,
                         )
-                if bt_res.get("error"):
-                    st.error(f"回測失敗: {bt_res['error']}")
-                else:
-                    df_sum = bt_res.get("summary")
-                    df_raw = bt_res.get("raw")
-                    if df_sum is not None and not df_sum.empty:
-                        st.markdown("#### 各條件勝率")
-                        st.dataframe(df_sum, use_container_width=True, hide_index=True)
-                    if df_raw is not None and not df_raw.empty:
-                        cMA, cMB, cMC = st.columns(3)
-                        with cMA:
-                            st.metric("總命中筆數", len(df_raw))
-                        if "r5d" in df_raw.columns:
-                            v5 = df_raw["r5d"].dropna()
-                            if not v5.empty:
-                                with cMB:
-                                    st.metric("+5日勝率", f"{(v5 > 0).mean() * 100:.1f}%")
-                                with cMC:
-                                    st.metric("+5日平均報酬", f"{v5.mean():+.2f}%")
-                        rng = bt_res.get("as_of_range")
-                        if rng:
-                            st.caption(f"回測區間: {rng[0]} ~ {rng[1]} "
-                                       f"({bt_res.get('n_trading_days', '?')} 個交易日)")
-                        with st.expander("原始命中明細"):
-                            st.dataframe(df_raw, use_container_width=True, hide_index=True)
-                    else:
-                        st.info("沒有回測結果")
+                st.session_state["bt_result"] = bt_res
             except ImportError:
                 st.warning("尚未安裝 backtest 模組")
             except Exception as e:
                 st.error(f"回測異常: {type(e).__name__}: {e}")
+    bt_res = st.session_state.get("bt_result")
+    if bt_res is not None:
+        if bt_res.get("error"):
+            st.error(f"回測失敗: {bt_res['error']}")
+        else:
+            df_sum = bt_res.get("summary")
+            df_raw = bt_res.get("raw")
+            if df_sum is not None and not df_sum.empty:
+                st.markdown("#### 各條件勝率")
+                st.dataframe(df_sum, use_container_width=True, hide_index=True)
+            if df_raw is not None and not df_raw.empty:
+                cMA, cMB, cMC = st.columns(3)
+                with cMA:
+                    st.metric("總命中筆數", len(df_raw))
+                if "r5d" in df_raw.columns:
+                    v5 = df_raw["r5d"].dropna()
+                    if not v5.empty:
+                        with cMB:
+                            st.metric("+5日勝率", f"{(v5 > 0).mean() * 100:.1f}%")
+                        with cMC:
+                            st.metric("+5日平均報酬", f"{v5.mean():+.2f}%")
+                rng = bt_res.get("as_of_range")
+                if rng:
+                    st.caption(f"回測區間: {rng[0]} ~ {rng[1]} "
+                               f"({bt_res.get('n_trading_days', '?')} 個交易日)")
+                with st.expander("原始命中明細"):
+                    st.dataframe(df_raw, use_container_width=True, hide_index=True)
+            else:
+                st.info("沒有回測結果")
 
 
 # =============================================================================
@@ -3770,35 +3774,39 @@ with tab_track:
             st.error(f"匯入失敗：{res.get('msg')}")
 
     if track_btn:
+        st.session_state.pop("track_performance", None)
         try:
             with st.spinner("計算每檔現價並比對 base_price…"):
                 history = tracker.load_history()
                 perf = tracker.evaluate_history_performance(history, days_window=track_window)
-            if perf is None or perf.empty:
-                st.info("尚無追蹤紀錄. 進入「強勢族群」/「美股 Top 10」tab 推送過後, 會自動加進追蹤. 或從本 tab 上方匯入歷史 CSV.")
-            else:
-                st.dataframe(perf, use_container_width=True, hide_index=True)
-                # tracker.evaluate_history_performance 寫入欄位 "return%" (英文),
-                # 同時相容舊資料 (可能是 "報酬%" 中文)
-                ret_col = None
-                for c in ("return%", "報酬%"):
-                    if c in perf.columns:
-                        ret_col = c
-                        break
-                if ret_col:
-                    valid = perf[perf[ret_col].notna()]
-                    if len(valid) > 0:
-                        avg = float(valid[ret_col].mean())
-                        win_rate = float((valid[ret_col] > 0).mean() * 100)
-                        cM1, cM2, cM3 = st.columns(3)
-                        with cM1:
-                            st.metric("平均報酬", f"{avg:+.2f}%")
-                        with cM2:
-                            st.metric("勝率", f"{win_rate:.1f}%")
-                        with cM3:
-                            st.metric("追蹤檔數", f"{len(valid)}")
+            st.session_state["track_performance"] = perf
         except Exception as e:
             st.error(f"追蹤計算失敗: {type(e).__name__}: {e}")
+    if "track_performance" in st.session_state:
+        perf = st.session_state["track_performance"]
+        if perf is None or perf.empty:
+            st.info("尚無追蹤紀錄. 進入「強勢族群」/「美股 Top 10」tab 推送過後, 會自動加進追蹤. 或從本 tab 上方匯入歷史 CSV.")
+        else:
+            st.dataframe(perf, use_container_width=True, hide_index=True)
+            # tracker.evaluate_history_performance 寫入欄位 "return%" (英文),
+            # 同時相容舊資料 (可能是 "報酬%" 中文)
+            ret_col = None
+            for c in ("return%", "報酬%"):
+                if c in perf.columns:
+                    ret_col = c
+                    break
+            if ret_col:
+                valid = perf[perf[ret_col].notna()]
+                if len(valid) > 0:
+                    avg = float(valid[ret_col].mean())
+                    win_rate = float((valid[ret_col] > 0).mean() * 100)
+                    cM1, cM2, cM3 = st.columns(3)
+                    with cM1:
+                        st.metric("平均報酬", f"{avg:+.2f}%")
+                    with cM2:
+                        st.metric("勝率", f"{win_rate:.1f}%")
+                    with cM3:
+                        st.metric("追蹤檔數", f"{len(valid)}")
 
 
 # =============================================================================

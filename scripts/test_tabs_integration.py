@@ -55,8 +55,11 @@ def main():
 
     def t_actionable_dynamic_levels():
         import actionable_picks as ap
+        from unittest.mock import patch
+        import pandas as pd
         # _dynamic_levels 在無 yfinance 時應走 fallback
-        lv = ap._dynamic_levels("2330", current=1050.0)
+        with patch("data_sources.fetch_yf_history", return_value=pd.DataFrame()):
+            lv = ap._dynamic_levels("2330", current=1050.0)
         assert lv and lv.get("stop") and lv.get("target") and lv.get("rr")
 
     results.append(_try("compute_actionable_picks 簽名含 open_data", t_actionable_sig))
@@ -167,24 +170,21 @@ def main():
         # closing_analyzer 第 122 行抓 margin_30d, 我已用 or 0 處理.
         # 模擬 chip dict 含 None margin
         import closing_analyzer as ca
-        # 用 grep 確認 line 122 有 `or 0`
-        src = Path(ca.__file__).read_text(encoding="utf-8")
-        assert "融資30日變化%') or 0" in src, "closing_analyzer 第 122 行未加 or 0 fallback"
+        from unittest.mock import patch
+        chip = {"margin": {"融資30日變化%": None}, "institutional": {
+            "Foreign_Investor": {"5d_total_lots": -4000}}}
+        with patch("chip_analyzer.fetch_chip_data", return_value=chip):
+            result = ca._fetch_one_chip("2330", "Test")
+        assert result is not None and result["chip"]["margin_30d"] == 0
 
     def t_holdings_none_margin():
         import holdings_analyzer as ha
         src = Path(ha.__file__).read_text(encoding="utf-8")
         assert "(margin.get('融資30日變化%') or 0)" in src, "holdings_analyzer 未加 or 0 fallback"
 
-    def t_chip_filter_none_margin():
-        import chip_filter as cf
-        src = Path(cf.__file__).read_text(encoding="utf-8")
-        # L3 fix: 用 is not None 區分
-        assert "margin_30d is not None" in src, "chip_filter 未用 is not None 判斷"
-
     results.append(_try("closing_analyzer 對 None margin 安全", t_closing_none_margin))
     results.append(_try("holdings_analyzer 對 None margin 安全", t_holdings_none_margin))
-    results.append(_try("chip_filter 用 is not None 區分未知/0", t_chip_filter_none_margin))
+    # chip_filter 已不在專案/分頁依賴內；不再測試已移除的模組。
 
     # === upside_screener / us_upside_screener 整合性 ===
     print("\n[upside / us_upside / theme_analyzer]")
@@ -202,7 +202,7 @@ def main():
         sig = inspect.signature(ups.run_us_upside_screen)
         assert "with_themes" in sig.parameters
         # H2: 4 類齊全
-        assert set(ups.CATEGORY_LABEL_US.keys()) == {"breakout", "acceleration", "squeeze_setup", "narrative_leader"}
+        assert set(ups.CATEGORY_LABEL_US.keys()) == {"breakout", "acceleration", "squeeze_setup", "narrative_leader", "revival_setup"}
 
     def t_theme_analyzer():
         import theme_analyzer as ta
@@ -216,7 +216,7 @@ def main():
         assert "AI / LLM" in result
 
     results.append(_try("upside_screener cache wrapper 正確", t_upside_cache))
-    results.append(_try("us_upside_screener with_themes + 4 類", t_us_upside_themes))
+    results.append(_try("us_upside_screener with_themes + 5 類", t_us_upside_themes))
     results.append(_try("theme_analyzer 基本功能", t_theme_analyzer))
 
     # === 統計 ===
@@ -225,7 +225,7 @@ def main():
     print(f"\n{'='*50}")
     print(f"整合測試: {n_ok} / {n_total} 通過")
     if n_ok == n_total:
-        print("✅ 所有 tab 的整合點都安全, 可部署.")
+        print("✅ 本測試涵蓋的整合點通過；外部 API 與線上部署需另行驗證。")
     else:
         print(f"❌ 有 {n_total - n_ok} 項失敗, 部署前必須修.")
         sys.exit(1)

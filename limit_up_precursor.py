@@ -31,9 +31,7 @@ limit_up_precursor.py
   布局的補漲股」的機率, 不是漲停的保證, 一定要分批進場 + 嚴設停損, 且高分不代表
   高勝算, 只代表「符合的訊號比較多」。
 
-目前狀態: 僅供 dashboard 手動查看 (使用者要求先不自動推播 Telegram), fmt_*_msg
-先寫好格式化函式備用, 之後若要推播只要在 market_open_alert.py 掛一個 category
-呼叫即可。
+目前狀態: dashboard 手動掃描與 Telegram 發送，未啟用排程自動推播。
 
 API:
   scan_limit_up_precursor(top_n=8, max_themes=None) -> List[Dict]
@@ -300,10 +298,7 @@ def scan_limit_up_precursor(top_n: int = 8, max_themes: Optional[int] = None) ->
 
 
 def fmt_limit_up_precursor_msg(picks: List[Dict]) -> str:
-    """格式化 TG 訊息 (HTML). 目前尚未被任何推播呼叫 (使用者要求先只放 dashboard),
-    先寫好備用 — 之後要推播的話只要在 market_open_alert.py 呼叫這個函式 +
-    notifier.send_message(..., category="limit_up_precursor") 即可。
-    """
+    """格式化 dashboard 手動發送的 TG 訊息 (HTML)。"""
     import html as _html
     import datetime as _dt
 

@@ -182,6 +182,10 @@ def send_message(text: str, disable_preview: bool = True,
                   _stamped: bool = False,
                   **_kwargs) -> tuple[bool, str]:
 
+    if text is None or not str(text).strip():
+        return False, "送出失敗: 訊息為空"
+    text = str(text)
+
     if text and not _stamped:
         try:
             text = text.rstrip() + f"\n\n🕐 <i>{_tpe_now_str()} 送出</i>"
@@ -204,6 +208,8 @@ def send_message(text: str, disable_preview: bool = True,
             )
             ok_all = ok_all and ok_p
             infos.append(f"part{_i+1}:{info_p}")
+            if not ok_p:
+                break  # 首段被限流或失敗時，不可繞過 category 繼續送後半段
         return ok_all, f"split×{len(parts)} | " + " | ".join(infos)
 
     try:
@@ -291,6 +297,7 @@ def _send_message_inner(text: str, disable_preview: bool = True,
                 "chat_id": chat_id,
                 "text": plain,
                 "disable_web_page_preview": disable_preview,
+                "disable_notification": bool(disable_notification),
             }
             if reply_markup:
                 payload2["reply_markup"] = _json.dumps(reply_markup)
@@ -440,6 +447,30 @@ def fmt_emerging_breakout(data: dict, top_n: int = 10) -> str:
         lines.append("")
     lines.append("<i>※ 技術動能 + 內部人/分析師背書; 非投資建議, 池外標的風險較高, 嚴守風控.</i>")
     return _truncate_tg_msg("\n".join(lines).rstrip())
+
+
+def fmt_us_actionable_picks(picks: list) -> str:
+    """送出畫面上的美股精選與價位，而非精選前的候選池。"""
+    if not picks:
+        return ""
+    lines = [f"🇺🇸 <b>美股可進場精選 Top {len(picks)}</b>", ""]
+    for i, p in enumerate(picks, 1):
+        lines.append(f"<b>{i}. {_esc(p.get('symbol'))} {_esc(p.get('name'))}</b>")
+        lines.append(f"現價 {_esc(_fmt_num(p.get('current')))} · 入場評分 {_esc(p.get('entry_score'))}")
+        timing = p.get("entry_timing_label")
+        if timing:
+            lines.append(_esc(timing))
+        else:
+            lines.append(f"進場 {_esc(_fmt_num(p.get('entry_low')))}~{_esc(_fmt_num(p.get('entry_high')))}")
+        lines.append(
+            f"短/中/長目標 {_esc(_fmt_num(p.get('target_short')))} / "
+            f"{_esc(_fmt_num(p.get('target_mid')))} / {_esc(_fmt_num(p.get('target_long')))}"
+        )
+        lines.append(f"停損 {_esc(_fmt_num(p.get('stop')))} · R:R {_esc(_fmt_num(p.get('rr')))}")
+        for warning in (p.get("warnings") or [])[:2]:
+            lines.append(f"⚠️ {_esc(warning)}")
+        lines.append("")
+    return "\n".join(lines).rstrip()
 
 
 def fmt_us_top_picks(df, fg: dict, top_n: int = 10) -> str:
@@ -3498,16 +3529,25 @@ def fmt_asia_leading_alerts(alerts: list) -> str:
     return _truncate_tg_msg("\n".join(lines).rstrip())
 
 def _split_tg_msg(text: str, max_chars: int = 4000) -> list[str]:
-    """將長訊息依字數安全拆分成多個封包列表發送。"""
+    """依 UTF-16 長度拆分，與 send_message 的長度檢查一致。"""
+    if max_chars < 2:
+        raise ValueError("max_chars must be at least 2")
     if not text:
         return []
     chunks = []
-    while len(text) > max_chars:
-        split_idx = text.rfind('\n', 0, max_chars)
-        if split_idx == -1:
-            split_idx = max_chars
+    while _u16_len(text) > max_chars:
+        units = 0
+        end = 0
+        for ch in text:
+            width = 2 if ord(ch) > 0xFFFF else 1
+            if units + width > max_chars:
+                break
+            units += width
+            end += 1
+        newline = text.rfind('\n', 0, end)
+        split_idx = newline + 1 if newline >= 0 else end
         chunks.append(text[:split_idx])
-        text = text[split_idx:].lstrip()
+        text = text[split_idx:]
     if text:
         chunks.append(text)
     return chunks

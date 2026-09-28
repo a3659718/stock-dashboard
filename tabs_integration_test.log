@@ -1,0 +1,63 @@
+2026-09-28 01:40:42.304 WARNING streamlit.runtime.caching.cache_data_api: No runtime found, using MemoryCacheStorageManager
+2026-09-28 01:40:42.307 WARNING streamlit.runtime.caching.cache_data_api: No runtime found, using MemoryCacheStorageManager
+2026-09-28 01:40:42.308 WARNING streamlit.runtime.caching.cache_data_api: No runtime found, using MemoryCacheStorageManager
+2026-09-28 01:40:42.309 WARNING streamlit.runtime.caching.cache_data_api: No runtime found, using MemoryCacheStorageManager
+2026-09-28 01:40:42.310 WARNING streamlit.runtime.caching.cache_data_api: No runtime found, using MemoryCacheStorageManager
+2026-09-28 01:40:42.310 WARNING streamlit.runtime.caching.cache_data_api: No runtime found, using MemoryCacheStorageManager
+2026-09-28 01:40:42.311 WARNING streamlit.runtime.caching.cache_data_api: No runtime found, using MemoryCacheStorageManager
+2026-09-28 01:40:42.312 WARNING streamlit.runtime.caching.cache_data_api: No runtime found, using MemoryCacheStorageManager
+2026-09-28 01:40:42.313 WARNING streamlit.runtime.caching.cache_data_api: No runtime found, using MemoryCacheStorageManager
+2026-09-28 01:40:42.317 WARNING streamlit.runtime.caching.cache_data_api: No runtime found, using MemoryCacheStorageManager
+2026-09-28 01:40:42.317 WARNING streamlit.runtime.caching.cache_data_api: No runtime found, using MemoryCacheStorageManager
+2026-09-28 01:40:42.320 WARNING streamlit.runtime.caching.cache_data_api: No runtime found, using MemoryCacheStorageManager
+2026-09-28 01:40:42.320 WARNING streamlit.runtime.caching.cache_data_api: No runtime found, using MemoryCacheStorageManager
+2026-09-28 01:40:42.320 WARNING streamlit.runtime.caching.cache_data_api: No runtime found, using MemoryCacheStorageManager
+2026-09-28 01:40:42.324 WARNING streamlit.runtime.caching.cache_data_api: No runtime found, using MemoryCacheStorageManager
+2026-09-28 01:40:42.598 WARNING streamlit.runtime.caching.cache_data_api: No runtime found, using MemoryCacheStorageManager
+2026-09-28 01:40:42.605 WARNING streamlit.runtime.caching.cache_data_api: No runtime found, using MemoryCacheStorageManager
+2026-09-28 01:40:42.607 WARNING streamlit.runtime.caching.cache_data_api: No runtime found, using MemoryCacheStorageManager
+2026-09-28 01:40:42.616 WARNING streamlit.runtime.caching.cache_data_api: No runtime found, using MemoryCacheStorageManager
+2026-09-28 01:40:42.625 WARNING streamlit.runtime.caching.cache_data_api: No runtime found, using MemoryCacheStorageManager
+2026-09-28 01:40:42.628 WARNING streamlit.runtime.caching.cache_data_api: No runtime found, using MemoryCacheStorageManager
+2026-09-28 01:40:42.630 WARNING streamlit.runtime.caching.cache_data_api: No runtime found, using MemoryCacheStorageManager
+2026-09-28 01:40:42.634 WARNING streamlit.runtime.caching.cache_data_api: No runtime found, using MemoryCacheStorageManager
+2026-09-28 01:40:42.642 WARNING streamlit.runtime.caching.cache_data_api: No runtime found, using MemoryCacheStorageManager
+2026-09-28 01:40:42.645 WARNING streamlit.runtime.caching.cache_data_api: No runtime found, using MemoryCacheStorageManager
+2026-09-28 01:40:42.646 WARNING streamlit.runtime.caching.cache_data_api: No runtime found, using MemoryCacheStorageManager
+2026-09-28 01:40:42.652 WARNING streamlit.runtime.caching.cache_data_api: No runtime found, using MemoryCacheStorageManager
+
+[tab 今日可行動]
+  ✓ compute_actionable_picks 簽名含 open_data
+  ✓ fmt_actionable_picks_tg([]) 不崩
+  ✓ _dynamic_levels fallback 可用
+
+[tab 台股篩選]
+  ✓ tw_screener.CONDITION_LABELS 10 條件齊全 + 1.5% label
+  ✓ tw_screener.TWParams 預設值正確
+  ✓ tw_screener.run_all_screens 簽名兼容
+
+[tab 個股深度分析]
+  ✓ stock_analyzer institutional/margin 空 DF 不崩
+
+[tab 美股 Top 5]
+  ✓ us_screener.run_us_recommendation 簽名含 dedup_correlated
+  ✓ us_screener ETF blacklist 完整
+  ✓ us_screener dedup fallback 補足 min_kept
+
+[chip_analyzer 回傳 dict 結構驗證]
+  ✓ chip_analyzer helper 函式可呼叫
+  ✓ chip_analyzer dual cache 結構正確
+  ✓ chip_analyzer local cache deepcopy
+
+[None margin robustness — 給 closing/holdings 用]
+  ✓ closing_analyzer 對 None margin 安全
+  ✓ holdings_analyzer 對 None margin 安全
+
+[upside / us_upside / theme_analyzer]
+  ✓ upside_screener cache wrapper 正確
+  ✓ us_upside_screener with_themes + 5 類
+  ✓ theme_analyzer 基本功能
+
+==================================================
+整合測試: 18 / 18 通過
+✅ 本測試涵蓋的整合點通過；外部 API 與線上部署需另行驗證。
