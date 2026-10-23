@@ -98,6 +98,15 @@ def _compute_us_features(symbol: str, df: pd.DataFrame,
         twenty_pct = (cur / float(c.iloc[-21]) - 1) * 100 if len(c) >= 21 else None
         sixty_pct = (cur / float(c.iloc[-61]) - 1) * 100 if len(c) >= 61 else None
         hi52, lo52, pct_hi52, pct_lo52 = ind.distance_from_52w(c, window=252)
+        # Bug fix: 以前 _fetch_yf_one 只抓 1 年 → distance_from_ath() 取的是「這 1 年的
+        # 最大值」, 而 distance_from_52w(window=252) 取的也是同一段 → pct_from_ath 與
+        # pct_from_52w_high **恆等**。後果: (a) UI / TG 同時顯示兩個「不同」欄位其實一樣;
+        # (b) _check_revival_setup 的 pct_ath <= -40 實際是「近一年內跌掉 40%」而不是
+        # docstring 寫的「距歷史高點 -40% (RKLB-like)」—— 真正「歷史高點在數年前、近一年
+        # 已走穩」的標的距 1 年高點往往只有 -20%, 根本過不了那道門, 反而是近一年剛崩跌的
+        # 被歸成「谷底重生」; (c) _check_acceleration 的 pct_from_ath < -70 判斷依據也錯。
+        # 改法: 把抓取期間拉長到 5 年 (見 _run_impl 的 _fetch_yf_one 呼叫), 這裡 52w 仍只
+        # 取尾端 252 根 (distance_from_52w 自己 tail), ATH 則用完整序列 → 兩者語意分離。
         ath, pct_from_ath = ind.distance_from_ath(c)
         is_52w_brk, brk_info = ind.is_52w_high_breakout(c, window=252, breakout_tolerance=1.0)
         is_stage2, stage2_info = ind.is_minervini_stage2(c)
@@ -489,7 +498,10 @@ def _run_impl(symbols: List[str], max_workers: int = 5,
     features = []
     last_dates: List[str] = []  # 收集各檔最新一根 K 線日期, 用來推真正資料日 (而非寫死 today)
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        futures = {ex.submit(_fetch_yf_one, s, "1y"): s for s in symbols}
+        # 5y: 讓 distance_from_ath() 拿到真正的多年歷史高點 (見 _compute_us_features 的
+        # Bug fix 說明)。_compute_us_features 內所有其他指標都是尾端相對 (iloc[-N] /
+        # rolling / 自帶 window 的 helper), 不受序列變長影響; ma200 反而更多標的算得出來。
+        futures = {ex.submit(_fetch_yf_one, s, "5y"): s for s in symbols}
         for fut in as_completed(futures):
             s = futures[fut]
             df = fut.result()

@@ -147,7 +147,8 @@ def _px(v) -> str:
 
 
 def _send_tg(msg: str, label: str = "推播",
-              stock_id: Optional[str] = None, market: str = "TW") -> bool:
+              stock_id: Optional[str] = None, market: str = "TW",
+              status_key: Optional[str] = None) -> bool:
     """統一的 TG 推送 + 顯示成功/失敗 toast.
     用在所有「Send to TG」按鈕, 確保使用者看得到結果.
 
@@ -157,10 +158,18 @@ def _send_tg(msg: str, label: str = "推播",
     # 行內 st.error/success (保留詳細訊息可複製)。
     # 為什麼: 送出按鈕在分頁很下面, 之前只用 st.success 行內顯示, rerun 後常被捲走 →
     #         使用者以為「按了沒反應/空白」, 其實 TG 已送出。toast 解決這個感知問題。
+    def _result(ok, detail, level="error"):
+        if status_key:
+            st.session_state[status_key] = {
+                "ok": ok, "detail": detail, "level": level,
+                "time": dt.datetime.now(dt.timezone(dt.timedelta(hours=8))).strftime("%H:%M:%S"),
+            }
+        return ok
+
     if not msg or not msg.strip():
         st.toast(f"{label}:沒有可推送內容", icon="⚠️")
         st.warning(f"{label}：沒有可推送內容")
-        return False
+        return _result(False, f"{label}：沒有可推送內容，請先執行分析。", "warning")
     if not notifier.is_configured():
         st.toast(f"{label} 失敗:TG bot 未設定", icon="🚫")
         st.error(
@@ -168,7 +177,7 @@ def _send_tg(msg: str, label: str = "推播",
             "請到 Streamlit Cloud → App → Settings → Secrets 補 "
             "`TELEGRAM_BOT_TOKEN` 跟 `TELEGRAM_CHAT_ID`"
         )
-        return False
+        return _result(False, f"{label}：尚未設定 TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID。請在執行網站的環境設定 Secrets。")
     try:
         reply_markup = None
         if stock_id:
@@ -177,14 +186,14 @@ def _send_tg(msg: str, label: str = "推播",
         if ok:
             st.toast(f"✅ 已推送到 TG:{label}", icon="✈️")
             st.success(f"已推送到 TG：{label}")
-            return True
+            return _result(True, f"{label}：Telegram 已接受訊息。{info}", "success")
         st.toast(f"❌ {label} 失敗", icon="🚫")
         st.error(f"{label} 失敗：{info}")
-        return False
+        return _result(False, f"{label} 失敗：{info}")
     except Exception as e:
         st.toast(f"❌ {label} 例外:{type(e).__name__}", icon="🚫")
         st.error(f"{label} 例外：{type(e).__name__}: {e}")
-        return False
+        return _result(False, f"{label} 例外：{type(e).__name__}: {e}")
 
 
 # 頂部日期 banner
@@ -258,7 +267,7 @@ with st.sidebar:
                         "fm": (fm_ok, fm_info),
                         "gm": (gm_ok, gm_info),
                         "tg": (tg_ok, tg_info),
-                        "ts": dt.datetime.now().strftime("%H:%M:%S"),
+                        "ts": (dt.datetime.utcnow() + dt.timedelta(hours=8)).strftime("%H:%M:%S"),
                     }
                 except Exception as _hbe:
                     st.error(f"探測失敗: {_hbe}")
@@ -698,6 +707,7 @@ with tab_actionable:
 
     # 只有按按鈕才 trigger — 不再「第一次進 tab 就自動跑」浪費 Gemini quota
     if load_actionable:
+        st.session_state.pop("actionable_tg_result", None)
         with st.spinner("整合所有訊號中… (這需要呼叫 Gemini + yfinance, 30-60 秒)"):
             try:
                 import actionable_picks as _ap
@@ -712,14 +722,35 @@ with tab_actionable:
                     except Exception as _ae:
                         st.warning(f"⚠️ AI ensemble 失敗 (用原始排序): {_ae}")
                 st.session_state["actionable_picks_cache"] = _picks
-                st.session_state["actionable_picks_ts"] = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
+                # Bug fix: 伺服器時區是 UTC, 裸 now() 顯示出來比畫面頂端 banner (已用 TPE)
+                # 早 8 小時。而下方說明還叫使用者「以較新的時間戳為準」→ 會判斷反了。
+                st.session_state["actionable_picks_ts"] = (dt.datetime.utcnow() + dt.timedelta(hours=8)).strftime("%Y-%m-%d %H:%M")
             except Exception as e:
                 st.error(f"整合失敗: {type(e).__name__}: {e}")
                 st.session_state["actionable_picks_cache"] = []
-                st.session_state["actionable_picks_ts"] = dt.datetime.now().strftime("%Y-%m-%d %H:%M") + " (失敗)"
+                st.session_state["actionable_picks_ts"] = (dt.datetime.utcnow() + dt.timedelta(hours=8)).strftime("%Y-%m-%d %H:%M") + " (失敗)"
 
     # raw_picks 是「沒被空頭邏輯改過的原始結果」, 用於 TG 推播
     raw_picks = st.session_state.get("actionable_picks_cache", None)
+
+    # 先處理發送，再畫結果卡片；錯誤不藏在十張卡片底下。
+    if send_actionable_tg:
+        try:
+            import actionable_picks as _ap
+            with st.spinner("正在發送台股 Top 10 到 Telegram…"):
+                _send_tg(_ap.fmt_actionable_picks_tg(raw_picks or []), "台股 Top 10",
+                         status_key="actionable_tg_result")
+        except Exception as e:
+            detail = f"台股 Top 10 訊息產生失敗：{type(e).__name__}: {e}"
+            st.session_state["actionable_tg_result"] = {
+                "ok": False, "detail": detail, "level": "error", "time": "本次",
+            }
+            st.toast("台股 Top 10 推播失敗", icon="🚫")
+            st.error(detail)
+    _tg_result = st.session_state.get("actionable_tg_result")
+    if _tg_result and not send_actionable_tg:
+        _show_status = {"success": st.success, "warning": st.warning}.get(_tg_result["level"], st.error)
+        _show_status(f"上次推播（{_tg_result['time']}）：{_tg_result['detail']}")
 
     # 還沒按過按鈕 — 直接顯示提示, 不要自動跑
     if raw_picks is None:
@@ -775,10 +806,10 @@ with tab_actionable:
                 # picks_tg 顯示的字面 "None" 不一致 (同一筆 pick, 兩個管道呈現不同)。
                 # 分開: 星等判斷用 0 當安全預設值, 但畫面顯示改用 "—" 明確表示無資料。
                 rr = p.get("rr")
-                rr_for_cmp = rr if rr is not None else 0
+                rr_for_cmp = notifier._safe_float(rr)
                 rr_emoji = "⭐⭐" if rr_for_cmp >= 3 else ("⭐" if rr_for_cmp >= 2 else "")
                 rr_display = rr if rr is not None else "—"
-                score = p.get("score", 0)
+                score = notifier._safe_float(p.get("score"))
                 score_color = "🟢" if score >= 6 else ("🟡" if score >= 4 else "🔴")
                 with st.container(border=True):
                     cH1, cH2 = st.columns([3, 1])
@@ -795,7 +826,7 @@ with tab_actionable:
                             st.caption(f"族群: {p.get('theme')} · R:R {rr_display} {rr_emoji} · 綜合分數 {score}")
                         # E: 標註屬於哪個強勢族群
                         if p.get("sector_label"):
-                            sap = p.get("sector_avg_pct") or 0  # or 0: explicit None → {sap:.2f} 會崩
+                            sap = notifier._safe_float(p.get("sector_avg_pct"))
                             st.caption(f"📊 屬於強勢族群「{p['sector_label']}」(均漲 +{sap:.2f}%)")
                         if p.get("entry_score") is not None:
                             st.caption(f"入場評分 {p['entry_score']}/100 → {p.get('entry_action', '—')}")
@@ -862,27 +893,6 @@ with tab_actionable:
                         if p.get("catalyst"):
                             st.info(f"🔥 催化劑: {p['catalyst']}")
 
-    # TG 推送 — 用 raw_picks (含空頭 dummy), 確保空頭 banner 也能推到 TG
-    if send_actionable_tg:
-        if raw_picks is None:
-            st.warning("還沒抓資料, 請先按「重抓 Top 10」")
-        elif not raw_picks:
-            st.warning("沒可推送內容 (compute 回空)")
-        else:
-            try:
-                import actionable_picks as _ap
-                tg_msg = _ap.fmt_actionable_picks_tg(raw_picks)
-                if tg_msg:
-                    ok, info = notifier.send_message(tg_msg)
-                    if ok:
-                        st.toast("已推送 Top 10 到 Telegram", icon="✅")
-                    else:
-                        st.error(f"推送失敗: {info}")
-                else:
-                    st.warning("fmt 回空訊息, 不推送")
-            except Exception as e:
-                st.error(f"推送異常: {e}")
-
 
 # =============================================================================
 # Tab — 自選股管理 (含警報設定)
@@ -891,8 +901,13 @@ with tab_wl:
     st.subheader("自選股管理")
     st.caption(
         "新增最多 15 檔自選股 (台股+美股)。"
-        "盤中監控每 30 分檢查，累計漲跌達到門檻就跳 TG 通知 — "
-        "TW 每 ±2.5%、US 每 ±5%。基準價可選「自動抓當前股價」或「自訂入場價」。"
+        # Bug fix: 這段原本寫「每 30 分檢查、TW ±2.5% / US ±5%」, 但 (1) 實際預設是
+        # DEFAULT_EXTREME_THRESHOLDS = [5.0, 10.0], TW/US 共用, 與同分頁下方說明一致;
+        # (2) check_watchlist_alerts() 沒有被任何排程呼叫, 只有下面那顆手動按鈕會跑。
+        # 照原本的文字等 2.5% 的通知會永遠等不到, 容易誤判成系統故障。
+        "警報需按下方「🔍 立即手動檢查警報」執行 (目前沒有背景自動排程)，"
+        "累計漲跌達門檻就跳 TG 通知 — TW / US 預設皆為 ±5%、±10% (可在下方自訂)。"
+        "基準價可選「自動抓當前股價」或「自訂入場價」。"
     )
 
     import watchlist_store
@@ -1184,7 +1199,10 @@ with tab_wl:
             sid_state = _wl_state.get(sid, {})
             base_p = sid_state.get("base_price")
             base_src = sid_state.get("base_source", "—")
-            last_b = sid_state.get("last_pct", 0)
+            # Bug fix: watchlist_alerts 實際寫入的是 fired_buckets (list of [方向, 門檻]),
+            # last_pct 只存在於舊版 docstring, 沒有任何地方寫入 → 這裡恆為 0,
+            # 下方「上次觸發」從來沒顯示過 (使用者看不到今天哪個門檻已用掉)。
+            last_b = sid_state.get("fired_buckets") or []
 
             # 取今日資料
             stat = statuses.get(sid)
@@ -1229,7 +1247,12 @@ with tab_wl:
                 src_zh = "入場" if base_src == "entry" else ("自動" if base_src == "auto" else "—")
                 sub_parts.append(f"基準 {round(float(base_p),2)} ({src_zh})")
             if last_b:
-                sub_parts.append(f"上次觸發 {last_b:+.1f}%")
+                try:
+                    sub_parts.append(
+                        "今日已觸發 " + "、".join(f"{b[0]}{float(b[1]):g}%" for b in last_b)
+                    )
+                except Exception:
+                    pass
             if not base_p:
                 sub_parts.append("尚未開始監控")
             if added:
@@ -1364,7 +1387,15 @@ index_alerts.check_index_alerts() 從來沒有被任何自動排程呼叫過 —
             if st.button("Send 警報 to TG", use_container_width=True, key="send_alerts_tg",
                           disabled=not notifier.is_configured()):
                 msg = notifier.fmt_monitor_alerts(wl, idx, cry)
-                _send_tg(msg, "盤中警報")
+                _ok_alert = _send_tg(msg, "盤中警報")
+                # Bug fix: watchlist_alerts 的 fired_buckets (當天每個 bucket 只觸發 1 次)
+                # 原本在「檢查」階段就被寫進 monitor_state, 按了檢查沒按送出就等於白白
+                # 用掉當天的額度。現在改成送出成功才登記。
+                if _ok_alert and wl:
+                    try:
+                        watchlist_alerts.mark_alerts_sent(wl)
+                    except Exception as _me:
+                        st.warning(f"警報已送出, 但登記去重失敗 (下次檢查可能重複顯示): {_me}")
         else:
             st.info("目前無新觸發警報")
 
@@ -1463,14 +1494,20 @@ with tab_hold:
         h_name = st.text_input("名稱 (可選)", placeholder="例 台積電", key="h_name")
         h_entry = st.number_input("進場價 (可選)", min_value=0.0, value=0.0, step=0.5, key="h_entry")
         h_shares = st.number_input("持有張數 (可選)", min_value=0, value=0, step=1, key="h_shares")
+        # 停損價: holdings_intraday_alert / holdings_tracker 會用它判「跌破停損」。
+        # 原本只有 _normalize() 保留這個欄位, 卻沒有任何地方寫得進去 (手動加在 Sheet 的
+        # G 欄又會因為整表覆寫而錯行), 所以補一個輸入欄。
+        h_stop = st.number_input("停損價 (可選)", min_value=0.0, value=0.0, step=0.5, key="h_stop")
         h_note = st.text_input("備註 (可選)", placeholder="例 AI 主軸長線持有", key="h_note")
         if st.button("加入持倉", use_container_width=True, type="primary",
                       key="h_add", disabled=len(current_h) >= 15):
             if h_sid.strip():
                 ep = float(h_entry) if h_entry > 0 else None
                 sh = int(h_shares) if h_shares > 0 else None
+                sp = float(h_stop) if h_stop > 0 else None
                 ok = holdings_store.add_holding(
-                    h_sid.strip().upper(), h_name.strip(), ep, sh, h_note.strip()
+                    h_sid.strip().upper(), h_name.strip(), ep, sh, h_note.strip(),
+                    stop_price=sp,
                 )
                 if ok:
                     st.success(f"已加入 {h_sid}")
@@ -1497,6 +1534,7 @@ with tab_hold:
                     sub_parts = []
                     if ep: sub_parts.append(f"進場 {ep}")
                     if sh: sub_parts.append(f"{sh} 張")
+                    if it.get("stop_price"): sub_parts.append(f"停損 {it.get('stop_price')}")
                     if added: sub_parts.append(f"加入 {added}")
                     if note: sub_parts.append(note)
                     if sub_parts:
@@ -1586,23 +1624,29 @@ with tab_hold:
                         st.markdown(f"- [{n.get('title','')}]({n.get('link','')})")
 
     if send_h_tg:
-        # Reentrancy guard: 避免使用者在 spinner 期間連點兩次, 同分析跑兩遍 + 推兩封
-        if st.session_state.get("h_sending"):
-            st.info("推播作業進行中, 請稍候…")
+        # Bug fix: 原本的 h_sending 旗標在同一次 script run 的 finally 就被設回 False,
+        # 而 Streamlit 下一次 rerun 一定在這次 run 結束之後才讀 session_state →
+        # 上面那個 if 永遠拿到 False, 註解聲稱的「連點兩次只跑一次 + 只推一封」實際上
+        # 沒有擋到任何事。改用時間戳 (session_state 只有在 rerun 之間才真正共享):
+        # 20 秒內重複按就跳過。
+        _h_now = dt.datetime.now(dt.timezone.utc).timestamp()
+        try:
+            _h_last = float(st.session_state.get("h_sent_ts") or 0)
+        except (TypeError, ValueError):
+            _h_last = 0.0
+        if _h_now - _h_last < 20:
+            st.info("剛才已送出持倉日報, 20 秒內不重送")
         else:
-            st.session_state["h_sending"] = True
-            try:
-                if not h_results:
-                    with st.spinner("先跑一次分析..."):
-                        try:
-                            h_results = holdings_analyzer.analyze_all_holdings()
-                            st.session_state["h_results"] = h_results
-                        except Exception as e:
-                            st.error(f"分析失敗: {e}")
-                if h_results:
-                    _send_tg(notifier.fmt_holdings_daily(h_results), "持倉日報")
-            finally:
-                st.session_state["h_sending"] = False
+            st.session_state["h_sent_ts"] = _h_now
+            if not h_results:
+                with st.spinner("先跑一次分析..."):
+                    try:
+                        h_results = holdings_analyzer.analyze_all_holdings()
+                        st.session_state["h_results"] = h_results
+                    except Exception as e:
+                        st.error(f"分析失敗: {e}")
+            if h_results:
+                _send_tg(notifier.fmt_holdings_daily(h_results), "持倉日報")
 
 
 # =============================================================================
@@ -1970,6 +2014,10 @@ with tab_pulse:
             with st.spinner("計算台股開盤資金流向…"):
                 data = market_open_picks.get_tw_open_picks()
             st.session_state["tw_open_data"] = data
+            # Bug fix: tw_open_ai_text 全檔只有寫入與讀取, 沒有任何地方清除 → 重跑分析後
+            # 按 Send, 會把「新的資金流向數據 + 上一輪的 Gemini 觀點」一起推出去, 而
+            # Gemini 文字只在按下當次 run 顯示, rerun 後看不到, 使用者無從察覺。
+            st.session_state.pop("tw_open_ai_text", None)
         except Exception as e:
             st.error(f"台股分析失敗：{e}")
 
@@ -1978,6 +2026,8 @@ with tab_pulse:
             with st.spinner("計算美股開盤資金流向…"):
                 data = market_open_picks.get_us_open_picks()
             st.session_state["us_open_data"] = data
+            # Bug fix: 同 tw_open_ai_text — 重跑後不清會推出舊的 Gemini 觀點。
+            st.session_state.pop("us_open_ai_text", None)
         except Exception as e:
             st.error(f"美股分析失敗：{e}")
 
@@ -3033,7 +3083,11 @@ with tab_stock:
                     notifier.fmt_ai_analysis(sid, full["name"] or "", last_ai["text"]),
                     f"AI 分析 {sid}",
                     stock_id=sid,  # 附 inline 按鈕方便快速操作
-                    market="TW",
+                    # Bug fix: 原本硬寫 "TW", 但這個區塊 3001 行就算過 is_us。美股按這顆
+                    # 送出時, inline 按鈕的「看圖」會指向 TWSE-<ticker> 死連結, callback_data
+                    # 也變 wl:TW:<ticker> → 在 TG 按「加自選」會把美股存成 market=TW,
+                    # 之後只試 .TW/.TWO 永遠抓不到價。
+                    market=("US" if full.get("is_us") else "TW"),
                 )
 
     # ================== 🖼️ 上傳 K 線圖讓 Gemini 分析 ==================
@@ -3171,7 +3225,7 @@ with tab_us:
                     # 用時間戳讓使用者清楚知道「這是幾點重新運算的」, 不會誤以為
                     # 兩邊是同一份資料 (完整的跨 process 共用快取是較大的架構調整,
                     # 之後有需要再做)。
-                    st.session_state["us_actionable_ts"] = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
+                    st.session_state["us_actionable_ts"] = (dt.datetime.utcnow() + dt.timedelta(hours=8)).strftime("%Y-%m-%d %H:%M")
                     _n_act = len(st.session_state["us_actionable"])
                     if _n_act > 0:
                         st.toast(f"✅ 完成! Top {_n_act} 可進場", icon="🎯")
@@ -3180,7 +3234,7 @@ with tab_us:
                 except Exception as _ae:
                     st.warning(f"actionable 精選失敗 (fallback table): {_ae}")
                     st.session_state["us_actionable"] = []
-                    st.session_state["us_actionable_ts"] = dt.datetime.now().strftime("%Y-%m-%d %H:%M") + " (失敗)"
+                    st.session_state["us_actionable_ts"] = (dt.datetime.utcnow() + dt.timedelta(hours=8)).strftime("%Y-%m-%d %H:%M") + " (失敗)"
         except Exception as e:
             import traceback
             st.error(f"美股掃描失敗：{type(e).__name__}: {e}")
@@ -3601,12 +3655,15 @@ with tab_mood:
                 tag = "📈"
                 bar_color = "#3B6D11"
                 bg = "rgba(99, 153, 34, 0.08)"
-                kw_label = "、".join(n.get("bullish_kw", [])[:3])
+                # Bug fix: bullish_kw / bearish_kw 全專案沒有任何 producer (實際欄位是
+                # news_sources.enrich_news_with_sentiment() 寫的 sentiment_keywords, 已依
+                # 正負挑好對應關鍵字) → kw_label 恆為空, 〔關鍵字〕badge 從未顯示過。
+                kw_label = "、".join(n.get("sentiment_keywords", [])[:3])
             elif sent < 0:
                 tag = "📉"
                 bar_color = "#A32D2D"
                 bg = "rgba(163, 45, 45, 0.08)"
-                kw_label = "、".join(n.get("bearish_kw", [])[:3])
+                kw_label = "、".join(n.get("sentiment_keywords", [])[:3])
             else:
                 tag = "➖"
                 bar_color = "#888780"

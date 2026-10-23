@@ -63,8 +63,33 @@ def _fetch_snap(symbol: str, intraday: bool = False) -> Dict:
         c = df["Close"].astype(float)
         cur = float(c.iloc[-1])
         if intraday:
+            # Bug fix: data_sources.fetch_yf_history() 內部做過 reset_index(), 回來的 index 是
+            # RangeIndex → hasattr(df.index, "date") 恆為 False → 永遠走 else, op 變成「最後一根
+            # 5m K 自己的開盤價」, pct_vs_open 只是單根 5 分鐘漲跌幅 (典型 ±0.05%), 不是 vs 今日
+            # 開盤; prev 也變成前一根 5m 收盤而不是昨收。連帶影響 08:15/08:30 盤前推播印出的
+            # 日韓數字、_interpret_asia_leading() 的 ±0.5% 判斷 (永遠回「盤整」)、_build_tldr()
+            # 的多空方向, 以及餵給 Gemini 的輸入。作法同 asia_leading_alert.py (已修的同一根因)。
             try:
-                if hasattr(df.index, "date"):
+                import pandas as _pd
+                _dt_col = None
+                for _cn in ("Datetime", "Date", "date", "index"):
+                    if _cn in df.columns:
+                        _dt_col = _cn
+                        break
+                if _dt_col is not None:
+                    _ts = _pd.to_datetime(df[_dt_col], errors="coerce")
+                    _today = _ts.iloc[-1].date()
+                    _today_mask = (_ts.dt.date == _today)
+                    today_df = df[_today_mask]
+                    if not today_df.empty:
+                        op = float(today_df["Open"].iloc[0])
+                        _prev_df = df[~_today_mask]
+                        prev = (float(_prev_df["Close"].astype(float).iloc[-1])
+                                if not _prev_df.empty else op)
+                    else:
+                        op = float(df["Open"].iloc[-1])
+                        prev = float(c.iloc[-2]) if len(c) >= 2 else cur
+                elif hasattr(df.index, "date"):
                     today = df.index[-1].date()
                     today_df = df[df.index.date == today]
                     if not today_df.empty:

@@ -560,7 +560,13 @@ def run_all_screens(
     inst = pd.DataFrame()
     if need_inst:
         _p(f"抓投信法人資料 ({len(universe)} 檔)…", 35)
-        inst_start = (today - dt.timedelta(days=params.invtrust_lookback_days + 5)).strftime("%Y-%m-%d")
+        # Bug fix: invtrust_lookback_days 的定義是「交易日」(screen_invtrust_first_buy 的
+        # docstring 明寫), 但這裡當日曆日用 → 30 + 5 = 35 日曆日 = 5 週 ≈ 24 個交易日,
+        # window_dates = all_dates[-30:] 取不滿 30 → 「投信 30 日首買」實際只看約 24 日,
+        # 而防呆 min_required_days = 15 擋不住 → 25~30 個交易日前買超過的個股被誤判成
+        # 「首次進場」, 命中數比條件標籤與 README 宣稱的寬鬆。按交易日換算 (×1.6 + 緩衝)。
+        _inst_lb = max(30, int(params.invtrust_lookback_days or 30))
+        inst_start = (today - dt.timedelta(days=int(_inst_lb * 1.6) + 10)).strftime("%Y-%m-%d")
         inst = ds.fetch_institutional_universe(universe_t, inst_start, end)
         if not inst.empty:
             inst = inst.drop_duplicates(subset=["stock_id", "date", "name"], keep="last").reset_index(drop=True)
@@ -681,6 +687,7 @@ def run_all_screens(
             combined["量比"] = combined["stock_id"].map(_calc_ratio)
 
         # 投信 5 日累計買超張數
+        _cap_num_map = None   # 投本比分子 (與條件同窗口的累計, 單位: 張)
         if not inst.empty:
             it = inst[inst["name"] == "Investment_Trust"].copy()
             if not it.empty:
@@ -716,19 +723,32 @@ def run_all_screens(
                 combined["投信5日(張)"] = combined["stock_id"].map(acc5_map)
                 combined["投信今日(張)"] = combined["stock_id"].map(today_map)
 
-        # 投本比
-        if shares_map:
-            cum = combined.get("投信5日(張)")
-            if cum is not None:
-                def _cap_ratio(sid, cum_val):
-                    s = shares_map.get(str(sid))
-                    if not s or s <= 0 or cum_val is None or pd.isna(cum_val):
-                        return None
-                    return round(float(cum_val) / float(s) * 100, 3)
-                combined["投本比%"] = [
-                    _cap_ratio(row["stock_id"], row.get("投信5日(張)"))
-                    for _, row in combined.iterrows()
-                ]
+                # Bug fix: 投本比的「條件」(screen_invtrust_capital_ratio) 用的是
+                # params.capital_ratio_window (預設 20) 日累計, 而下面「顯示」用的分子
+                # 原本是 投信5日(張) → 一檔命中「投本比 ≥ 1.5% (20日累計)」的股票, 表格
+                # 常印出 0.3~0.5% (約 20 日值的 1/4), 看起來自相矛盾, 也無法用這欄驗證
+                # 篩選結果。分子改用與條件相同的窗口 (欄名不變, 條件標籤已註明 20 日)。
+                _cap_window = getattr(params, "capital_ratio_window", 20)
+                _cap_num_map = (
+                    it.sort_values("date")
+                    .groupby("stock_id")["net"]
+                    .apply(lambda s: _safe_int(s.tail(_cap_window).sum() / 1000.0))
+                    .to_dict()
+                )
+
+        # 投本比 (分子 = 與條件相同的 capital_ratio_window 日累計, 見上方 Bug fix 註解)
+        if shares_map and _cap_num_map:
+            def _cap_ratio(sid):
+                s = shares_map.get(str(sid))
+                cum_val = _cap_num_map.get(sid)
+                if cum_val is None:
+                    cum_val = _cap_num_map.get(str(sid))
+                if not s or s <= 0 or cum_val is None or pd.isna(cum_val):
+                    return None
+                return round(float(cum_val) / float(s) * 100, 3)
+            combined["投本比%"] = [
+                _cap_ratio(row["stock_id"]) for _, row in combined.iterrows()
+            ]
 
         # === 流動性 / 股價門檻過濾 (強勢股例外) ===
         if not daily.empty and (params.min_avg_volume > 0 or params.min_price > 0):

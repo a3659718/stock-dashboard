@@ -60,8 +60,20 @@ def _safe_finmind_data(dataset: str, days: int = 7) -> Optional[List[Dict]]:
         return None
 
 
+# Bug fix: FinMind TaiwanStockInstitutionalInvestorsBuySell 的 buy / sell 單位是「股」,
+# 不是「元」—— 這是本 repo 自己三處註解的結論 (chip_analyzer.py:144-146 /
+# emerging_themes.py:126 / smart_money_stealth.py:77, 前者還為此加了 *_lots 欄位)。
+# 原本把全市場股數加總再 /1e8 當「億元」, 量級完全錯 (實務上全市場外資單日淨買數千萬股
+# → 印出 0.x「億」, 真實金額是數十~數百億), 而且這個數字會進 08:30 盤前推播與
+# daily_outlook_advisor 餵給 Gemini 的 prompt, 連 AI 都是看著錯的數字做判斷。
+# 這個 dataset 拿不到金額, 所以改語意而不是改倍數: 一律換成「張」(1 張 = 1000 股)。
+# 要「億元」得換 dataset (例如 TaiwanStockTotalInstitutionalInvestors 才有金額欄位)。
+_FOREIGN_STRONG_LOTS = 50000   # 單日全市場外資淨買賣「強」門檻 (張)。原本是 50 億元,
+                               # 以均價 ~75 元估算約 6.7 萬張, 這裡取 5 萬張。可自行調。
+
+
 def _fetch_inst_spot() -> Dict:
-    """外資/投信/自營商 現貨買賣超 (整市場合計, 億元) — 近 5 日."""
+    """外資/投信/自營商 現貨買賣超 (整市場合計, 張) — 近 5 日."""
     out = {"data": [], "summary": "", "foreign_streak": 0, "trust_streak": 0}
     rows = _safe_finmind_data("TaiwanStockInstitutionalInvestorsBuySell", days=14)
     if not rows:
@@ -71,7 +83,7 @@ def _fetch_inst_spot() -> Dict:
     for r in rows:
         d = r.get("date", "")
         nm = r.get("name", "")
-        buy_sell = float(r.get("buy", 0)) - float(r.get("sell", 0))  # 元
+        buy_sell = float(r.get("buy", 0)) - float(r.get("sell", 0))  # 股 (不是元!)
         if d not in by_date:
             by_date[d] = {"Foreign_Investor": 0.0, "Investment_Trust": 0.0,
                            "Dealer": 0.0}
@@ -86,12 +98,12 @@ def _fetch_inst_spot() -> Dict:
     data = []
     for d in dates:
         rec = by_date[d]
-        # 轉億元 (元 → 億 = /1e8)
+        # 股 → 張 (/1000)
         data.append({
             "date": d,
-            "foreign_yi": round(rec["Foreign_Investor"] / 1e8, 2),
-            "trust_yi": round(rec["Investment_Trust"] / 1e8, 2),
-            "dealer_yi": round(rec["Dealer"] / 1e8, 2),
+            "foreign_lots": int(round(rec["Foreign_Investor"] / 1000.0)),
+            "trust_lots": int(round(rec["Investment_Trust"] / 1000.0)),
+            "dealer_lots": int(round(rec["Dealer"] / 1000.0)),
         })
     out["data"] = data
     # 連續買/賣超 — Bug fix: 真正的「從最後一天反向數連續同向」
@@ -108,12 +120,12 @@ def _fetch_inst_spot() -> Dict:
                 else:
                     break
             return n * sign
-        out["foreign_streak"] = _streak("foreign_yi")
-        out["trust_streak"] = _streak("trust_yi")
+        out["foreign_streak"] = _streak("foreign_lots")
+        out["trust_streak"] = _streak("trust_lots")
         out["summary"] = (
-            f"外資 {latest['foreign_yi']:+.2f} 億 | "
-            f"投信 {latest['trust_yi']:+.2f} 億 | "
-            f"自營 {latest['dealer_yi']:+.2f} 億"
+            f"外資 {latest['foreign_lots']:+,} 張 | "
+            f"投信 {latest['trust_lots']:+,} 張 | "
+            f"自營 {latest['dealer_lots']:+,} 張"
         )
     return out
 
@@ -222,7 +234,9 @@ def _fetch_futures_basis() -> Dict:
     貼水 (basis < 0): 期貨低於現貨 → 空頭強烈, 或避險需求高
     台股近月一般在 -30 ~ +30 之間, 異常值有訊號意義.
     """
-    out = {"basis": None, "basis_pct": None, "signal": ""}
+    # spot: 台指期升貼水的分類與進場價試算都需要現貨點位, 原本算出來卻沒回傳,
+    # 害 tx_futures_alert 只能去讀不存在的 "twii_close"/"spot_price" → 整支模組永遠不觸發。
+    out = {"basis": None, "basis_pct": None, "spot": None, "signal": ""}
     try:
         import data_sources as ds
         # 台指期主力月 (yfinance: ^TWII 是現股, TX=F 可能不存在)
@@ -254,6 +268,7 @@ def _fetch_futures_basis() -> Dict:
         basis_pct = (basis / spot) * 100 if spot > 0 else 0
         out["basis"] = round(basis, 2)
         out["basis_pct"] = round(basis_pct, 3)
+        out["spot"] = round(spot, 2)
         if basis >= 50:
             out["signal"] = "🟢 升水 ≥50 點 — 多頭強烈"
         elif basis >= 0:
@@ -350,11 +365,14 @@ def fetch_institutional_snapshot() -> Dict:
     bias_score = 0
     spot = snap["spot"]; fut = snap["futures"]; pcr = snap["pcr"]
     if spot.get("data"):
-        latest_yi = spot["data"][-1]["foreign_yi"]
-        if latest_yi > 50: bias_score += 2
-        elif latest_yi > 0: bias_score += 1
-        elif latest_yi < -50: bias_score -= 2
-        elif latest_yi < 0: bias_score -= 1
+        # Bug fix: 原本門檻是 ±50 (當時誤以為單位是億元), 但欄位其實是股數 →
+        # 需要 50 億「股」才會成立 → ±2 分這兩檔實質永不觸發, 籌碼面 bias 被系統性壓平
+        # (只剩 ±1)。改成張數門檻。
+        latest_lots = spot["data"][-1]["foreign_lots"]
+        if latest_lots > _FOREIGN_STRONG_LOTS: bias_score += 2
+        elif latest_lots > 0: bias_score += 1
+        elif latest_lots < -_FOREIGN_STRONG_LOTS: bias_score -= 2
+        elif latest_lots < 0: bias_score -= 1
     if fut.get("foreign_net_oi"):
         oi = fut["foreign_net_oi"]
         if oi >= 10000: bias_score += 2

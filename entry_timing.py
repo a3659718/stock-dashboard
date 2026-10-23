@@ -111,6 +111,19 @@ def determine_entry_mode(stock_id: str, market: str = "auto") -> Dict:
 
         # 1. 「今日盤中進」: 當下價 已突破 20d 高 且 量增
         if cur >= high_20d * 0.99 and cur >= ma5 and recent_vol >= avg_vol * 1.3:
+            # Bug fix: high_60d 原本算了卻從未被引用, 三個分支全部只看 high_20d ——
+            # 但本模組 docstring 自己寫的是「近 60d 高 268, 突破才追」。結果一檔在 20 日
+            # 箱型整理、離 60 日高還有 15% 的股票, 碰到 20 日高 + 量增就吐出「🎯 今日盤中進
+            # (高信心)」, 而真正的壓力區 (前波 60 日高) 還遠在上方 —— 正是這支模組宣稱要防的
+            # 假突破情境。補一道 60 日高確認: 沒過就降級成「等突破 60d 高」。
+            if high_60d > 0 and cur < high_60d * 0.97:
+                out["mode"] = "wait_breakout"
+                out["label"] = f"等突破 {high_60d:.2f} 追"
+                out["trigger_price"] = round(high_60d, 2)
+                out["explanation"] = (f"已過 20d 高 ({high_20d:.2f}) 但近 60d 高 "
+                                      f"{high_60d:.2f} 未突破, 防假突破")
+                out["confidence"] = "medium"
+                return _finalize(out)
             out["mode"] = "buy_now"
             out["label"] = "今日盤中進"
             out["trigger_price"] = round(cur, 2)

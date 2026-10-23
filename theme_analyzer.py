@@ -140,6 +140,32 @@ SYMBOL_TO_SECTOR_ETF = {
 }
 
 
+_KW_RE_CACHE: Dict[str, "re.Pattern"] = {}
+
+
+def _kw_hit(kw: str, text_lower: str) -> bool:
+    """關鍵字比對 — 用「詞界」而不是單純子字串。
+
+    Bug fix: 原本是 `kw.lower() in text`, 而 THEME_KEYWORDS 裡有大量 2-4 字母短詞,
+    純子字串會誤中英文常用字 —— "ai" ⊂ said / Taiwan / chain / gain / retail,
+    "ev" ⊂ revenue / level / seven / device / development, "asic" ⊂ basic,
+    "rag" ⊂ storage / average / fragment。於是 "Nvidia said revenue gains in Taiwan
+    chain, basic storage" 這種普通標題就同時中 ai / ev / asic / rag → narrative_score
+    對任何有新聞的股票都接近滿分, "多題材共振 bonus" 變成常態, theme_multiplier()
+    常態回 1.2~1.5 (本意只有真正 strong 才 1.5), 把 us_upside_screener /
+    actionable_picks 的分數整體灌水, 完全失去鑑別度。
+    詞界只擋「英數字緊接」, 所以 "ai-powered" / "AI:" / "(AI)" 仍然命中。
+    """
+    k = (kw or "").lower().strip()
+    if not k:
+        return False
+    pat = _KW_RE_CACHE.get(k)
+    if pat is None:
+        pat = re.compile(r"(?<![a-z0-9])" + re.escape(k) + r"(?![a-z0-9])")
+        _KW_RE_CACHE[k] = pat
+    return bool(pat.search(text_lower))
+
+
 def _detect_narratives_from_titles(titles_concat: str) -> List[str]:
     """Detect which narratives appear in concatenated news titles."""
     if not titles_concat:
@@ -148,7 +174,7 @@ def _detect_narratives_from_titles(titles_concat: str) -> List[str]:
     found = []
     for theme, kws in THEME_KEYWORDS.items():
         for kw in kws:
-            if kw.lower() in text:
+            if _kw_hit(kw, text):
                 found.append(theme)
                 break
     return found

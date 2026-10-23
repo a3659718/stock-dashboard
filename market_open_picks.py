@@ -151,7 +151,21 @@ def _score_stock_momentum(metrics: Dict) -> float:
             s -= 1.5
         elif five < -3:
             s -= 0.5
-    return round(max(0.0, s), 2)
+    # Bug fix: twenty 原本算了卻從未被使用 → 三個有效分支上限只有 2.5+2.5+2.0 = 7.0,
+    # 而 docstring 宣稱 0-10, 缺的 3 分就是這段。_us_stock_metrics 確實有算「20日%」
+    # (台股的 sector_pulse.fetch_intraday_metrics 沒這欄, 所以只影響美股),
+    # 而 get_us_open_picks 用這個分數排序每個板塊取前 3 檔 → 美股板塊精選完全忽略中期
+    # 趨勢, 只看今日 / 5 日 / 量比。對照同檔的 growth score 本來就有用 20日%。
+    if twenty is not None:
+        if 0 <= twenty <= 25:
+            s += 3.0          # 起漲位: 中期趨勢向上但還沒噴
+        elif 25 < twenty <= 40:
+            s += 1.5          # 已經漲一段
+        elif twenty > 40:
+            s -= 1.0          # 中期過熱, 追高風險
+        else:
+            s += 0.5          # 20 日仍為負 → 剛轉強, 給少量分
+    return round(max(0.0, min(s, 10.0)), 2)
 
 
 # ---------------------------------------------------------------------------
@@ -184,13 +198,28 @@ def _fetch_twii_intraday() -> Dict:
         except Exception:
             pass
     # 2) 抓昨收 (用 daily 線取倒數第二根)
+    # Bug fix: 原本直接假設日線最後一列是今天。若 Yahoo 還沒產生今日日線 (開盤頭幾分鐘、
+    # 連假後很常見), iloc[-2] 其實是「前前日」收盤 → change_pts / change_pct 錯一整天的
+    # 幅度, 而這個值就是台股開盤推播的標題行「加權指數 xx,xxx +NNN 點 (+N.NN%)」;
+    # fallback 分支更直接: current = 昨收、prev_close = 前日收 → 推出來是昨天的漲跌。
+    # 同專案 index_alerts._fetch_systemic_snapshot / entry_timing / tw_post_market_summary
+    # / data_sources 都有這道 latest_is_today 檢查, 只有這支沒有。
     df_d = ds.fetch_yf_history("^TWII", period="5d", interval="1d")
     if df_d is not None and not df_d.empty and len(df_d) >= 2:
         try:
             close_d = df_d["Close"].astype(float)
-            out["prev_close"] = float(close_d.iloc[-2])
+            _latest_is_today = True
+            try:
+                _dcol = "Date" if "Date" in df_d.columns else df_d.columns[0]
+                _latest_d = pd.to_datetime(df_d[_dcol]).dt.date.iloc[-1]
+                _today_tpe = (dt.datetime.utcnow() + dt.timedelta(hours=8)).date()
+                _latest_is_today = (_latest_d == _today_tpe)
+            except Exception:
+                _latest_is_today = True  # 判斷不出來就維持原行為
+            out["prev_close"] = float(close_d.iloc[-2] if _latest_is_today else close_d.iloc[-1])
             # 如果 5m 抓不到 current, 就用 daily 最後一根當 current
-            if out["current"] is None:
+            # (日線還不是今天的 → 不要拿昨天的收盤當「現價」推出去)
+            if out["current"] is None and _latest_is_today:
                 out["current"] = float(close_d.iloc[-1])
                 out["today_open"] = float(df_d["Open"].astype(float).iloc[-1])
         except Exception:
@@ -844,7 +873,16 @@ def _gemini_us_close_reasoning(sectors_df: pd.DataFrame, spy_pct: float,
     if sectors_df is not None and not sectors_df.empty:
         for _, r in sectors_df.head(8).iterrows():
             sec_lines.append(f"  {r.get('symbol')} {r.get('sector','')}: {r.get('1d_%','')}%")
-    fg_str = f"F&G {fg.get('score','—'):.0f} ({fg.get('rating','')})" if fg else "F&G N/A"
+    # Bug fix: fetch_fear_greed() 成功時一定有 "score" key (值可能是 None), 所以
+    # .get('score','—') 的 default 永遠不生效 → f"{None:.0f}" 丟 TypeError。這行不在
+    # try 內 → 例外一路往上, 被 market_open_alert 的 except 接住 → 當天美股盤後推播
+    # 一則都不發。全專案其他 9 處都是先檢查 is not None, 只有這裡漏掉。
+    _fg_sc = fg.get("score") if fg else None
+    try:
+        fg_str = (f"F&G {float(_fg_sc):.0f} ({fg.get('rating','')})"
+                  if _fg_sc is not None else "F&G N/A")
+    except (TypeError, ValueError):
+        fg_str = "F&G N/A"
     prompt = (
         f"美股盤後綜合: SPY {spy_pct:+.2f}%, QQQ {qqq_pct:+.2f}%, DIA {dia_pct:+.2f}%. {fg_str}\n\n"
         f"板塊輪動 (1d):\n" + "\n".join(sec_lines) + "\n\n"

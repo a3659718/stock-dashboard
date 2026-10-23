@@ -52,6 +52,11 @@ except Exception:
 # 對非 upside_screener 的來源 (breakout / emerging / leader) 也提供合理停損.
 # 若 ATR 抓不到 (新股 / 停牌 / 資料不足) 才 fallback 用固定 %, 並標記降級.
 # ---------------------------------------------------------------------------
+
+# enrich 候選池倍數: enhance_picks 的加分最多 +2.0, 取前 top_n × 這個倍數 做 enrich,
+# 讓「原始排名在 top_n 之外但靠加分能翻身」的 pick 有機會進榜, 同時限制 API 呼叫量。
+_ENRICH_POOL_MULT = 2
+
 def _dynamic_levels(stock_id: str, current: float,
                      stop_atr_mult: float = 1.5,
                      target_atr_mult: float = 3.0,
@@ -322,7 +327,25 @@ def compute_actionable_picks(top_n: int = 5, market: str = "TW",
         pass
 
     picks.sort(key=lambda x: x.get("score", 0), reverse=True)
-    result = picks[:top_n]
+
+    # ABCDF enrich: 3 層目標 + chip_price_divergence + 強勢族群 boost + 主力券商
+    # + 主流板塊 +0.5 (mainstream_only=True 時 filter 只回主流板塊)
+    # Bug fix: 這段原本在 picks[:top_n] **之後**才跑, 但 enhance_picks 內部會 score += 1.5
+    # (強勢族群) / += 0.5 (主流板塊) 再重新排序, 最後才做 mainstream_only 過濾。因為已經
+    # 先截斷: (1) 排第 N+1 名但能拿 +2.0 分的 pick 永遠進不了名單 → boost 對「選誰」完全
+    # 無效, 只能在已選中的 N 筆內換順序; (2) 勾「只看主流板塊」時可能只回 1-2 筆甚至 0 筆,
+    # 畫面看起來像「今天沒有主流板塊標的」, 其實候選池裡還有更多主流 pick 被前一步截掉了。
+    # 改成先 enrich 再排序 / 過濾 / 截斷。為了不讓 enrich 的 API 量爆增, 只對分數前
+    # _ENRICH_POOL_MULT × top_n 名做 enrich (已排序, 足夠讓 +2.0 的加分翻身)。
+    _pool = picks[:max(top_n * _ENRICH_POOL_MULT, top_n)]
+    try:
+        import actionable_enhancer as _ae
+        _pool = _ae.enhance_picks(_pool, market=market,
+                                   mainstream_only=mainstream_only)
+    except Exception as _e:
+        print(f"[actionable] enhance_picks 失敗 (non-fatal): {_e}", flush=True)
+    result = _pool[:top_n]
+
     # attach regime 給第一筆 (caller render banner 用)
     if result and regime:
         result[0]["_regime"] = regime
@@ -343,15 +366,6 @@ def compute_actionable_picks(top_n: int = 5, market: str = "TW",
                 p["entry_action"] = ev.get("entry_action", "—")
     except Exception as _e:
         print(f"[actionable] entry_label 計算失敗 (non-fatal): {_e}", flush=True)
-
-    # ABCDF enrich: 3 層目標 + chip_price_divergence + 強勢族群 boost + 主力券商
-    # + 主流板塊 +0.5 (mainstream_only=True 時 filter 只回主流板塊)
-    try:
-        import actionable_enhancer as _ae
-        result = _ae.enhance_picks(result, market=market,
-                                    mainstream_only=mainstream_only)
-    except Exception as _e:
-        print(f"[actionable] enhance_picks 失敗 (non-fatal): {_e}", flush=True)
 
     return result
 
@@ -692,13 +706,17 @@ def fmt_actionable_picks_tg(picks: List[Dict]) -> str:
         # 跟 dashboard 端 (app.py) 顯示 "—" 不一致, 同一筆 pick 兩邊呈現不同。
         # 統一顯示成 "—"。
         rr = p.get("rr")
-        rr_str = f"R:R {rr if rr is not None else '—'}" + (
-            " ⭐⭐" if rr and rr >= 3 else " ⭐" if rr and rr >= 2 else ""
+        try:
+            rr_num = float(rr)
+        except (TypeError, ValueError):
+            rr_num = 0.0
+        rr_str = f"R:R {_esc(rr) if rr is not None else '—'}" + (
+            " ⭐⭐" if rr_num >= 3 else " ⭐" if rr_num >= 2 else ""
         )
         score = p.get("score", 0)
         lines.append(
             f"<b>{i}. {_esc(p.get('stock_id'))} {_esc(p.get('name'))}</b>  "
-            f"[{_esc(p.get('theme', '—'))}] · {rr_str} · 分數 {score}"
+            f"[{_esc(p.get('theme', '—'))}] · {rr_str} · 分數 {_esc(score)}"
         )
         cur = p.get("current")
         el = p.get("entry_low")
@@ -722,9 +740,9 @@ def fmt_actionable_picks_tg(picks: List[Dict]) -> str:
         if p.get("win_prob"):
             lines.append(f"   勝率 {_esc(p['win_prob'])} · 持有 {_esc(p.get('hold_period','—'))}")
         if p.get("entry_label"):
-            lines.append(f"   {p.get('entry_emoji','')} 入場: {_esc(p['entry_label'])}")
+            lines.append(f"   {_esc(p.get('entry_emoji',''))} 入場: {_esc(p['entry_label'])}")
         if p.get("entry_timing_label"):
-            lines.append(f"   {p['entry_timing_label']}")
+            lines.append(f"   {_esc(p['entry_timing_label'])}")
         for w in (p.get("warnings") or [])[:2]:
             lines.append(f"   {_esc(w)}")
     return "\n".join(lines).rstrip()

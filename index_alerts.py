@@ -627,7 +627,12 @@ def _scan_companion_strong_stocks_tw(top_n: int = 5, max_workers: int = 8) -> Li
             if tp >= 1.0:
                 vr = m.get("vol_ratio", 0) or 0
                 vol_factor = 1.0 + max(0.0, vr - 1.0) * 0.3
-                strength = tp * vol_factor
+                # Bug fix: 鏡像的 weak 版 (_scan_companion_weak_stocks_tw) 用的是
+                # (tp + 0.5 * dd) * vol_factor, 這裡漏掉 0.5 × 從高點回吐的懲罰項
+                # (dd ≤ 0 恆成立) → 早盤衝 +5%、現在只剩 +1.2% (dd ≈ -3.6%) 的股票
+                # 仍算 1.2×factor, 可能排進「同步轉強」前 5 名推給使用者,
+                # 而它其實正在走弱。補回與 weak 版對稱的懲罰項。
+                strength = (tp + 0.5 * dd) * vol_factor
                 m["strength"] = round(strength, 2)
                 results.append(m)
 

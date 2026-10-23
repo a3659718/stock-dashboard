@@ -131,15 +131,50 @@ def _fetch_insider_transactions(symbol: str, days_back: int = 30) -> List[Dict]:
         return []
 
 
+_KEY_RETENTION_DAYS = 45   # > _fetch_insider_transactions 的 days_back (30)
+
+
+def _alert_key(a: Dict) -> str:
+    """去重 key。兩種都把「揭露日 / 統計月份」放在第三段, 讓 prune 能比大小。
+
+    Bug fix: analyst 的 key 原本只有 `analyst:{symbol}` 沒帶 period, 而 Finnhub
+    recommendation-trends 是「月」資料 (cur/prev 整個月不變) → buy_ratio_change_pp ≥ 10
+    一旦成立, 配上下面每天清空去重表, 就會整個月每天推同一則「升評 wave」。
+    """
+    sym = a.get("symbol", "")
+    if a.get("type") == "analyst_upgrade":
+        return f"analyst:{sym}:{a.get('period','')}"
+    return f"insider:{sym}:{a.get('filing_date','')}"
+
+
+def _prune_keys(keys) -> set:
+    """丟掉超過保留期的 key, 以及舊的兩段式 (不帶日期) key。
+
+    注意: 真正寫回 state 的是 mark_alerts_sent(), 所以 prune 必須在那裡也做一次,
+    否則只在 check 的記憶體內生效 → 持久化的 alerted 會無限累積。
+    """
+    cut = (dt.date.today() - dt.timedelta(days=_KEY_RETENTION_DAYS)).strftime("%Y-%m-%d")
+    out = set()
+    for k in (keys or []):
+        parts = str(k).split(":")
+        if len(parts) >= 3 and parts[2] and parts[2][:10] >= cut:
+            out.add(str(k))
+    return out
+
+
 def check_analyst_insider() -> List[Dict]:
     """整合掃描. 回 alert list (含 analyst + insider 2 種類型)."""
     state = watchlist_store.load_monitor_state()
     ai_state = state.setdefault("analyst_insider_alert", {})
     today_str = dt.date.today().strftime("%Y-%m-%d")
-    if ai_state.get("date") != today_str:
-        ai_state.clear()
-        ai_state.update({"date": today_str, "alerted": []})
-    alerted: set = set(ai_state.get("alerted") or [])
+    # Bug fix: 原本去重表每天 clear(), 但 insider 的資料窗是「過去 30 天」, analyst 更是
+    # 月資料 → 三週前那筆 CEO 買進每天都還在窗內、每天的 alerted 又是空的, 於是會連推
+    # 約 30 個交易日 (而且 insider 是 Tier 1 響鈴)。改成跨日保留, 只 prune 超過
+    # _KEY_RETENTION_DAYS 的 key (> 資料窗 30 天, 確保同一筆揭露不會在窗內被重推)。
+    # 註: 舊的 `analyst:{symbol}` 兩段式 key 不帶 period, 遷移時丟棄 (最多多推一次)。
+    alerted: set = _prune_keys(ai_state.get("alerted"))
+    ai_state["date"] = today_str          # 僅供診斷
+    ai_state["alerted"] = sorted(alerted)
 
     # universe: watchlist + holdings + default
     universe = set(DEFAULT_UNIVERSE)
@@ -170,9 +205,8 @@ def check_analyst_insider() -> List[Dict]:
                 if not r: continue
                 # 升評 wave: buy_ratio 上升 ≥ 10 pp
                 if r.get("buy_ratio_change_pp", 0) >= 10:
-                    key = f"analyst:{r['symbol']}"
-                    if key not in alerted:
-                        r["type"] = "analyst_upgrade"
+                    r["type"] = "analyst_upgrade"
+                    if _alert_key(r) not in alerted:
                         alerts.append(r)
             except Exception:
                 pass
@@ -183,9 +217,8 @@ def check_analyst_insider() -> List[Dict]:
             try:
                 items = fut.result()
                 for it in items:
-                    key = f"insider:{it['symbol']}:{it['filing_date']}"
-                    if key not in alerted:
-                        it["type"] = "insider_buy"
+                    it["type"] = "insider_buy"
+                    if _alert_key(it) not in alerted:
                         alerts.append(it)
             except Exception:
                 pass
@@ -199,16 +232,12 @@ def mark_alerts_sent(alerts: List[Dict]) -> None:
     try:
         state = watchlist_store.load_monitor_state()
         ai = state.setdefault("analyst_insider_alert", {})
-        today_str = dt.date.today().strftime("%Y-%m-%d")
-        if ai.get("date") != today_str:
-            ai.clear()
-            ai.update({"date": today_str, "alerted": []})
-        a_set = set(ai.get("alerted") or [])
+        # 不再按日清空 (見 check_analyst_insider 的 Bug fix): key 已含揭露日 / 月份。
+        ai["date"] = dt.date.today().strftime("%Y-%m-%d")
+        # 寫回時一併 prune — 這裡是唯一真正持久化 alerted 的地方。
+        a_set = _prune_keys(ai.get("alerted"))
         for a in alerts:
-            if a.get("type") == "analyst_upgrade":
-                a_set.add(f"analyst:{a.get('symbol','')}")
-            elif a.get("type") == "insider_buy":
-                a_set.add(f"insider:{a.get('symbol','')}:{a.get('filing_date','')}")
+            a_set.add(_alert_key(a))
         ai["alerted"] = sorted(a_set)
         state["analyst_insider_alert"] = ai
         watchlist_store.save_monitor_state(state)

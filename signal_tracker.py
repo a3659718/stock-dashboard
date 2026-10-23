@@ -519,8 +519,16 @@ def load_records() -> List[Dict]:
 
 def accuracy_summary(signal_type: Optional[str] = None,
                       lookback_days: int = 30,
-                      market: Optional[str] = None) -> Dict:
-    """指定 signal_type 的滾動準確率 (None = 全部). market 可再篩 TW / US."""
+                      market: Optional[str] = None,
+                      dedup_by_stock: bool = False) -> Dict:
+    """指定 signal_type 的滾動準確率 (None = 全部). market 可再篩 TW / US.
+
+    dedup_by_stock: 同一天同一檔只算一次 (依 (predicted_at, stock_id) 去重)。
+      Bug fix: record_signal 的 dedup key 含 signal_type, 而 morning_tw_top5 與
+      pre_market_buy 的 asof / predicted_price / 驗證 bar 完全相同 → 同一檔同一天會
+      被記兩筆、hit 必然相同 → 累計勝率的分母虛胖、盤前選股的權重被放大一倍。
+      只有在跨 signal_type 統計 (signal_type=None) 時才該開, 單一訊號的統計維持原樣。
+    """
     records: List[Dict] = load_records()
     # Bug fix: 跟 _today_str() 同理, 改用 TPE 日期算 cutoff, 避免跟系統本地
     # (UTC, GitHub Actions) 日期不一致造成滾動視窗邊界悄悄偏移一天。
@@ -531,6 +539,7 @@ def accuracy_summary(signal_type: Optional[str] = None,
     total = 0
     hit = 0
     pct_sum = 0.0
+    _seen_day_stock = set()
     for r in records:
         if r.get("hit") is None:
             continue
@@ -540,6 +549,11 @@ def accuracy_summary(signal_type: Optional[str] = None,
             continue
         if want_market and _record_market(r) != want_market:
             continue
+        if dedup_by_stock:
+            _k = (str(r.get("predicted_at", "")), str(r.get("stock_id", "")))
+            if _k in _seen_day_stock:
+                continue
+            _seen_day_stock.add(_k)
         total += 1
         if r.get("hit"):
             hit += 1

@@ -170,7 +170,10 @@ def review_data(refresh: bool = True) -> Dict:
 
     for mkt in ("TW", "US", None):
         try:
-            s = signal_tracker.accuracy_summary(None, lookback_days=30, market=mkt)
+            # dedup_by_stock: 同一檔同一天被晨報與盤前各記一筆 (兩者 asof / 預測價 /
+            # 驗證 bar 完全相同, hit 必然一樣) → 不去重會讓累計分母虛胖。
+            s = signal_tracker.accuracy_summary(None, lookback_days=30, market=mkt,
+                                                dedup_by_stock=True)
             out["cum"][mkt or "ALL"] = s
         except Exception:
             out["cum"][mkt or "ALL"] = {"n": 0, "hit": 0, "pct": None}

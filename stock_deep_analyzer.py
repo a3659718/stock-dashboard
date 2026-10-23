@@ -429,8 +429,11 @@ def detect_candle_patterns(stock_id: str, market: str = "TW",
             lower_shadow = min(o, c) - l
             is_bullish = c > o
             day_idx = len(df) - 1 - i  # 0 = 今天
-            date = pd.to_datetime(df.iloc[i].name if hasattr(df.iloc[i], 'name') else df.index[i]).strftime("%Y-%m-%d") \
-                if hasattr(df, 'index') else ""
+            # Bug fix: fetch_yf_history() 內部已 reset_index(), 日期在 "Date" 欄, index 是
+            # RangeIndex → df.iloc[i].name 恆為整數列號 → pd.to_datetime(35) 被當 35 奈秒
+            # → date 恆為 "1970-01-01" (hasattr(df, 'index') 也恆為 True, 另兩個分支走不到)。
+            date = (pd.to_datetime(df["Date"].iloc[i]).strftime("%Y-%m-%d")
+                    if "Date" in df.columns else "")
 
             # 錘子線 (下影 ≥ 2x 實體, 上影短, 實體小)
             if (lower_shadow >= 2 * body and upper_shadow < 0.3 * body
@@ -580,8 +583,14 @@ def fetch_fundamental_metrics(stock_id: str) -> Dict:
 
     # 2) 季 EPS (TaiwanStockFinancialStatements)
     try:
+        # Bug fix: 原本與月營收共用 start = T-365。但最新一筆 EPS 的日期 L <= T, 去年同季
+        # 那筆 ≈ L-365 <= T-365 → 永遠落在視窗起點之前 → 下面比對 target_q 的 window 恆為空
+        # → eps_trend 永遠是「缺去年同季資料」, eps_yoy_pct / prev_year_eps 永遠不存在,
+        # 整段 YoY 計算 (含已修好的負分母處理) 都是死碼, entry_evaluator 與 Gemini prompt
+        # 永遠拿不到 EPS 成長訊號。earnings_calendar.py 修過一模一樣的錯 (120 → 400 天)。
+        _start_fs = (today - dt.timedelta(days=560)).strftime("%Y-%m-%d")
         df_fs = ds._finmind_get("TaiwanStockFinancialStatements",
-                                  data_id=stock_id, start_date=start, end_date=end)
+                                  data_id=stock_id, start_date=_start_fs, end_date=end)
         if df_fs is not None and not df_fs.empty:
             # FinMind 結構: type, value, date
             # 找 EPS row

@@ -43,12 +43,31 @@ FOMC_2026: List[_dt.date] = [
     _dt.date(2026, 10, 28),
     _dt.date(2026, 12, 9),
 ]
+# Bug fix: 原本只有 2026 一年, 而 _fetch_finnhub_economic() 又刻意把 fomc / rate decision
+# 濾掉 (理由是「已由內建排程處理」) → 2026-12-09 之後「本週重大事件預告」會完全不再出現
+# FOMC, 而且外觀跟「這週沒有 FOMC」一模一樣 (非農還在, 更難察覺)。
+# 2027 用 Fed 2025-09-05 公布的 tentative schedule (會議第二天 = 決議公布日)。
+FOMC_2027: List[_dt.date] = [
+    _dt.date(2027, 1, 27),
+    _dt.date(2027, 3, 17),
+    _dt.date(2027, 4, 28),
+    _dt.date(2027, 6, 9),
+    _dt.date(2027, 7, 28),
+    _dt.date(2027, 9, 15),
+    _dt.date(2027, 10, 27),
+    _dt.date(2027, 12, 8),
+]
+FOMC_DATES: List[_dt.date] = sorted(FOMC_2026 + FOMC_2027)
 # 3/6/9/12 這幾次含「經濟預測 + 點陣圖 (dot plot)」, 對市場影響更大。
 FOMC_WITH_SEP = {
     _dt.date(2026, 3, 18),
     _dt.date(2026, 6, 17),
     _dt.date(2026, 9, 16),
     _dt.date(2026, 12, 9),
+    _dt.date(2027, 3, 17),
+    _dt.date(2027, 6, 9),
+    _dt.date(2027, 9, 15),
+    _dt.date(2027, 12, 8),
 }
 
 
@@ -90,7 +109,7 @@ def get_macro_events(from_d: _dt.date, to_d: _dt.date) -> List[Dict]:
     """回傳窗口 [from_d, to_d] 內的高影響美股總經事件。"""
     events: List[Dict] = []
 
-    for d in FOMC_2026:
+    for d in FOMC_DATES:
         if from_d <= d <= to_d:
             extra = "（含經濟預測 / 點陣圖）" if d in FOMC_WITH_SEP else ""
             events.append({
@@ -163,9 +182,15 @@ def _fetch_finnhub_economic(from_d: _dt.date, to_d: _dt.date) -> List[Dict]:
             ed = _dt.date.fromisoformat(raw_t)
         except Exception:
             continue
-        # FOMC / 非農已由內建排程處理, 這裡避免重複
+        # FOMC / 非農已由內建排程處理, 這裡避免重複。
+        # Bug fix: 原本無條件濾掉 FOMC → 內建清單用完的那一年 (或官方臨時加開會議) 就
+        # 兩邊都沒有。改成「只有當內建清單在該窗口內真的有這個日期時才濾」, 讓 Finnhub
+        # 能在內建清單沒涵蓋時接手。
         low = ev.lower()
-        if "fomc" in low or "rate decision" in low or "nonfarm" in low:
+        if "nonfarm" in low:
+            continue
+        if ("fomc" in low or "rate decision" in low) and any(
+                abs((ed - _d).days) <= 1 for _d in FOMC_DATES):
             continue
         out.append({"date": ed, "type": "ECON", "title": ev, "impact": impact or "med",
                     "tpe_time": ""})

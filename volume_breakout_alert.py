@@ -134,6 +134,25 @@ def check_volume_breakout() -> List[Dict]:
     # dedup
     universe = list({(s, m) for s, m in universe})
 
+    # Bug fix: 2026-09-20 把去重 bucket 拆成 TW / US 之後, TW 用 TPE 日界已經正確, 但
+    # 兩邊的日界都還是會落在「對方的 monitor 窗」內, 而日線資料在自己市場收盤後整晚不變:
+    #   US bucket 的日界 = 美東換日 (UTC 04:00/05:00) → 落在亞股 monitor 窗 (TPE 12:08)
+    #   TW bucket 的日界 = TPE 00:00 (UTC 16:00)      → 落在美股 monitor 窗
+    # 於是 alerted 被清空後, 同一批標的會用同一份日線再推一次。
+    # 各市場沒開盤時掃它也沒意義 → 只掃「自己市場正在 session 內」的標的, 兩個洞一起補。
+    # (monitor 的亞股窗 TPE 09:08~13:08 在台股 session 內、美股窗 UTC 14:15~20:15 /
+    #  13:45 / 14:45 也都在美股 session 內, 正常推播不受影響。)
+    try:
+        import index_alerts as _ia
+        _before = len(universe)
+        universe = [(s, m) for s, m in universe
+                    if _ia._is_market_in_session("US" if str(m).upper() == "US" else "TW")]
+        if _before != len(universe):
+            print(f"[vol_breakout] 市場未開盤 → 略過 {_before - len(universe)} 檔 "
+                  f"(避免日界換日造成重複推播)", flush=True)
+    except Exception as _se:
+        print(f"[vol_breakout] session 判斷失敗, 照舊執行 (non-fatal): {_se}", flush=True)
+
     alerts: List[Dict] = []
     from concurrent.futures import ThreadPoolExecutor, as_completed
     with ThreadPoolExecutor(max_workers=4) as ex:

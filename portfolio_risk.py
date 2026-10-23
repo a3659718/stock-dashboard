@@ -169,6 +169,12 @@ def analyze_portfolio_risk() -> Dict:
             shares = float(shares) if shares else None
         except (TypeError, ValueError):
             shares = None
+        # Bug fix: UI 收的是「張」(app.py 的「持有張數」, 顯示也是「N 張」), 台股 1 張 = 1000 股。
+        # 原本直接當股數算 value → 有填張數的部位金額被壓成 1/1000, 而沒填的走下面 fallback
+        # (預算 / 股價, 單位是股) → 兩種單位混在同一個 value 比權重, 集中度判斷會完全反向
+        # (真正重倉的被當成微不足道)。這正是 2026-09-07 幣別修正想消滅的假警報的另一半。
+        if shares and shares > 0 and mk == "TW":
+            shares = shares * 1000.0
         # shares fallback 的預算是「新台幣 10 萬」, 美股股價是美元 -> 要先換算,
         # 否則 100000 / 184 = 543 股 NVDA (約 1,700 萬台幣), 權重整個歪掉。
         _budget = DEFAULT_BUDGET_PER_STOCK if mk == "TW" else (DEFAULT_BUDGET_PER_STOCK / _fx)

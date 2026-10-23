@@ -70,11 +70,15 @@ def _vote_minervini(stock_id: str, market: str) -> Dict:
         sym = f"{stock_id}.TW" if market == "TW" else stock_id
         result = mv.check_trend_template(sym)
         passed_n = result.get("pass_n") if result else None
-        if passed_n is None or passed_n == 0:
-            # 嘗試 .TWO (上櫃)
-            if market == "TW":
-                result = mv.check_trend_template(f"{stock_id}.TWO")
-                passed_n = result.get("pass_n") if result else None
+        # Bug fix: 原本 `passed_n == 0` 也會去抓 .TWO。上市股真的拿 0/8 (崩跌股完全合理) 時,
+        # .TWO 沒資料回 None, 把原本有效的 0 覆蓋成 None → 下面 `if passed_n is None: return out`
+        # 直接棄票 → 最弱的股票反而拿不到 AVOID 票 (Minervini 權重 1.5 是全表最高),
+        # 綜合結論會從 HOLD 偏向 BUY。只有真的 None 才需要重試上櫃後綴。
+        if passed_n is None and market == "TW":
+            result = mv.check_trend_template(f"{stock_id}.TWO")
+            _retry_n = result.get("pass_n") if result else None
+            if _retry_n is not None:
+                passed_n = _retry_n
         if passed_n is None:
             return out
         if passed_n >= 7:

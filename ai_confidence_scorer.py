@@ -187,10 +187,16 @@ def rescore_with_ai(picks: List[Dict], market: str = "TW",
         aas = p.get("ai_adjusted_score")
         if aas is not None:
             return aas
+        # Bug fix: mult 是看「entry_score 存不存在」決定, 但 base 取的是 score → 量綱不一致。
+        # score=9.5 / entry_score=None → 0.95 (沉到最底); score=None / entry_score=68 → 68
+        # (浮到最上面)。只要 Gemini 的批次 JSON 漏掉某個 symbol (沒有 ai_adjusted_score),
+        # 排序就會被這個錯誤的 key 反轉。改成各自換算到 0-10 再比。
         score = p.get("score")
         entry_score = p.get("entry_score")
-        base = score if score is not None else (entry_score if entry_score is not None else 5)
-        mult = 10 if entry_score is not None else 1
-        return base * mult / 10
+        if score is not None:
+            return float(score)                 # 本來就是 0-10
+        if entry_score is not None:
+            return float(entry_score) / 10.0    # 0-100 → 0-10
+        return 5.0
     scored_picks.sort(key=_key, reverse=True)
     return scored_picks + rest_picks

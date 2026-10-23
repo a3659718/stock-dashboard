@@ -8,10 +8,20 @@ short_interest_alert.py
   - 融券餘額 (TaiwanStockMarginPurchaseShortSale) — 散戶+部分自營商空單
   - 券資比 = 融券/融資 — 多空氣氛分歧度, ≥30% 軋空潛力
 
-異常推播觸發:
-  - 借券賣出單日增加 ≥ 5 億張 → "🔴 法人空單暴增"
+異常推播觸發 (門檻見 _LEND_SHORT_SURGE / _LEND_BALANCE_SURGE):
+  - 借券賣出單日增加 ≥ 50 (單位見下方「單位待確認」) → "🔴 法人空單暴增"
   - 券資比 ≥ 35% → "🟢 軋空潛力 (散戶空單過重)"
-  - 借券餘額 7 日連續增 → "🔴 法人準備倒貨"
+  - 借券賣出連續增 (視窗內全部遞增, 最近 5~7 筆) → "🔴 法人準備倒貨"
+
+⚠️ 單位待確認 (2026-10-23 稽核):
+  本檔 docstring 原本寫「≥ 5 億張」、程式註解寫「元 → 億」、實際門檻卻是 50, 三者互相
+  矛盾。FinMind TaiwanStockSecuritiesLending 的 balance / short_sale 欄位究竟是「股」
+  還是「元」無法離線確認 —— 若是「股」, /1e8 得到的是「億股」, 50 億股的單日增幅在
+  全市場不可能出現 → 這個警報永遠不會觸發 (外觀跟「今天沒有大戶空單」一樣);
+  若是「元」, 現行門檻 (50 億元 / 100 億元) 才合理。
+  為了不憑猜測改倍數, 這裡只做兩件事: (1) 把三處說明對齊成程式實際行為;
+  (2) 每次抓到資料時印一行原始量級 (見 _fetch_securities_lending 的 print),
+  下一次真實執行的 log 就能判定單位, 再回來把 /1e8 與門檻一次改對。
 
 API:
   fetch_short_interest_snapshot() -> Dict  # 整市場合計
@@ -24,6 +34,11 @@ import datetime as dt
 from typing import Dict, List, Optional
 
 import institutional_positioning as ip  # reuse _safe_finmind_data
+
+
+# 異常門檻 (單位同 lend_*_yi 欄位 = 原始欄位 / 1e8, 單位待確認, 見檔頭說明)
+_LEND_SHORT_SURGE = 50     # 借券賣出單日增幅 → 高嚴重度
+_LEND_BALANCE_SURGE = 100  # 借券餘額單日增幅 → 中嚴重度
 
 
 def _fetch_securities_lending() -> Dict:
@@ -67,6 +82,15 @@ def _fetch_securities_lending() -> Dict:
     if not data:
         return out
     latest = data[-1]
+    # 單位診斷 (見檔頭「單位待確認」): 印原始合計量級, 一次真實執行就能判定
+    # 欄位是「股」還是「元」, 再回來把 /1e8 與門檻改對。
+    try:
+        _raw = by_date[sorted(by_date.keys())[-1]]
+        print(f"[short_interest] 原始合計 (單位待確認): 借券餘額={_raw['lend_balance']:,.0f}, "
+              f"借券賣出={_raw['lend_short_sell']:,.0f} → /1e8 後 "
+              f"{latest['lend_balance_yi']:.2f} / {latest['lend_short_sell_yi']:.2f}", flush=True)
+    except Exception:
+        pass
     out["summary"] = (
         f"借券餘額 {latest['lend_balance_yi']:.0f} 億 | "
         f"借券賣出 {latest['lend_short_sell_yi']:.0f} 億"
@@ -78,13 +102,13 @@ def _fetch_securities_lending() -> Dict:
         delta_lend = latest["lend_balance_yi"] - prev["lend_balance_yi"]
         delta_short = latest["lend_short_sell_yi"] - prev["lend_short_sell_yi"]
 
-        if delta_short >= 50:  # 借券賣出單日增 50 億
+        if delta_short >= _LEND_SHORT_SURGE:
             out["anomaly"] = {
                 "type": "lend_short_surge",
                 "msg": f"🔴 借券賣出單日 +{delta_short:.0f} 億, 法人空單暴增",
                 "severity": "high",
             }
-        elif delta_lend >= 100:  # 借券餘額單日增 100 億 (準備子彈)
+        elif delta_lend >= _LEND_BALANCE_SURGE:
             out["anomaly"] = {
                 "type": "lend_balance_surge",
                 "msg": f"🟡 借券餘額單日 +{delta_lend:.0f} 億, 法人準備子彈",

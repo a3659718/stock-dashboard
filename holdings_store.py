@@ -105,7 +105,15 @@ def save_holdings(items: List[Dict]) -> bool:
             # 永久留下不完整資料。改用跟 watchlist_store 一致的單次 update() 整格覆寫,
             # 不 clear(), 詳見 watchlist_store._write_sheet_grid 註解。
             import watchlist_store
-            cols = ["stock_id", "name", "entry_price", "shares", "note", "added_date"]
+            # Bug fix: 原本 cols 只有 A:F, 而 _normalize() 刻意保留的 market / stop_price
+            # (holdings_intraday_alert.py 真的拿 stop_price 當停損判斷) 不在裡面 →
+            # _write_sheet_grid 只覆寫 A1:F16, G 欄原地不動。一旦 remove_holding() 刪掉
+            # 中間一檔, A:F 整體上移一列而手動加在 G 欄的 stop_price 不動 → 每檔的停損價
+            # 都掛到「別人」身上, 推出錯誤的「跌破停損 xxx」或該跌破時不推。
+            # stop_price 放在第 7 欄 (G) —— 跟手動加欄最可能的位置一致, 值會從讀進來的
+            # 紀錄原樣寫回, 不會掉。market 放第 8 欄 (H)。
+            cols = ["stock_id", "name", "entry_price", "shares", "note", "added_date",
+                    "stop_price", "market"]
             watchlist_store._write_sheet_grid(sheet, cols, items, MAX_HOLDINGS)
             return True
         except Exception:
@@ -114,7 +122,16 @@ def save_holdings(items: List[Dict]) -> bool:
 
 
 def add_holding(stock_id: str, name: str = "", entry_price: Optional[float] = None,
-                shares: Optional[int] = None, note: str = "") -> bool:
+                shares: Optional[int] = None, note: str = "",
+                stop_price: Optional[float] = None,
+                market: Optional[str] = None) -> bool:
+    """新增 / 更新一檔持倉。
+
+    stop_price: 使用者自訂停損價 — holdings_intraday_alert 與 holdings_tracker 會用它
+      判斷「跌破停損」。原本 _normalize() 有保留這個欄位, 但沒有任何 API 寫得進去
+      (唯一途徑是手動在 Google Sheet 加一欄, 而那會因為 A:F 覆寫而錯行), 現在補上。
+    market: 不給就由 _normalize() 依代號自動判 (純數字 → TW, 其餘 → US)。
+    """
     items = load_holdings()
     sid = str(stock_id).strip().upper()
     if not sid:
@@ -129,6 +146,10 @@ def add_holding(stock_id: str, name: str = "", entry_price: Optional[float] = No
                 i["shares"] = shares
             if note:
                 i["note"] = note
+            if stop_price is not None:
+                i["stop_price"] = stop_price
+            if market:
+                i["market"] = str(market).strip().upper()
             found = True
             break
     if not found:
@@ -141,7 +162,10 @@ def add_holding(stock_id: str, name: str = "", entry_price: Optional[float] = No
             "shares": shares,
             "note": note,
             "added_date": dt.date.today().isoformat(),
+            "stop_price": stop_price,
         }
+        if market:
+            new["market"] = str(market).strip().upper()
         items.append(new)
     return save_holdings(items)
 

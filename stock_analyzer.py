@@ -159,10 +159,12 @@ def evaluate_conditions(stock_id: str, full: dict, params: tw.TWParams | None = 
         hits["short_increase"] = (not s_short.empty) and (s_short["stock_id"] == stock_id).any()
 
     if not inst.empty:
-        s_first = tw.screen_invtrust_first_buy(inst, params)
+        # 投信首買: 10 / 15 / 30 三個回看窗各判一次
+        for _lb in (10, 15, 30):
+            _s = tw.screen_invtrust_first_buy(inst, params, lookback_days=_lb)
+            hits[f"invtrust_first_buy_{_lb}"] = (not _s.empty) and (_s["stock_id"] == stock_id).any()
         s_consec = tw.screen_invtrust_consecutive_buy(inst, params)
         s_5d = tw.screen_invtrust_5d_accumulation(inst, params)
-        hits["invtrust_first_buy"] = (not s_first.empty) and (s_first["stock_id"] == stock_id).any()
         hits["invtrust_consecutive"] = (not s_consec.empty) and (s_consec["stock_id"] == stock_id).any()
         hits["invtrust_5d_acc"] = (not s_5d.empty) and (s_5d["stock_id"] == stock_id).any()
         # 投本比
@@ -180,7 +182,9 @@ def institutional_summary(inst: pd.DataFrame) -> pd.DataFrame:
     inst = inst.copy()
     inst["net"] = inst["buy"].astype(float) - inst["sell"].astype(float)
     summary = inst.groupby("name")["net"].sum().reset_index()
-    summary["net"] = summary["net"].astype(int)
+    # Bug fix: 原始 buy/sell 單位是「股」(見 chip_analyzer.py 的註解與 *_lots 欄位),
+    # 原本直接把股數掛上「(張)」欄名 → dashboard 法人表格的量級錯 1000 倍。
+    summary["net"] = (summary["net"] / 1000.0).round().astype(int)
     summary = summary.rename(columns={"name": "法人", "net": "30日累計買賣超(張)"})
     return summary
 
@@ -206,13 +210,26 @@ def overall_score(hits: Dict[str, bool]) -> Tuple[int, List[str]]:
     weight = {
         "break_ma": 1.5, "volume_burst": 1.0, "above_ma_uptrend": 1.0,
         "kd_golden_cross": 1.0, "macd_turn_positive": 1.0,
-        "short_increase": 0.5, "invtrust_first_buy": 1.5,
+        "short_increase": 0.5,
+        # 窗越長 = 越久沒碰、越像真正的「首次進場」→ 權重越高。
+        "invtrust_first_buy_10": 0.8,
+        "invtrust_first_buy_15": 1.0,
+        "invtrust_first_buy_30": 1.5,
         "invtrust_consecutive": 1.0, "invtrust_5d_acc": 1.0, "capital_ratio": 1.5,
     }
+    # 三個首買窗是「巢狀」的 —— 30 日內沒買過, 必然 15 日和 10 日內也沒買過,
+    # 所以它們一定同時命中。若直接相加會變成 0.8+1.0+1.5=3.3, 憑空把同一件事算三次,
+    # 原本這一項只值 1.5。這裡只取「命中的最長窗」計分與顯示。
+    _fb_keys = ["invtrust_first_buy_30", "invtrust_first_buy_15", "invtrust_first_buy_10"]
+    _fb_hit = next((k for k in _fb_keys if hits.get(k)), None)
+
     score = 0.0
     reasons = []
     for k, v in hits.items():
-        if v:
-            score += weight.get(k, 0.5)
-            reasons.append(tw.CONDITION_LABELS.get(k, k))
+        if not v:
+            continue
+        if k in _fb_keys and k != _fb_hit:
+            continue  # 同一個首買訊號的較短窗, 不重複計分
+        score += weight.get(k, 0.5)
+        reasons.append(tw.CONDITION_LABELS.get(k, k))
     return round(min(10.0, score), 1), reasons

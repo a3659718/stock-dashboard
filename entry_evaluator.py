@@ -44,22 +44,27 @@ def detect_market(symbol: str) -> str:
     return "US"
 
 
-from functools import lru_cache
+# M3 fix: 快取避免一次評估內被呼叫 14+ 次都重打 yfinance.
+# Bug fix: 原本用 @lru_cache, 連「失敗 (None)」也會被快取 —— 但 None 代表的是「這次
+# yfinance 回空」而不是「這檔不存在」。_tw_peers() 一次丟 20 檔進 ThreadPoolExecutor,
+# 每檔最多 2 次 fetch → 瞬間約 40 個請求 (GitHub Actions 共用 IP 很容易被限流),
+# 被限到的那幾檔從此在本 process 內永遠回 None → 族群那一項 (_verdict ±8 分, 單項
+# 最大權重之一) 靜默消失, 分數看不出任何異常。改成只快取成功值。
+_SFX_CACHE: dict = {}
 
 
-@lru_cache(maxsize=512)
 def _tw_suffix_try(stock_id: str) -> Optional[str]:
-    """台股 yfinance 後綴: 上市 .TW / 上櫃 .TWO. 試到拿到非空 df 為止.
-
-    M3 fix: lru_cache 避免一次評估內被呼叫 14+ 次都重打 yfinance.
-    cache 跨 evaluate_entry 共用, 同個股 5d 內結果穩定 (上市/上櫃不會變).
-    """
+    """台股 yfinance 後綴: 上市 .TW / 上櫃 .TWO. 試到拿到非空 df 為止."""
+    hit = _SFX_CACHE.get(stock_id)
+    if hit:
+        return hit
     import data_sources as _ds
     for sfx in [".TW", ".TWO"]:
         df = _ds.fetch_yf_history(f"{stock_id}{sfx}", period="6mo", interval="1d")
         if df is not None and not df.empty and len(df) >= 60:
+            _SFX_CACHE[stock_id] = sfx
             return sfx
-    return None
+    return None  # 不寫入快取 — 下次 (或額度恢復後) 還會再試
 
 
 # ---------------------------------------------------------------------------

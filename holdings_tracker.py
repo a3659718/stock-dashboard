@@ -347,3 +347,35 @@ def check_stop_loss_breaches() -> List[Dict]:
     state["holdings_tracker"] = tracker
     watchlist_store.save_monitor_state(state)
     return alerts
+
+
+def unmark_stop_loss_fired(alerts: List[Dict]) -> None:
+    """回滾 check_stop_loss_breaches() 已蓋的 fired 章 — 推播送出失敗時呼叫。
+
+    Bug fix: check_stop_loss_breaches() 在「回傳之前」就寫了 fired_date /
+    near_stop_fired_date (那是每檔每天只推 1 次的去重欄位) 並 save_monitor_state。
+    呼叫端若 send_message 三次 retry 全失敗 (TG 503 / HTML parse 失敗), 當天 tw_open 與
+    tw_mid 都不會再推這檔的停損警報, 而 log 只印「持倉停損警報: N 檔跌破」看起來像推成功。
+    這是風控最高優先的推播, 必須可回滾 (同 chip_anomaly / volume_breakout 的 unmark 模式)。
+    """
+    if not alerts:
+        return
+    try:
+        state = watchlist_store.load_monitor_state()
+        tracker = state.setdefault("holdings_tracker", {})
+        sl_state = tracker.setdefault("stop_loss", {})
+        for a in alerts:
+            sid = str(a.get("stock_id", ""))
+            info = sl_state.get(sid)
+            if not isinstance(info, dict):
+                continue
+            if a.get("alert_type") == "breach":
+                info["fired_date"] = ""
+            else:
+                info["near_stop_fired_date"] = ""
+            sl_state[sid] = info
+        tracker["stop_loss"] = sl_state
+        state["holdings_tracker"] = tracker
+        watchlist_store.save_monitor_state(state)
+    except Exception as e:
+        print(f"[holdings_tracker] unmark_stop_loss_fired failed: {e}", flush=True)

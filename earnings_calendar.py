@@ -276,7 +276,11 @@ def get_stock_events(stock_id: str, market: str = "TW") -> Dict:
 
     # 利空利多: 取最早的事件當主要 sentiment
     primary_event_days = days_until
-    sentiment, brief = _interpret_event(primary_event_days, "earnings") if primary_event_days else ("neutral", "")
+    # Bug fix: _interpret_event() 內有專門處理 days_until == 0 的分支 (回「今日公布, 波動大」),
+    # 但這裡用 truthy 判斷 → 0 是 falsy 直接短路成 ("neutral", "") → 最該警示的「就是今天」
+    # 反而降級成中性且 brief 空白。(US 分支用的是 `if next_e`, next_e 是日期物件, 不受影響。)
+    sentiment, brief = (_interpret_event(primary_event_days, "earnings")
+                        if primary_event_days is not None else ("neutral", ""))
 
     return {
         "market": "TW",

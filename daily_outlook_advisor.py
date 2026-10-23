@@ -132,6 +132,16 @@ def _gemini_predict(market: str, snapshot: Dict) -> Dict:
         if not ai_analyzer.gemini_available():
             return {}
         import google.generativeai as genai
+        # Bug fix: 這是全 repo 唯一一處建 GenerativeModel 前沒有自己 configure() 的地方,
+        # 目前能跑是因為 scripts/market_open_alert.py 在 slot 分派前就已全域 configure 過
+        # (隱性耦合)。那段診斷碼一旦被移掉或改成條件執行, 08:30 的「🎯 走勢預測」會整段
+        # 靜默消失。這裡自己確保一次。
+        try:
+            _key = ai_analyzer.get_gemini_key()
+            if _key:
+                genai.configure(api_key=_key)
+        except Exception as _ce:
+            print(f"[outlook_advisor] genai.configure skipped: {_ce}", flush=True)
         model = genai.GenerativeModel("gemini-2.5-flash")
     except Exception as e:
         print(f"[outlook_advisor] gemini init fail: {e}", flush=True)

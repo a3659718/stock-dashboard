@@ -78,6 +78,11 @@ def _check_one_stock(sid: str) -> List[Dict]:
             return out
         cum_5d = net_5d.sum()
         pct_of_outstanding = abs(cum_5d) / shares_lots * 100 if shares_lots > 0 else 0
+        # 去重要綁「資料日期」而不是牆上時鐘 (見 check_chip_anomaly 的 Bug fix 說明)。
+        try:
+            _data_date = str(net_5d.index[-1])[:10]
+        except Exception:
+            _data_date = ""
 
         if is_streak_buy and pct_of_outstanding > 1.0:
             out.append({
@@ -88,6 +93,7 @@ def _check_one_stock(sid: str) -> List[Dict]:
                 "streak_days": 5,
                 "cum_5d_lots": int(cum_5d),
                 "pct_of_outstanding": round(pct_of_outstanding, 2),
+                "data_date": _data_date,
                 "tier": 2,
             })
         if is_streak_sell and pct_of_outstanding > 1.0:
@@ -99,6 +105,7 @@ def _check_one_stock(sid: str) -> List[Dict]:
                 "streak_days": 5,
                 "cum_5d_lots": int(cum_5d),
                 "pct_of_outstanding": round(pct_of_outstanding, 2),
+                "data_date": _data_date,
                 "tier": 2,
             })
     except Exception as e:
@@ -106,16 +113,46 @@ def _check_one_stock(sid: str) -> List[Dict]:
     return out
 
 
+_KEY_RETENTION_DAYS = 10
+
+
+def _alert_key(a: Dict) -> str:
+    """去重 key = 代號 : 類型 : 資料日期."""
+    return f"{a.get('symbol','')}:{a.get('type','')}:{a.get('data_date','')}"
+
+
+def _prune_keys(keys) -> set:
+    """丟掉超過保留期的 key, 以及舊的兩段式 (不帶資料日期) key。
+
+    注意: 真正寫回 state 的是 mark_alerts_sent(), 所以 prune 必須在那裡也做一次,
+    否則只在 check 的記憶體內生效 → 持久化的 alerted 會無限累積。
+    """
+    today_tpe = (dt.datetime.utcnow() + dt.timedelta(hours=8)).date()
+    cut = (today_tpe - dt.timedelta(days=_KEY_RETENTION_DAYS)).strftime("%Y-%m-%d")
+    out = set()
+    for k in (keys or []):
+        parts = str(k).split(":")
+        if len(parts) >= 3 and parts[2] and parts[2] >= cut:
+            out.add(str(k))
+    return out
+
+
 def check_chip_anomaly() -> List[Dict]:
     state = watchlist_store.load_monitor_state()
     ca_state = state.setdefault("chip_anomaly_alert", {})
-    # Bug fix: 跟上面 _check_one_stock 一樣改用 TPE 日期, 避免台北 00:00-07:59
-    # 這段時間 UTC 「今天」還沒跨日, 導致每日重置的時間點跟其他模組對不上。
-    today_str = (dt.datetime.utcnow() + dt.timedelta(hours=8)).date().strftime("%Y-%m-%d")
-    if ca_state.get("date") != today_str:
-        ca_state.clear()
-        ca_state.update({"date": today_str, "alerted": []})
-    alerted: set = set(ca_state.get("alerted") or [])
+    _today_tpe = (dt.datetime.utcnow() + dt.timedelta(hours=8)).date()
+    today_str = _today_tpe.strftime("%Y-%m-%d")
+    # Bug fix: 原本每天 (TPE 日界) 把 alerted 整包 clear()。這支純掃台股, 卻跑在 monitor
+    # (24x7), 而 TPE 換日是 UTC 16:00 —— 正好落在美股 session 的 monitor 窗內。於是台股
+    # 盤中推過並 claim 的 (symbol:type) 會在 UTC 16:00 之後被清空, 而 FinMind 的 5 日
+    # 連買/連賣用的是同一份資料 → 同一檔會在 TPE 00:08~01:59 再響一次 (notifier 的
+    # quiet hours 只覆蓋 TPE 02:00-06:00, 這段是會真的響鈴的)。
+    # 改成「去重 key 綁資料日期」, 完全不看牆上時鐘: 同一個資料日的同一檔同一型別只推一次,
+    # 等到新的交易日籌碼出來 (data_date 變了) 才會再推。key 保留 10 天後自動 prune。
+    # 註: 舊的兩段式 key (symbol:type) 不帶日期, 遷移時一律丟棄 —— 最多讓切換當天多推一次。
+    alerted: set = _prune_keys(ca_state.get("alerted"))
+    ca_state["date"] = today_str          # 僅保留供診斷, 不再據此清空
+    ca_state["alerted"] = sorted(alerted)
 
     universe = set()
     try:
@@ -141,8 +178,7 @@ def check_chip_anomaly() -> List[Dict]:
         for fut in as_completed(futs):
             try:
                 for a in fut.result():
-                    key = f"{a['symbol']}:{a['type']}"
-                    if key not in alerted:
+                    if _alert_key(a) not in alerted:
                         all_alerts.append(a)
             except Exception:
                 pass
@@ -156,13 +192,12 @@ def mark_alerts_sent(alerts: List[Dict]) -> None:
     try:
         state = watchlist_store.load_monitor_state()
         ca = state.setdefault("chip_anomaly_alert", {})
-        today_str = (dt.datetime.utcnow() + dt.timedelta(hours=8)).date().strftime("%Y-%m-%d")
-        if ca.get("date") != today_str:
-            ca.clear()
-            ca.update({"date": today_str, "alerted": []})
-        a_set = set(ca.get("alerted") or [])
+        # 不再按日清空 (見 check_chip_anomaly 的 Bug fix): key 已含資料日期。
+        ca["date"] = (dt.datetime.utcnow() + dt.timedelta(hours=8)).date().strftime("%Y-%m-%d")
+        # 寫回時一併 prune — 這裡是唯一真正持久化 alerted 的地方。
+        a_set = _prune_keys(ca.get("alerted"))
         for a in alerts:
-            a_set.add(f"{a.get('symbol','')}:{a.get('type','')}")
+            a_set.add(_alert_key(a))
         ca["alerted"] = sorted(a_set)
         state["chip_anomaly_alert"] = ca
         watchlist_store.save_monitor_state(state)
@@ -180,7 +215,7 @@ def unmark_alerts_sent(alerts: List[Dict]) -> None:
         ca = state.get("chip_anomaly_alert") or {}
         a_set = set(ca.get("alerted") or [])
         for a in alerts:
-            a_set.discard(f"{a.get('symbol','')}:{a.get('type','')}")
+            a_set.discard(_alert_key(a))
         ca["alerted"] = sorted(a_set)
         state["chip_anomaly_alert"] = ca
         watchlist_store.save_monitor_state(state)

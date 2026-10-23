@@ -451,10 +451,17 @@ def run_us_recommendation(top_n: int = 5, dedup_correlated: bool = True) -> dict
         if sym in _US_ETF_BLACKLIST:
             continue
         df = ds.fetch_yf_history(sym, period="6mo")
-        if df.empty or len(df) < 30:
+        # Bug fix: _ma_breakout_score() 在 len(df) < 60 時回空 dict, 但這裡門檻是 30 →
+        # 30~59 根 (上市未滿約 3 個月的新股, 或自訂 US_WATCHLIST 裡的新標的) 會讓 tech = {},
+        # 於是「現價」空白、MA20/MA50 突破與量比完全不計分、_score_row 的乖離過熱扣分也
+        # 整段跳過 → 這檔沒經過任何技術面評估卻能憑題材 + 新聞 + RS 排進 Top 5。
+        # 同檔 run_emerging_breakout() 用的就是 60 + `if not tech or not mom: continue`。
+        if df.empty or len(df) < 60:
             continue
         tech = _ma_breakout_score(df)
         mom = _momentum_metrics(df, spy_df)
+        if not tech or not mom:
+            continue
         theme = _theme_score_for(sym, news_pool)
 
         rows.append(_score_row(sym, tech, mom, theme, df))

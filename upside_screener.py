@@ -133,9 +133,13 @@ REVERSAL_PARAMS = {
 # ---------------------------------------------------------------------------
 # 抓取單檔的完整資料 (daily + chip)
 # ---------------------------------------------------------------------------
-def _fetch_one_full(stock_id: str, days_daily: int = 280) -> Dict:
+def _fetch_one_full(stock_id: str, days_daily: int = 400) -> Dict:
     """抓單檔: daily (含足夠長度算 52w + ATR + RSI) + 籌碼 dict.
-    days_daily 預設 280 = 約 1 年交易日 + 緩衝.
+    days_daily 預設 400 日曆日 ≈ 252 個交易日 + 緩衝.
+    Bug fix: 原本是 280 並註解「約 1 年交易日」, 但 280 日曆日 = 40 週 ≈ 190 根台股 K。
+    distance_from_52w(window=252) 在資料不足時會靜默退回 tail(len(c)) 不報錯, 所以
+    pct_from_52w_high / low、hi52 / lo52、fibonacci_extension_targets 全部其實是「約 9 個月」
+    的高低點 —— 而這些是三類篩選的硬門檻, 也是推播直接印出的「距 52w 低 +X%」文字。
     M5: 在 return 中附上實際最新交易日 (last_date), 給 caller 算真正的 data_date.
     """
     today = dt.date.today()
@@ -221,10 +225,10 @@ def _compute_features(stock_id: str, name: str, market: str,
         # 法人連續買超天數 (投信)
         it = ((chip or {}).get("institutional") or {}).get("Investment_Trust") or {}
         it_consec = it.get("consecutive_days", 0)
-        it_5d = it.get("5d_total", 0)
+        it_5d = it.get("5d_total_lots", (it.get("5d_total", 0) or 0) / 1000.0) or 0
         fi = ((chip or {}).get("institutional") or {}).get("Foreign_Investor") or {}
         fi_consec = fi.get("consecutive_days", 0)
-        fi_5d = fi.get("5d_total", 0)
+        fi_5d = fi.get("5d_total_lots", (fi.get("5d_total", 0) or 0) / 1000.0) or 0
 
         # ATR-based levels (短線)
         levels = ind.atr_based_levels(h, l, c) or {}
@@ -420,7 +424,14 @@ def _check_reversal(f: Dict) -> Optional[Dict]:
     if (f.get("vol_ratio_today") or 0) < p["min_vol_ratio_today"]:
         return None
     cons_score = f.get("chip_consensus_score") or 0
-    if f.get("chip_consensus_direction") != "bullish" and cons_score < p["min_chip_consensus_score"]:
+    # Bug fix: 這裡原本是 `and` —— chip_consensus_score 是「同向方數」
+    # (chip_analyzer.calc_chip_consensus), 永遠非負 (偏空時 score = n_bear >= 1), 不是強度,
+    # 所以不能跟 `!= bullish` 用 and 串: 「偏空且 score >= 1」時整個條件為 False, 短路掉裡層
+    # 的「至少 1 家法人轉買」檢查 → 三大法人近 5 日同向賣超的股票照樣進反轉清單, 反而只有
+    # mixed (score = 0) 的才被嚴格檢查, 正好把最該擋的放過去。
+    # 正確語意: 只有「明確偏多 且 同向方數達門檻」才免檢, 其餘一律要求至少一家法人轉買。
+    if (f.get("chip_consensus_direction") != "bullish"
+            or cons_score < p["min_chip_consensus_score"]):
         # 至少要有 1 家法人轉買 (寬鬆條件)
         if (f.get("it_5d_net") or 0) <= 0 and (f.get("fi_5d_net") or 0) <= 0:
             return None
@@ -438,10 +449,10 @@ def _check_reversal(f: Dict) -> Optional[Dict]:
         reasons.append(f"RSI {f['rsi']:.0f} 超賣區回升")
         score += 10
     if (f.get("it_5d_net") or 0) > 0:
-        reasons.append(f"投信 5d 由賣轉買 +{f['it_5d_net']:,}")
+        reasons.append(f"投信 5d 由賣轉買 +{f['it_5d_net']:,.0f} 張")
         score += 15
     if (f.get("fi_5d_net") or 0) > 0:
-        reasons.append(f"外資 5d 由賣轉買 +{f['fi_5d_net']:,}")
+        reasons.append(f"外資 5d 由賣轉買 +{f['fi_5d_net']:,.0f} 張")
         score += 15
     if f.get("current") and f.get("ma20") and f["current"] > f["ma20"]:
         reasons.append("已重新站上 MA20")

@@ -139,7 +139,11 @@ def _summarize_institutional(inst: pd.DataFrame) -> str:
     }
     lines = []
     for k, v in by_name.items():
-        lines.append(f"  {name_map.get(k, k)}: {int(v):+,} 張")
+        # Bug fix: FinMind TaiwanStockInstitutionalInvestorsBuySell 的 buy/sell 單位是「股」
+        # (chip_analyzer.py 已為此加了 *_lots 欄位並留註解)。這裡直接讀 raw dataset 沒走
+        # chip_analyzer, 原本把股數直接印成「張」→ 餵給 Gemini 的 prompt 量級錯 1000 倍
+        # (「+12,345,678 張」), AI 會據此推論籌碼極度集中。1 張 = 1000 股。
+        lines.append(f"  {name_map.get(k, k)}: {int(round(v / 1000.0)):+,} 張")
     return "30 日法人累計買賣超:\n" + "\n".join(lines)
 
 

@@ -114,7 +114,10 @@ def save_snapshot(combined_df: pd.DataFrame, snapshot_date: Optional[str] = None
     # 2) Local CSV (Streamlit Cloud 會在 reboot 後消失，但 session 內可用)
     if os.path.exists(LOCAL_CSV):
         try:
-            old = pd.read_csv(LOCAL_CSV)
+            # Bug fix: 沒帶 dtype 時 "0050" 會被讀成 50 (同 data_sources._load_stock_info_cache
+            # 已處理過的問題) → evaluate_history_performance 的 FinMind 查表落空 → return%
+            # 變 NaN 被 history_summary 靜默濾掉 (ETF 追蹤紀錄整批消失)。
+            old = pd.read_csv(LOCAL_CSV, dtype={"stock_id": str})
             combined = pd.concat([old, new_df], ignore_index=True)
         except Exception:
             combined = new_df
@@ -140,7 +143,7 @@ def load_history() -> pd.DataFrame:
             pass
     if os.path.exists(LOCAL_CSV):
         try:
-            return pd.read_csv(LOCAL_CSV)
+            return pd.read_csv(LOCAL_CSV, dtype={"stock_id": str})
         except Exception:
             return pd.DataFrame(columns=SNAPSHOT_COLUMNS)
     return pd.DataFrame(columns=SNAPSHOT_COLUMNS)

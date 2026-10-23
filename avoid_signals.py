@@ -39,19 +39,24 @@ def _score_avoid(chip: Dict) -> tuple:
 
     # A. 外資連續賣超
     fi_consec = fi.get("consecutive_days", 0) or 0
-    fi_5d = fi.get("5d_total", 0) or 0
-    if fi_consec >= 5 and fi_5d < -3000:
+    # 改讀 *_lots (張)。fallback: 舊 dict 沒有這個欄位時就地 /1000, 避免靜默變成 0。
+    fi_5d = fi.get("5d_total_lots", (fi.get("5d_total", 0) or 0) / 1000.0) or 0
+    # Bug fix: chip_analyzer._count_consecutive() 連續賣超回「負值」(days * direction),
+    # 所以「外資連賣 5 日」必須是 <= -5。原本寫 >= 5 → 連賣時 fi_consec 是 -5/-6/-7,
+    # 條件恆為 False → 本模組權重最高的 A 條 (3 分) 從來沒被計過, 滿分實際只有 8。
+    # 對照 closing_analyzer.py 對同一欄位用的是 `consec <= -3`。
+    if fi_consec <= -5 and fi_5d < -3000:
         score += 3
-        reasons.append(f"外資連賣 {fi_consec} 日 ({fi_5d:,}張)")
+        reasons.append(f"外資連賣 {abs(fi_consec)} 日 ({fi_5d:,.0f}張)")
     elif fi_5d < -2000:
         score += 1.5
-        reasons.append(f"外資 5 日賣超 {abs(fi_5d):,}張")
+        reasons.append(f"外資 5 日賣超 {abs(fi_5d):,.0f}張")
 
     # 投信跟賣 加重
-    it_5d = it.get("5d_total", 0) or 0
+    it_5d = it.get("5d_total_lots", (it.get("5d_total", 0) or 0) / 1000.0) or 0
     if it_5d < -500 and fi_5d < 0:
         score += 1.5
-        reasons.append(f"投信也賣 {abs(it_5d):,}張")
+        reasons.append(f"投信也賣 {abs(it_5d):,.0f}張")
 
     # B. 中期走弱 (近 20 日跌幅)
     # Bug fix (2026-08): chip_analyzer 寫入的 price key 只有
@@ -90,7 +95,7 @@ def _score_avoid(chip: Dict) -> tuple:
     try:
         if float(margin_30d) > 20 and fi_5d < -1500:
             score += 1.5
-            reasons.append(f"散戶接刀 (融資+{float(margin_30d):.0f}% / 外資 {fi_5d:,}張)")
+            reasons.append(f"散戶接刀 (融資+{float(margin_30d):.0f}% / 外資 {fi_5d:,.0f}張)")
     except (TypeError, ValueError):
         pass
 

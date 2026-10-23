@@ -70,7 +70,11 @@ def check_trend_template(symbol: str) -> Dict:
                 stock_12w = (cur / float(c.iloc[-63]) - 1) * 100
                 spy_12w = (float(spy["Close"].iloc[-1]) / float(spy["Close"].iloc[-63]) - 1) * 100
                 # RS rating = 100 * percentile (簡化用 stock-spy diff)
-                if spy_12w != 0:
+                # Bug fix: 原本外面包了 `if spy_12w != 0:` —— 這正是 us_screener.py:88-92
+                # 註解裡說「多餘且錯誤的防呆」而拿掉的那個寫法。SPY 12 週報酬恰好等於 0.0
+                # 時 rs_rating 會是 None → 條件 8 必然不過 → pass_8_of_8 不可能成立。
+                # 0 是合法的報酬率 (rs_diff = stock_12w - 0 本來就算得出來), 不需防呆。
+                if True:
                     rs_diff = stock_12w - spy_12w
                     # diff > 30pp → 100; > 15pp → 80; > 5pp → 70; < 0 → 30
                     if rs_diff >= 30: rs_rating = 95

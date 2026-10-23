@@ -1,35 +1,15 @@
-"""
-breakout_consolidation_alert.py
-盤整突破 alert (美股) — 找「盤整很久 + 開盤後第一根突破 + 熱門題材」.
 
-觸發條件 (3 同時):
-  1. 過去 20 日波動率窄: ATR/Price ≤ 2.5% (相對窄幅)
-  2. 過去 20 日 high/low range 窄: (max-min)/min ≤ 12%
-  3. 今日 today_pct ≥ +2% (跳出盤整)
-  4. 收盤 > 20d high (突破)
-  5. (可選) vol_ratio ≥ 2.0 (有量)
-  6. theme hot score 高 (用 theme_analyzer 過濾)
-
-挑 top 5 (按 breakout_pct × theme_score 排序).
-
-API:
-  check_breakout_consolidation() -> List[Dict]
-  mark_alerts_sent(alerts) -> None
-"""
 from __future__ import annotations
 
 import datetime as dt
 from typing import Dict, List, Optional
 
 import watchlist_store
+import pandas as pd
 
 
 def _us_today_str() -> str:
-    """美東 (ET) 的今天日期字串 — 這支掃美股, 「一天」要用美東的一天算.
 
-    見 check_breakout_consolidation() 內的 bug 說明: 用 UTC 日期會在台北早上
-    (亞股 monitor tick) 把當日去重表清空, 造成前一晚推過的美股突破隔天再推一次。
-    """
     now_utc = dt.datetime.utcnow()
     try:
         import index_alerts
@@ -39,7 +19,6 @@ def _us_today_str() -> str:
     return (now_utc - dt.timedelta(hours=4 if dst else 5)).strftime("%Y-%m-%d")
 
 
-# 美股 universe (大型權值 + AI/熱門題材)
 DEFAULT_US_UNIVERSE_BREAKOUT = [
     "NVDA", "AAPL", "MSFT", "GOOGL", "AMZN", "META", "TSLA",
     "AVGO", "AMD", "PLTR", "DELL", "ORCL", "CRM", "LLY", "REGN",
@@ -51,7 +30,6 @@ DEFAULT_US_UNIVERSE_BREAKOUT = [
 def _calc_consolidation_metrics(df) -> Dict:
     """算 20d 盤整指標 + 今日突破判斷."""
     try:
-        import pandas as pd
         c = df["Close"].astype(float)
         h = df["High"].astype(float)
         low = df["Low"].astype(float)
@@ -70,9 +48,7 @@ def _calc_consolidation_metrics(df) -> Dict:
             return {}
         max_20 = float(h20.max())
         min_20 = float(l20.min())
-        # range tight: (max-min)/min ≤ 12%
         range_pct = (max_20 - min_20) / min_20 * 100 if min_20 > 0 else 999
-        # ATR/Price (TR avg / current)
         tr = (h20 - l20).abs()
         atr = float(tr.mean())
         atr_pct = atr / cur * 100 if cur > 0 else 999
@@ -94,7 +70,6 @@ def _calc_consolidation_metrics(df) -> Dict:
 
 
 def _scan_one_stock(sid: str) -> Optional[Dict]:
-    """掃單檔. 回 alert dict 或 None."""
     try:
         import data_sources as ds
         df = ds.fetch_yf_history(sid, period="90d", interval="1d")
@@ -103,7 +78,6 @@ def _scan_one_stock(sid: str) -> Optional[Dict]:
         m = _calc_consolidation_metrics(df)
         if not m:
             return None
-        # 觸發條件 (relaxed: ATR 2.5% / range 12% / 漲 2% / 突破)
         if m["atr_pct_20d"] > 2.5: return None
         if m["range_pct_20d"] > 12: return None
         if m["today_pct"] < 2.0: return None
@@ -111,14 +85,12 @@ def _scan_one_stock(sid: str) -> Optional[Dict]:
         # 量增 (鬆綁: ≥ 1.5x)
         if m["vol_ratio"] < 1.5: return None
 
-        # 熱門題材 score (用 theme_analyzer.theme_score 實際 API)
         theme_score_val = 0
         theme_tag = ""
         try:
             import theme_analyzer
             tr = theme_analyzer.theme_score(sid)
             if isinstance(tr, dict):
-                # Bug fix: theme_score() 回的是 narrative_tags / total_score, 不是 narratives / score
                 #          → 原本題材 tag 永遠空、score 永遠 0, 題材加權形同失效.
                 narratives = tr.get("narrative_tags") or []
                 if narratives:
@@ -149,18 +121,26 @@ def _scan_one_stock(sid: str) -> Optional[Dict]:
 
 
 def check_breakout_consolidation(top_n: int = 5) -> List[Dict]:
-    """掃 universe + watchlist, 找盤整突破 top N."""
+    # Bug fix: 這支的 universe 全是美股, 但它在 monitor mode 也會被呼叫 (monitor 是 24x7,
+    # 且刻意豁免假日檢查)。去重 state 用的是美東日界 (_us_today_str), 而美東換日落在
+    # UTC 04:00 (夏令) / 05:00 (冬令) —— 正好在亞股 session 的 monitor 窗內, 此時美股日線
+    # 還是前一交易日的, 觸發條件 (今日 ≥2%、量比 ≥1.5、突破 20 日高) 全部不變:
+    #     tick UTC 00:08~03:38 → _us_today_str() 還是 D   (TPE 08:08~11:38, 去重有效)
+    #     tick UTC 04:08 起     → 變成 D+1               (TPE 12:08, state 被清空)
+    # → 前一晚推過的同一批會在 TPE 12:08 原封不動再推一次, 還多燒一輪 push_cap 次要額度。
+    # alert_priority 的跨類去重窗只有 30 分鐘, 擋不住隔十幾小時的這一次。
+    # 美股沒開盤時掃它本來也沒有意義 → 直接 gate 在美股 session 內 (us_open 10:02 ET /
+    # us_mid 11:32 ET 都在 session 內, 不影響正常推播)。
+    try:
+        import index_alerts as _ia
+        if not _ia._is_market_in_session("US"):
+            print("[breakout] 美股未開盤 → 跳過 (避免日界換日造成重複推播)", flush=True)
+            return []
+    except Exception as _se:
+        print(f"[breakout] session 判斷失敗, 照舊執行 (non-fatal): {_se}", flush=True)
     state = watchlist_store.load_monitor_state()
     bo_state = state.setdefault("breakout_consolidation_alert", {})
-    # Bug fix (2026-08): 原本用 dt.date.today() = GitHub Actions 的 UTC 日期。
-    #   這支掃的是【美股】日線 (period="90d", interval="1d"), 但 UTC 日界落在
-    #   台北 08:00 —— 也就是「亞股時段的 monitor tick」(TPE 09:08~13:08) 已經算
-    #   新的一天了。於是:
-    #     週二 TPE 22:15 推出 NVDA 突破 → alerted 記在 UTC 週二
-    #     週三 TPE 09:08 → UTC 日期翻頁 → bo_state.clear() → alerted 清空
-    #     此時美股已收盤, 日線最後一根還是週二那根, 篩選條件原封不動全部成立
-    #     → 同一批標的隔天早上被【原封不動重推一次】(alert_priority 的 30 分鐘窗早過期)
-    #   改用美東日期: 美股一個交易日內不會翻頁, 亞股時段也不會誤觸重置。
+
     today_str = _us_today_str()
     if bo_state.get("date") != today_str:
         bo_state.clear()
@@ -169,7 +149,6 @@ def check_breakout_consolidation(top_n: int = 5) -> List[Dict]:
 
     universe = set(DEFAULT_US_UNIVERSE_BREAKOUT)
     try:
-        # load_watchlist() 回 dict 陣列 → 用 load_watchlist_ids("US") 只取美股代號
         for s in watchlist_store.load_watchlist_ids("US"):
             universe.add(s)
     except Exception:
@@ -210,8 +189,7 @@ def mark_alerts_sent(alerts: List[Dict]) -> None:
 
 
 def unmark_alerts_sent(alerts: List[Dict]) -> None:
-    """回滾 mark_alerts_sent — 送出失敗 / 被 daily cap 擋時呼叫, 把剛 claim 的 symbol 移除,
-    讓下個 tick 能重試 (否則被靜默吞掉永不送出)."""
+
     if not alerts:
         return
     try:

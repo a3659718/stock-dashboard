@@ -39,7 +39,12 @@ def classify_stage(symbol: str, market: str = "auto") -> Dict:
                 df = ds.fetch_yf_history(f"{symbol}.TWO", period="1y", interval="1d")
         else:
             df = ds.fetch_yf_history(symbol, period="1y", interval="1d")
-        if df is None or df.empty or len(df) < 160:
+        # Bug fix: 下面 rolling(150).iloc[-21] 需要 150 + 21 - 1 = 170 根才非 NaN。
+        # 原本只擋 < 160 → 160~169 根時 ma_30w_prev 是 NaN, `NaN > 0` 為 False 讓
+        # slope_pct 被設成 0 → abs(slope) <= 1.0 恆成立 → 永遠判「Stage 1 整理」,
+        # 而輸出的 ma30w_slope_pct 老實顯示 0.0, 完全看不出是資料不足。
+        # 同 minervini_screener.py 已修過的同類問題 (那邊是 210 → 需要 220)。
+        if df is None or df.empty or len(df) < 171:
             return out
 
         c = df["Close"].astype(float)
@@ -68,7 +73,18 @@ def classify_stage(symbol: str, market: str = "auto") -> Dict:
         })
 
         # 分類規則
-        if slope_pct > 1.0 and price_above:
+        # Bug fix: Stage 3 的判斷原本排在 Stage 2 之後 (`elif slope_pct > 0.5 and
+        # price_above and price_dist_pct > 15`), 但 Stage 2 的條件 `slope_pct > 1.0
+        # and price_above` 範圍更寬 → 斜率 3%、價格高出 30W MA 30% 的過熱股會先被
+        # Stage 2 接走並標成「🟢 Stage 2 上升期 (買進區)」, Stage 3 只剩
+        # slope ∈ (0.5, 1.0] 的窄帶進得去, 與 docstring「Stage 3 = 漲多, 準備出場」
+        # 不符。把 Stage 3 (更特定的條件) 移到 Stage 2 之前判斷。
+        if slope_pct > 0.5 and price_above and price_dist_pct > 15:
+            # Stage 3: 頂部 (漲多)
+            out["stage"] = 3
+            out["label"] = "🟡 Stage 3 頂部 (準備出場)"
+            out["advice"] = "漲多, 留意轉弱訊號, 分批停利"
+        elif slope_pct > 1.0 and price_above:
             # Stage 2: 上升期
             out["stage"] = 2
             if vol_increase >= 1.3:
@@ -82,11 +98,6 @@ def classify_stage(symbol: str, market: str = "auto") -> Dict:
             out["stage"] = 4
             out["label"] = "🔴 Stage 4 下跌期 (避開)"
             out["advice"] = "下跌趨勢, 完全避開不接刀"
-        elif slope_pct > 0.5 and price_above and price_dist_pct > 15:
-            # Stage 3: 頂部 (漲多)
-            out["stage"] = 3
-            out["label"] = "🟡 Stage 3 頂部 (準備出場)"
-            out["advice"] = "漲多, 留意轉弱訊號, 分批停利"
         elif abs(slope_pct) <= 1.0:
             # Stage 1: 整理
             if price_above:

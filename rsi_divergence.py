@@ -95,11 +95,18 @@ def detect_divergence(symbol: str, market: str = "TW", lookback: int = LOOKBACK)
         if df is None or df.empty or len(df) < lookback:
             return out
 
+        # Bug fix: 原本先 tail(lookback) 再算 RSI(14) → 等於讓 RSI 在 60 根的窗口內重新暖機,
+        # 窗口前段 (idx 13~20) 與用完整歷史算出來的 RSI 最大差 3.3, 而 MIN_RSI_DIFF 只有 2.0
+        # → 誤差量級大於判定門檻, 會產生假背離或漏背離; idx 0~13 還是 NaN, swing point 落在
+        # 那裡時整段背離檢查會被跳過。抓的是 6mo (約 125 根) 資料本來就夠, 改成先算後截。
+        _closes_full = df["Close"].astype(float)
+        _rsi_full = _compute_rsi(_closes_full)
         df = df.tail(lookback).reset_index(drop=True)
         closes = df["Close"].astype(float)
         highs = df["High"].astype(float)
         lows = df["Low"].astype(float)
-        rsi = _compute_rsi(closes)
+        rsi = (_rsi_full.tail(lookback).reset_index(drop=True)
+               if _rsi_full is not None else None)
         if rsi is None:
             return out
 

@@ -15,19 +15,26 @@ API:
 from __future__ import annotations
 
 from typing import Dict, List, Optional
-from functools import lru_cache
-
 import data_sources as ds
 
 
-@lru_cache(maxsize=512)
+# Bug fix: 原本用 @lru_cache 連失敗 (None) 一起快取 → 一次 yfinance 限流就讓那幾檔
+# 在本 process 內永遠拿不到後綴 (詳見 entry_evaluator._tw_suffix_try 的註解)。
+# 改成只快取成功值。
+_SFX_CACHE: dict = {}
+
+
 def _tw_suffix(stock_id: str) -> Optional[str]:
     """跟 entry_evaluator._tw_suffix_try 同邏輯, 試 .TW / .TWO."""
+    hit = _SFX_CACHE.get(stock_id)
+    if hit:
+        return hit
     for sfx in [".TW", ".TWO"]:
         df = ds.fetch_yf_history(f"{stock_id}{sfx}", period="6mo", interval="1d")
         if df is not None and not df.empty and len(df) >= 60:
+            _SFX_CACHE[stock_id] = sfx
             return sfx
-    return None
+    return None  # 不寫入快取
 
 
 def _quick_snapshot(symbol: str, market: str) -> Optional[Dict]:
@@ -203,8 +210,16 @@ def quick_evaluate(symbol: str, market: str = "auto") -> Dict:
             score += 4
     fh = snap.get("from_52w_high_pct")
     if fh is not None:
+        # Bug fix: 這裡原本是 `fh > -3 → score -= 3` (追高風險), 但 entry_evaluator.py
+        # 已經把同一個條件明確標成「Bug 1: 距 52w 高改 +3 (強勢突破)」並改成加分, 只在
+        # RSI ≥ 80 時才扣。兩支對同一條件給出相反 6 分的評價, 而 actionable_picks 的
+        # entry_score 取自本檔 (batch_evaluate), 又是 ai_confidence_scorer 算 orig_f 的
+        # 基底 → 強勢突破股在 Top 10 排序裡反而被倒扣。改成與 entry_evaluator 一致。
         if fh > -3:
-            score -= 3  # 追高風險
+            if rsi is not None and rsi >= 80:
+                score -= 2   # 高點 + RSI 超買
+            else:
+                score += 3   # 強勢突破
     vr = snap.get("vol_ratio")
     if vr and vr >= 1.5:
         score += 4
@@ -226,12 +241,12 @@ def quick_evaluate(symbol: str, market: str = "auto") -> Dict:
             score -= 4
 
     # soft cap (同 evaluate_entry)
-    if score < 20:
-        excess = 20 - score
-        score += int(excess * 0.6)
-    if score > 80:
-        excess = score - 80
-        score -= int(excess * 0.4)
+    # Bug fix: entry_evaluator 已在「Bug 7: soft cap 反向 — 不再壓抑 > 75」把上方的
+    # cap 移除、並把下方拉抬從 0.6 降到 0.3 (留住 AVOID 訊號), 本檔還留著舊寫法 →
+    # 同一檔股票兩支算出來的 entry_score 會不一致, 好股票在這裡被壓分。對齊之。
+    if score < 25:
+        excess = 25 - score
+        score += int(excess * 0.3)
     score = max(0, min(100, score))
 
     label_info = _label_from_score(score)

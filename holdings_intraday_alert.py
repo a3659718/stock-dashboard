@@ -84,6 +84,17 @@ def _eval_holding_intraday(h: Dict) -> Optional[Dict]:
     market = h.get("market", "TW")  # holdings_store 預設 TW
     stop_price = h.get("stop_price")  # 用戶設的停損價 (可能無)
 
+    # Bug fix: check_holdings_intraday_risk() 只要「TW 或 US 任一時段內」就把全部持倉丟進來,
+    # 這裡原本不分市場 → 台股盤中 (美股已收盤) 評估美股持倉時, period="2d" 的 5m bars 最新
+    # 一天就是「昨天」, today_pct 其實是昨日全天漲跌 → 台股早盤推出「NVDA 今日大跌 -4%」;
+    # 更糟的是 mark_alerts_sent() 會把它記成當日已推 (per-stock daily cap = 1), 當晚美股真的
+    # 下殺時反而完全不推。index_alerts._fetch_intraday_anchor_data 有同樣的過期資料檢查。
+    if str(market).upper() == "TW":
+        if not _is_tw_session():
+            return None
+    elif not _is_us_session():
+        return None
+
     # 取 ticker
     if market == "TW":
         sfx = _tw_suffix(sid)

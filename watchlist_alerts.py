@@ -256,7 +256,6 @@ def check_watchlist_alerts() -> List[Dict]:
             continue
 
         direction = "漲" if primary_pct > 0 else "跌"
-        bucket_key = [direction, triggered_thr]
 
         # dedup: 今日同 direction × thr 已觸發過 → skip
         fired = sid_state.get("fired_buckets", [])
@@ -282,12 +281,75 @@ def check_watchlist_alerts() -> List[Dict]:
             "direction": direction,
         })
 
-        fired.append(bucket_key)
-        sid_state["fired_buckets"] = fired
-
+    # Bug fix: 原本在這裡就 fired.append(bucket_key) 並持久化 —— 但實際送出是「另一顆
+    # 按鈕」(app.py 的「Send 警報 to TG」)。只要使用者按了檢查卻沒按送出 (或送出失敗),
+    # claim 已經寫進 monitor_state → 當天同一檔同方向同門檻再也不會觸發, 再按檢查只會
+    # 看到「目前無新觸發警報」, 而使用者其實一封都沒收到。本模組也是這批 alert 裡唯一
+    # 沒有 unmark 回滾的。改成由送出端呼叫 mark_alerts_sent() 才登記。
+    # 這裡仍然要存 state —— baseline (base_price / today_open / prev_close / base_source)
+    # 是在上面算出來的, 不存會每次重算基準。
     state["watchlist_alerts"] = wl_state
     watchlist_store.save_monitor_state(state)
     return alerts
+
+
+def _bucket_of(a: Dict) -> Optional[list]:
+    d = a.get("direction")
+    thr = a.get("threshold")
+    if d is None or thr is None:
+        return None
+    try:
+        return [str(d), float(thr)]
+    except (TypeError, ValueError):
+        return None
+
+
+def mark_alerts_sent(alerts: List[Dict]) -> None:
+    """送出成功後才登記 fired_buckets (claim). 由推播端呼叫."""
+    if not alerts:
+        return
+    try:
+        state = watchlist_store.load_monitor_state()
+        wl_state = state.setdefault("watchlist_alerts", {})
+        for a in alerts:
+            sid = str(a.get("stock_id", ""))
+            b = _bucket_of(a)
+            if not sid or b is None:
+                continue
+            sid_state = wl_state.setdefault(sid, {})
+            fired = list(sid_state.get("fired_buckets") or [])
+            if not any(str(x[0]) == b[0] and abs(float(x[1]) - b[1]) < 0.01
+                        for x in fired if isinstance(x, (list, tuple)) and len(x) >= 2):
+                fired.append(b)
+            sid_state["fired_buckets"] = fired
+        state["watchlist_alerts"] = wl_state
+        watchlist_store.save_monitor_state(state)
+    except Exception as e:
+        print(f"[watchlist_alerts] mark_alerts_sent failed: {e}", flush=True)
+
+
+def unmark_alerts_sent(alerts: List[Dict]) -> None:
+    """回滾 mark_alerts_sent — 送出失敗時呼叫, 讓下次檢查還能再觸發."""
+    if not alerts:
+        return
+    try:
+        state = watchlist_store.load_monitor_state()
+        wl_state = state.setdefault("watchlist_alerts", {})
+        for a in alerts:
+            sid = str(a.get("stock_id", ""))
+            b = _bucket_of(a)
+            if not sid or b is None:
+                continue
+            sid_state = wl_state.get(sid) or {}
+            fired = [x for x in (sid_state.get("fired_buckets") or [])
+                      if not (isinstance(x, (list, tuple)) and len(x) >= 2
+                              and str(x[0]) == b[0] and abs(float(x[1]) - b[1]) < 0.01)]
+            sid_state["fired_buckets"] = fired
+            wl_state[sid] = sid_state
+        state["watchlist_alerts"] = wl_state
+        watchlist_store.save_monitor_state(state)
+    except Exception as e:
+        print(f"[watchlist_alerts] unmark_alerts_sent failed: {e}", flush=True)
 
 
 def reset_watchlist_baseline(stock_id: str) -> bool:

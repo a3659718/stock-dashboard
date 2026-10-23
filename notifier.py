@@ -180,7 +180,15 @@ def send_message(text: str, disable_preview: bool = True,
                   disable_notification: bool = False,
                   category: Optional[str] = None,
                   _stamped: bool = False,
+                  chat_id: Optional[str] = None,
+                  count_as_push: bool = True,
                   **_kwargs) -> tuple[bool, str]:
+    """chat_id: 指定收訊對象 (預設用 TELEGRAM_CHAT_ID)。
+
+    Bug fix: scripts/tg_callback_listener._reply() 一直在傳 chat_id=, 但這個參數原本
+    被 **_kwargs 吞掉且完全未使用 → 一律送到環境變數那個 chat。單一聊天室下看不出差別,
+    但 bot 被加進第二個 chat / 群組時, 按鈕的後續訊息會送錯地方 (toast 有、詳細分析沒出現)。
+    """
 
     if text is None or not str(text).strip():
         return False, "送出失敗: 訊息為空"
@@ -205,6 +213,7 @@ def send_message(text: str, disable_preview: bool = True,
                 disable_notification=(disable_notification or _i > 0),          # 只有第一封響鈴
                 category=(category if _i == 0 else None),                      # daily cap 只算一次
                 _stamped=True,                                                  # 已戳過, 分段不重複加
+                chat_id=chat_id,                                                # 分段要送同一個 chat
             )
             ok_all = ok_all and ok_p
             infos.append(f"part{_i+1}:{info_p}")
@@ -234,7 +243,8 @@ def send_message(text: str, disable_preview: bool = True,
     import time as _time
     last_info = ""
     for attempt in range(3):
-        ok, info = _send_message_inner(text, disable_preview, reply_markup, disable_notification)
+        ok, info = _send_message_inner(text, disable_preview, reply_markup,
+                                        disable_notification, chat_id)
         last_info = info
         if ok:
             if attempt > 0:
@@ -246,7 +256,11 @@ def send_message(text: str, disable_preview: bool = True,
                 except Exception as _ce:
                     print(f"[notifier] push_cap mark_consumed fail (non-fatal): {_ce}", flush=True)
             global SEND_OK_COUNT
-            SEND_OK_COUNT += 1
+            # count_as_push=False 用於「推播失敗通知」這類 meta 訊息 —— 它們不該算成
+            # 「本次有成功推播」, 否則 scripts/market_open_alert.py 的 slot claim 會把
+            # 備援 cron 一起擋掉 (主推失敗了卻宣稱推過)。
+            if count_as_push:
+                SEND_OK_COUNT += 1
             _record_push_safe(text, ok, info)
             return ok, info
         if any(k in info for k in ("尚未設定", "chat not found", "Forbidden", "Unauthorized")):
@@ -259,7 +273,8 @@ def send_message(text: str, disable_preview: bool = True,
 
 def _send_message_inner(text: str, disable_preview: bool = True,
                           reply_markup: Optional[dict] = None,
-                          disable_notification: bool = False) -> tuple[bool, str]:
+                          disable_notification: bool = False,
+                          chat_id_override: Optional[str] = None) -> tuple[bool, str]:
     """實際送出 — 拆出避免 record_push hook 影響原邏輯."""
     import json as _json
     # 防 None / 空文 — 不能 raise, 要 graceful 回傳
@@ -267,7 +282,7 @@ def _send_message_inner(text: str, disable_preview: bool = True,
         return False, "送出失敗: 訊息為空 (text is None or whitespace)"
     text = str(text)
     token = _bot_token()
-    chat_id = _chat_id()
+    chat_id = str(chat_id_override) if chat_id_override else _chat_id()
     if not (token and chat_id):
         return False, "尚未設定 TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID"
     url = f"https://api.telegram.org/bot{token}/sendMessage"
@@ -989,8 +1004,21 @@ def fmt_monitor_alerts(watchlist_alerts: list, index_alerts: list, crypto_alerts
             try:
                 t_used = a.get("threshold_used")
                 # 只在動態門檻 != 預設時才顯示 (避免每次都顯示同樣的)
-                if t_used is not None and abs(float(t_used) - float(a.get("threshold_bucket_size", t_used) or t_used)) > 0.1:
-                    extra_parts.append(f"門檻 {int(float(t_used))}點")
+                # Bug fix: 原本比對的 "threshold_bucket_size" 全專案沒有任何 producer
+                # (index_alerts 出的是 threshold_bucket = 階梯格數, 與 threshold_used),
+                # .get(key, t_used) 恆回 t_used → 差值恆為 0 → 條件永遠 False。而 ATR 動態
+                # 門檻最多會把門檻拉到設定值的 3 倍 (費半 100 → 300), 使用者只感覺「警報
+                # 忽然變少」卻看不到原因。改成跟 INDEX_CONFIG 的設定值比;
+                # 讀不到設定就維持原本「不顯示」的行為, 不會多出雜訊。
+                _base_thr = None
+                try:
+                    import index_alerts as _ia_cfg
+                    _base_thr = (_ia_cfg.INDEX_CONFIG.get(a.get("symbol")) or {}).get("threshold")
+                except Exception:
+                    _base_thr = None
+                if (t_used is not None and _base_thr is not None
+                        and abs(abs(float(t_used)) - float(_base_thr)) > 0.1):
+                    extra_parts.append(f"門檻 {int(abs(float(t_used)))}點")
             except Exception:
                 pass
             alerts_today = a.get("alerts_today")
@@ -1295,9 +1323,17 @@ def _fmt_potential_picks_block(picks: list, hide_low_rr: bool = True,
         # Bug fix (2026-09-07): _safe_int_or_dash 用 int() 往零截斷, 18.4% 印成 18%、
         # -7.2% 印成 -7%, 跟同一段的價格 (2 位小數) / R:R (2 位小數) 精度不一致。
         # 改用 _safe_pct 保留 1 位小數 (它自己會處理 None/NaN -> "—")。
-        tp_str = _safe_pct(p.get("target_pct"), "+.1f", suffix="")
-        sp_str = _safe_pct(p.get("stop_pct"), "+.1f", suffix="")
-        out.append(f"   目標 {target} ({tp_str}%) / 停損 {stop} ({sp_str}%)")
+        # Bug fix: potential_picker._validate_gemini_pick() 在價位亂序時會把
+        # entry_low / entry_high / target_price / stop_loss 全清成 None 並標
+        # _levels_invalid, 但沒有清 Gemini 給的 target_pct / stop_pct → 這裡原本照印,
+        # 變成「目標 — (+11.0%) / 停損 — (-7.0%)」: 價格是「—」但百分比照印, 而那組
+        # 百分比正是來自同一份被判定為亂序的資料。資料異常時只印價位欄 (都是「—」)。
+        if p.get("_levels_invalid"):
+            out.append(f"   目標 {target} / 停損 {stop} (價位資料異常, 不顯示幅度)")
+        else:
+            tp_str = _safe_pct(p.get("target_pct"), "+.1f", suffix="")
+            sp_str = _safe_pct(p.get("stop_pct"), "+.1f", suffix="")
+            out.append(f"   目標 {target} ({tp_str}%) / 停損 {stop} ({sp_str}%)")
         out.append(f"   上漲機率 {win_prob} · 建議持有 {hold}")
         # 部位規模建議 (依 user 設定的帳戶資金 + 單筆風險 %)
         try:
@@ -2084,10 +2120,13 @@ def fmt_combined_intraday_super(
     # 嘗試合 1 封 (用分隔線). 若合起來超 TG 上限就拆多封, 避免後面段被截斷.
     sep = "\n\n━━━━━━━━━━━━━━━━━\n\n"
     full = sep.join(parts)
-    if len(full.encode("utf-8")) <= 3900:
+    # Bug fix: Telegram 的 4096 上限是 UTF-16 code units, 不是 bytes。中文 1 字 = 3 bytes
+    # 但只佔 1 unit → 原本約 1300 字就被誤判「超量」而拆成多封, 「合成 1 封」的設計幾乎
+    # 永遠不生效, 也與同檔正確的 _u16_len() 不一致。
+    if _u16_len(full) <= 3800:
         return [full]
     # 超量 → 拆多封 (各段獨立, 不損失內容)
-    print(f"[combined super] 合計 {len(full.encode('utf-8'))} bytes 超量, 改拆 {len(parts)} 封", flush=True)
+    print(f"[combined super] 合計 {_u16_len(full)} UTF-16 units 超量, 改拆 {len(parts)} 封", flush=True)
     return parts
 
 
@@ -3218,8 +3257,11 @@ def fmt_ai_analysis(stock_id: str, name: str, ai_text: str) -> str:
         else:
             out_lines.append(_esc(line))
     full = head + "\n".join(out_lines)
-    if len(full) > 3900:
-        full = full[:3900] + "\n…(節錄)"
+    # Bug fix: 原本在這裡 `full[:3900] + "…(節錄)"` 硬截斷。(1) send_message() 本來就會在
+    # _u16_len > 4000 時用 _split_tg_msg 拆多封 (一個字都不掉), 先截斷等於白丟後半內容;
+    # (2) 字元切片的切點可能落在 "<b>標題" 中間 → 未閉合 tag → Telegram 回 400 →
+    # 退純文字重送, 整封粗體 / <code> 格式全失。交給 send_message 分段 (同
+    # tw_post_market_summary 的「不再自己 truncate, 由 caller 分段」註解)。
     return full
 
 
@@ -3339,7 +3381,8 @@ def fmt_watchlist_alert(stock_id: str, name: str, hits: list, latest_date: str,
         if row.get("現價") is not None:
             arrow = ""
             if isinstance(row.get("今日%"), (int, float)):
-                arrow = "+" if row["今日%"] > 0 else ("-" if row["今日%"] < 0 else "")
+                # Bug fix: _fmt_num() 已經自帶負號, 下跌時原本會印成 "--2.50%"。
+                arrow = "+" if row["今日%"] > 0 else ""
             body.append(f"現價 {_fmt_num(row.get('現價'))} {arrow}{_fmt_num(row.get('今日%'), '%')}")
         if row.get("量比") is not None:
             pass  # 量比已移除

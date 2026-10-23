@@ -48,6 +48,11 @@ MAX_WATCHLIST = 15
 _BATCH_MODE = False
 _BATCH_CACHE: Optional[Dict] = None
 _BATCH_DIRTY = False
+# Bug fix: batch mode 下 _BATCH_CACHE 是「進入 batch 時的整份 state 快照 + 本次改動」,
+# 直接整包丟給 _flush_state 會讓它的 top-level shallow merge 把「monitor 執行期間其他
+# workflow 寫入的 key」全部回捲到快照時的值。留一份原始快照, close 時只 flush 真的改過的
+# top-level key (詳見 close_batched_state)。
+_BATCH_ORIG: Optional[Dict] = None
 
 
 @contextmanager
@@ -69,27 +74,47 @@ def batched_state_writes():
 
 def open_batched_state() -> None:
     """開啟 batched mode. 必須跟 close_batched_state 配對 (用 try/finally 保護)."""
-    global _BATCH_MODE, _BATCH_CACHE, _BATCH_DIRTY
+    global _BATCH_MODE, _BATCH_CACHE, _BATCH_DIRTY, _BATCH_ORIG
     if _BATCH_MODE:
         # 巢狀 open — 已在 batch 內, no-op
         return
     _BATCH_MODE = True
     _BATCH_CACHE = None
+    _BATCH_ORIG = None
     _BATCH_DIRTY = False
 
 
 def close_batched_state() -> None:
     """關閉 batched mode + flush 已修改的 state. Idempotent (重複呼叫 OK)."""
-    global _BATCH_MODE, _BATCH_CACHE, _BATCH_DIRTY
+    global _BATCH_MODE, _BATCH_CACHE, _BATCH_DIRTY, _BATCH_ORIG
     if not _BATCH_MODE:
         return  # 不在 batch 內 (重複呼叫 / 沒開過)
     _BATCH_MODE = False
     if _BATCH_DIRTY and _BATCH_CACHE is not None:
         try:
-            _flush_state(_BATCH_CACHE)
+            # Bug fix: 原本把整份 _BATCH_CACHE 丟進 _flush_state。_BATCH_CACHE 是 monitor
+            # 啟動瞬間的整份 state 快照 (load 時 deepcopy) 加上本次改動, 而 _flush_state 的
+            # merge 是 top-level shallow「我們手上的 key 覆蓋持久化版本」→ 等於把 monitor
+            # 執行期間其他 workflow 寫入的 top-level key 全部回捲到啟動時的值 (只有
+            # slot_dedup 因為 union 特例倖存)。monitor 單次可達數分鐘, 與 tw_close 15:03 /
+            # pre_market / tw_foreign_chips 重疊時, secondary_push_cap 的每日計數、
+            # alert_dedup、strong_stock_alert[today]、holdings_tracker 的 fired_date
+            # 都會被回滾 → 推播超過每日上限、同一則重複推。
+            # 改成只 flush「本次真的改過的 top-level key」, 其餘交給 merge 保留持久化版本。
+            # 註: 沒改過的 key 這次就不會被 _prune_date_keys 清 —— 體積防線改由下一次
+            #     非 batch 寫入 (或下次真的改到那個 key 時) 處理, 不影響正確性。
+            _payload = _BATCH_CACHE
+            if isinstance(_BATCH_ORIG, dict):
+                _payload = {k: v for k, v in _BATCH_CACHE.items()
+                            if k not in _BATCH_ORIG or _BATCH_ORIG.get(k) != v}
+            if _payload:
+                _flush_state(_payload)
+            else:
+                print("[watchlist_store] batched flush: 無實際變更, 略過寫入", flush=True)
         except Exception as _e:
             print(f"[watchlist_store] batched flush failed: {_e}", flush=True)
     _BATCH_CACHE = None
+    _BATCH_ORIG = None
     _BATCH_DIRTY = False
 
 
@@ -449,7 +474,7 @@ def load_monitor_state() -> Dict:
 
     I1 fix: 在 batched_state_writes() context 內共享 cache, 避免重複 GSheet read.
     """
-    global _BATCH_CACHE
+    global _BATCH_CACHE, _BATCH_ORIG
     # 在 batch mode 內 — 直接拿 cache 副本
     if _BATCH_MODE and _BATCH_CACHE is not None:
         return copy.deepcopy(_BATCH_CACHE)
@@ -463,6 +488,7 @@ def load_monitor_state() -> Dict:
                 loaded = json.loads(cell)
                 if _BATCH_MODE:
                     _BATCH_CACHE = copy.deepcopy(loaded)
+                    _BATCH_ORIG = copy.deepcopy(loaded)
                 return loaded
         except Exception:
             pass
@@ -471,6 +497,7 @@ def load_monitor_state() -> Dict:
             loaded = json.loads(MONITOR_STATE_FILE.read_text(encoding="utf-8"))
             if _BATCH_MODE:
                 _BATCH_CACHE = copy.deepcopy(loaded)
+                _BATCH_ORIG = copy.deepcopy(loaded)
             return loaded
         except Exception:
             pass
@@ -486,6 +513,7 @@ def load_monitor_state() -> Dict:
     default = {"watchlist_alerts": {}, "index_alerts": {}, "crypto_alerts": {}}
     if _BATCH_MODE:
         _BATCH_CACHE = copy.deepcopy(default)
+        _BATCH_ORIG = copy.deepcopy(default)
     return default
 
 
