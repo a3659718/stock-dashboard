@@ -6,6 +6,7 @@ import contextlib
 from pathlib import Path
 import sys
 import tempfile
+import types
 import unittest
 from unittest.mock import patch
 
@@ -44,6 +45,8 @@ class DashboardTests(unittest.TestCase):
         }
         for name, value in mocks.items():
             self.stack.enter_context(patch(name, return_value=value))
+        import notifier
+        self.real_send = notifier.send_message
         self.send = self.stack.enter_context(patch("notifier.send_message", return_value=(True, "test sent")))
         self.app = AppTest.from_file(str(ROOT / "app.py"), default_timeout=30)
         self.run_app()
@@ -61,6 +64,62 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(len(self.app.tabs), 14)  # 12 outer + backtest/tracking
         self.assertTrue(any("系統健康" in t.label for t in self.app.tabs))
         self.assertFalse(any("FinMind 套件沒裝" in e.value for e in self.app.error))
+
+    def test_tw_top10_button_reaches_http_with_all_ten_stocks(self):
+        import notifier
+        picks = [{"stock_id": str(2300 + i), "name": "Test & Co", "theme": "AI",
+                  "score": 7, "rr": "2.5", "current": 100,
+                  "entry_low": 99, "entry_high": 101, "target": 110, "stop": 95,
+                  "entry_timing_label": "等回測 < 100 & 再確認 " + "🎯" * 200}
+                 for i in range(10)]
+        with patch("actionable_picks.compute_actionable_picks", return_value=picks) as scan:
+            self.click(key="actionable_load")
+            with patch("notifier.send_message", wraps=self.real_send), \
+                 patch("notifier._bot_token", return_value="fake"), \
+                 patch("notifier._chat_id", return_value="fake"), \
+                 patch("notifier._record_push_safe"), \
+                 patch("requests.post", return_value=types.SimpleNamespace(status_code=200)) as post:
+                self.click(key="actionable_tg")
+                self.assertGreater(post.call_count, 1)
+                payloads = [c.kwargs["data"]["text"] for c in post.call_args_list]
+                self.assertTrue(all(notifier._u16_len(msg) <= 4000 for msg in payloads))
+                sent = "".join(payloads)
+                for pick in picks:
+                    self.assertIn(pick["stock_id"], sent)
+                self.assertIn("&lt; 100 &amp;", sent)
+            scan.assert_called_once()  # 發送不重跑分析
+        self.assertTrue(self.app.session_state["actionable_tg_result"]["ok"])
+
+    def test_tw_top10_empty_missing_config_and_failure_have_visible_status(self):
+        self.click(key="actionable_tg")
+        self.send.assert_not_called()
+        self.assertEqual(self.app.session_state["actionable_tg_result"]["level"], "warning")
+        self.app.session_state["actionable_picks_cache"] = [{"stock_id": "2330", "score": None}]
+        with patch("notifier.is_configured", return_value=False):
+            self.click(key="actionable_tg")
+        self.send.assert_not_called()
+        self.assertIn("TELEGRAM_BOT_TOKEN", self.app.session_state["actionable_tg_result"]["detail"])
+        self.send.return_value = (False, "HTTP 403: Forbidden")
+        self.click(key="actionable_tg")
+        self.assertFalse(self.app.session_state["actionable_tg_result"]["ok"])
+        self.run_app()
+        self.assertTrue(any("HTTP 403" in e.value for e in self.app.error))
+        self.assertFalse(any("已接受" in e.value for e in self.app.success))
+        self.send.assert_called_once()  # 一般 rerun 不會重送
+
+    def test_tw_top10_empty_market_banner_still_sends(self):
+        self.app.session_state["actionable_picks_cache"] = [{"_no_picks_reason": "空頭保護"}]
+        self.click(key="actionable_tg")
+        self.send.assert_called_once()
+        self.assertIn("空頭保護", self.send.call_args.args[0])
+
+    def test_tw_top10_formatter_failure_is_visible_and_persistent(self):
+        self.app.session_state["actionable_picks_cache"] = [{"stock_id": "2330"}]
+        with patch("actionable_picks.fmt_actionable_picks_tg", side_effect=ValueError("test format error")):
+            self.click(key="actionable_tg")
+        self.run_app()
+        self.send.assert_not_called()
+        self.assertTrue(any("test format error" in e.value for e in self.app.error))
 
     def test_precursor_old_and_dedicated_buttons_send_same_results(self):
         picks = [{"stock_id": "2330", "name": "TEST", "theme": "AI", "score": 40,

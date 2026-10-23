@@ -23,6 +23,13 @@ logging.getLogger("streamlit.runtime.caching").setLevel(logging.ERROR)
 # 加入上層目錄到 path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+# 本次執行的狀態旗標 (用 dict 讓嵌套函式不必宣告 global)。
+# main_push_failed: 某個 handler 已經明確知道「這個 slot 的主推播沒有送出去」。
+#   push_dedup 的 slot claim 會據此拒絕登記, 讓備援 cron 還有第二次機會 —— 原本只看
+#   notifier.SEND_OK_COUNT 有沒有增加, 但「推播失敗通知」本身也是一封成功的推播,
+#   於是主推失敗時反而把 slot claim 掉, 備援 cron 整天不補推而 Actions 還是綠燈。
+_RUN_FLAGS = {"main_push_failed": False}
+
 
 # ---------------------------------------------------------------------------
 # 1) 在 import 任何模組前，先確認 streamlit 可用 (script 環境也會裝)
@@ -211,9 +218,11 @@ def _run_us_open_main(market: str) -> bool:
         data = market_open_picks.get_us_open_picks()
     except Exception as e:
         print(f"get_us_open_picks fatal failure: {e}", flush=True)
+        _RUN_FLAGS["main_push_failed"] = True
         try:
             notifier.send_message(
-                f"<b>美股 {label} 推播失敗</b>\n\n原因: <code>{type(e).__name__}: {str(e)[:200]}</code>"
+                f"<b>美股 {label} 推播失敗</b>\n\n原因: <code>{type(e).__name__}: {str(e)[:200]}</code>",
+                count_as_push=False,   # 失敗通知不算「有成功推播」, 否則會 claim 掉 slot
             )
         except Exception:
             pass
@@ -245,7 +254,13 @@ def _run_us_open_main(market: str) -> bool:
     if msg:
         ok_uo, info_uo = notifier.send_message(msg, disable_preview=True)
         print(f"[us_{('mid' if market == 'us_mid' else 'open')}] 主分析 TG send: ok={ok_uo}, info={info_uo}", flush=True)
-        return True
+        # Bug fix: 原本不管送出成功與否都 return True (docstring 寫的是「回傳是否有送出」),
+        # 送失敗時上層會以為主推已出去。
+        if not ok_uo:
+            _RUN_FLAGS["main_push_failed"] = True
+        return bool(ok_uo)
+    # fmt 失敗 / 空訊息 → 主推沒送出去, 不可以讓次要 alert 的成功把 slot claim 掉
+    _RUN_FLAGS["main_push_failed"] = True
     return False
 
 
@@ -301,6 +316,15 @@ def main() -> int:
 
                 def _claim_if_actually_pushed(_m=market, _b=_send_before):
                     try:
+                        # Bug fix: 原本只看 SEND_OK_COUNT 有沒有增加, 但「推播失敗通知」
+                        # 本身也是一封推播 (us_open / tw_open 的 except 路徑 100% 會送),
+                        # 於是主推失敗時反而 claim 掉 slot → 備援 cron 整天不補推, 而
+                        # Actions 顯示綠燈。現在失敗通知改用 count_as_push=False 不計數,
+                        # 並且只要有 handler 明確標記「主推沒送出去」就不 claim。
+                        if _RUN_FLAGS.get("main_push_failed"):
+                            print(f"[push_dedup] '{_m}' 主推播未送出 → 不登記, "
+                                  f"備援 cron 仍可補推", flush=True)
+                            return
                         if getattr(notifier, "SEND_OK_COUNT", 0) > _b:
                             _pd.force_claim(_m)
                             print(f"[push_dedup] '{_m}' 本次有成功推播 → 登記 claim", flush=True)
@@ -837,7 +861,19 @@ def main() -> int:
                 sl_msg = notifier.fmt_stop_loss_alerts(sl_breaches)
                 if sl_msg:
                     print(f"持倉停損警報: {len(sl_breaches)} 檔跌破", flush=True)
-                    notifier.send_message(sl_msg)
+                    # Bug fix: 原本整個丟掉 send_message 的回傳值, 而
+                    # check_stop_loss_breaches() 在回傳前就已寫入 fired_date (每檔每天
+                    # 1 次的去重欄位) → TG 送失敗時當天 tw_open / tw_mid 都不會再推這檔,
+                    # log 卻看起來像推成功了。改成接回傳值並在失敗時回滾。
+                    ok_sl, info_sl = notifier.send_message(sl_msg)
+                    print(f"[stop_loss] send ok={ok_sl} info={info_sl}", flush=True)
+                    if not ok_sl:
+                        try:
+                            holdings_tracker.unmark_stop_loss_fired(sl_breaches)
+                            print("[stop_loss] 送出失敗 → 已回滾 fired 章, 下個 tick 可重試",
+                                  flush=True)
+                        except Exception as _rb:
+                            print(f"[stop_loss] 回滾失敗 (non-fatal): {_rb}", flush=True)
         except Exception as e:
             print(f"停損檢查失敗 (non-fatal): {e}", flush=True)
 
@@ -853,10 +889,17 @@ def main() -> int:
                 if twii is None or twii.empty:
                     print("[tw_mid] 無 TWII 數據, skip 不推", flush=True)
                     return 0
-                import pandas as _pd
+                # Bug fix: 原本是 `import pandas as _pd`, 但 main() 上面已經有
+                # `import push_dedup as _pd` (:274), 兩者是同一個 local 名字 →
+                # 這行會把它重新綁定成 pandas。atexit 的 _claim_if_actually_pushed()
+                # 閉包讀的是同一個 cell, 在 process 結束時呼叫 _pd.force_claim() 會丟
+                # AttributeError 被自己的 except 吞掉 → tw_mid 的 slot claim 從來沒寫進
+                # slot_dedup → 300 分鐘去重窗對 tw_mid 完全失效, 備援 cron 會把「中盤更新」
+                # 原封不動再推一次。改用不衝突的別名。
+                import pandas as _pdlib
                 date_col = "Datetime" if "Datetime" in twii.columns else twii.columns[0]
                 twii = twii.copy()
-                twii["_dt"] = _pd.to_datetime(twii[date_col], utc=True)
+                twii["_dt"] = _pdlib.to_datetime(twii[date_col], utc=True)
                 twii["_d"] = twii["_dt"].dt.date
                 today = twii["_d"].max()
                 today_bars = twii[twii["_d"] == today].sort_values("_dt")
@@ -894,8 +937,9 @@ def main() -> int:
                 f"  • FinMind Token 是否有效 (常見: 過期/重新生成)\n"
                 f"  • GitHub Actions log 看詳細 stack trace"
             )
+            _RUN_FLAGS["main_push_failed"] = True
             try:
-                notifier.send_message(err_msg)
+                notifier.send_message(err_msg, count_as_push=False)
             except Exception:
                 pass
             return 1
@@ -946,8 +990,9 @@ def main() -> int:
                 f"<b>台股盤後分析推播失敗</b>\n\n"
                 f"原因: <code>{type(e).__name__}: {str(e)[:200]}</code>"
             )
+            _RUN_FLAGS["main_push_failed"] = True
             try:
-                notifier.send_message(err_msg)
+                notifier.send_message(err_msg, count_as_push=False)
             except Exception:
                 pass
             return 1
@@ -1572,7 +1617,12 @@ def main() -> int:
             print(f"[strong stock alert] check failed (non-fatal): {_e}", flush=True)
 
 
-        if ssa_result:
+        # Bug fix: check_and_push_if_surge() 在「觸發但沒送出」時回的是 truthy dict
+        # ({"sent": False, "reason": "dup"} / 送失敗 / 被 push_cap 擋), 不是 None。
+        # 大盤大漲那天 09:30 推成功後, 當天每個 monitor tick 只要指數還在門檻上都會拿到
+        # reason="dup" 的 truthy 值 → 這裡誤判成「本 tick 已推」→ 常態盤中強勢股整天不執行,
+        # 偏偏那是最該推的強勢日, 而 log 看起來一切正常。改成只有真的送出才跳過。
+        if ssa_result and ssa_result.get("sent"):
             print("[intraday strong] 本 tick 已推大盤大漲(含當下強勢股) → 跳過常態強勢股避免重複",
                   flush=True)
         else:
