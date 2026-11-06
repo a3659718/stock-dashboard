@@ -49,9 +49,9 @@ except ImportError:
     st_stub.error = lambda *a, **k: None              # type: ignore
     sys.modules["streamlit"] = st_stub
 
-import index_alerts as ia
-import data_sources as ds
-import watchlist_store
+from radar.alerts import index_alerts as ia
+from radar.data import data_sources as ds
+from radar.core import watchlist_store
 
 
 def diagnose_sym(sym: str = "^TWII") -> None:
@@ -139,7 +139,7 @@ def diagnose_sym(sym: str = "^TWII") -> None:
 
     # 5) holiday check
     try:
-        import holiday_check
+        from radar.core import holiday_check
         closed = holiday_check.is_market_closed_today(cfg.get("country", "TW"))
         print(f"🗓  holiday_check ({cfg.get('country')}) closed today: {closed}")
         if closed:

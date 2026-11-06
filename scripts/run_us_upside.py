@@ -22,7 +22,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import us_upside_screener as ups  # noqa: E402
+from radar.screeners import us_upside_screener as ups  # noqa: E402
 
 
 def main():

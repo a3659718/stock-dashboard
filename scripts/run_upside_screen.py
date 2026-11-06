@@ -21,7 +21,7 @@ from pathlib import Path
 # 確保可以從 scripts/ 跑時也能 import 上層模組
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import upside_screener  # noqa: E402
+from radar.screeners import upside_screener  # noqa: E402
 
 
 def _progress(stage: str, pct: int):

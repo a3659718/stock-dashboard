@@ -53,7 +53,7 @@ def run_checks() -> dict:
 
     # 2. Gemini 深探 (不只看 key, 還實際建 model)
     try:
-        import ai_analyzer
+        from radar.analysis import ai_analyzer
         has_key = bool(ai_analyzer.get_gemini_key())
         if not has_key:
             info.append("🤖 Gemini: 未設 key (功能停用, 非錯誤)")
@@ -68,7 +68,7 @@ def run_checks() -> dict:
 
     # 3~5. 用 system_health.collect_health()
     try:
-        import system_health
+        from radar.core import system_health
         h = system_health.collect_health()
 
         fm = h.get("finmind") or {}
@@ -126,7 +126,7 @@ def main() -> int:
     # 異常才真的推播。
     if has_anomaly:
         try:
-            import notifier
+            from radar.notify import notifier
             ok, infostr = notifier.send_message(msg)
             print(f"[daily_selfcheck] TG sent: ok={ok} {infostr}", flush=True)
         except Exception as e:

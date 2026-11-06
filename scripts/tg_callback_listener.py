@@ -12,7 +12,7 @@ import html as _html
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import data_sources as ds  # noqa: E402
+from radar.data import data_sources as ds  # noqa: E402
 
 API_BASE = "https://api.telegram.org/bot{token}/{method}"
 _OFFSET_KEY = "tg_update_offset"
@@ -58,7 +58,7 @@ def _reply(chat_id, text: str) -> None:
     # 問題), 已經刪掉那個永遠不會執行的版本, 只留下這個 (原本第二個, 較完整:
     # fallback 走 API 時有做 html.escape 避免特殊符號讓 Telegram 回 HTTP 400)。
     try:
-        import notifier
+        from radar.notify import notifier
         notifier.send_message(text, chat_id=chat_id)
     except Exception:
         # 退路: 直接打 API，但使用 html.escape 防止包含特殊符號導致 HTTP 400 錯誤
@@ -70,7 +70,7 @@ def _reply(chat_id, text: str) -> None:
     
 def _load_offset() -> int:
     try:
-        import watchlist_store
+        from radar.core import watchlist_store
         st = watchlist_store.load_monitor_state() or {}
         return int(st.get(_OFFSET_KEY, 0) or 0)
     except Exception:
@@ -79,7 +79,7 @@ def _load_offset() -> int:
 
 def _save_offset(offset: int) -> None:
     try:
-        import watchlist_store
+        from radar.core import watchlist_store
         st = watchlist_store.load_monitor_state() or {}
         st[_OFFSET_KEY] = int(offset)
         watchlist_store.save_monitor_state(st)
@@ -117,7 +117,7 @@ def parse_callback(data: str):
 
 def _handle_wl(market: str, sid: str):
     try:
-        import watchlist_store
+        from radar.core import watchlist_store
         ok = watchlist_store.add_to_watchlist(sid, market=market)
         if ok:
             return f"✅ {sid} 已加入自選", None
@@ -157,7 +157,7 @@ def _handle_sl(market: str, sid: str):
     # 使用者在 TG 按了「設停損」、收到確認訊息, 之後真的跌破卻永遠不會有警報。
     # 改成寫進 holdings_tracker 讀得到的位置, 並補上它需要的欄位。
     try:
-        import watchlist_store, datetime as _dt
+        from radar.core import watchlist_store; import datetime as _dt
         st = watchlist_store.load_monitor_state() or {}
         tracker = st.setdefault("holdings_tracker", {})
         sl_map = tracker.setdefault("stop_loss", {})
@@ -196,7 +196,7 @@ def _handle_sl(market: str, sid: str):
 def _handle_ai(market: str, sid: str):
     """跑深度分析 + (有 key 時) Gemini 觀點, 回一則完整訊息."""
     try:
-        import stock_deep_analyzer as sda
+        from radar.analysis import stock_deep_analyzer as sda
         deep = sda.get_deep_analysis(sid, market=market)
         context = sda.fmt_deep_analysis_for_prompt(deep) or "（無足夠深度資料）"
     except Exception as e:
@@ -205,7 +205,7 @@ def _handle_ai(market: str, sid: str):
 
     ai_text = ""
     try:
-        import ai_analyzer
+        from radar.analysis import ai_analyzer
         if ai_analyzer.gemini_available():
             ai_text = _gemini_quick(ai_analyzer, sid, market, context)
     except Exception as e:
@@ -215,7 +215,7 @@ def _handle_ai(market: str, sid: str):
         ai_text = "（無 GEMINI key 或 AI 暫時無回應）\n\n" + context
 
     try:
-        import notifier
+        from radar.notify import notifier
         msg = notifier.fmt_ai_analysis(sid, "", ai_text)
     except Exception:
         msg = f"🤖 {sid} AI 分析\n{ai_text}"
@@ -236,7 +236,7 @@ def _gemini_quick(ai_analyzer, sid: str, market: str, context: str) -> str:
         resp = m.generate_content(
             prompt,
             safety_settings=ai_analyzer.get_safety_settings(),
-            generation_config={"temperature": 0.4, "max_output_tokens": 600},
+            generation_config={"temperature": 0.4, "max_output_tokens": 600 + 4096},
         )
         return (getattr(resp, "text", "") or "").strip()
     except Exception as e:

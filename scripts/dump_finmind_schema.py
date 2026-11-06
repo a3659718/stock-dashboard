@@ -79,7 +79,7 @@ def main() -> int:
 
     try:
         import pandas as pd
-        import data_sources as ds
+        from radar.data import data_sources as ds
     except Exception as e:
         print(f"匯入失敗 (請先 pip install -r requirements.txt): {e}")
         return 2

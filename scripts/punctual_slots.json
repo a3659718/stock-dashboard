@@ -1,0 +1,18 @@
+{
+  "_comment": "準時觸發表 (cron-job.org / 本機工作排程器共用的單一來源)。時間 = 觸發時間, 比推播目標早 ~3 分 (checkout + 快取環境 + 抓資料約 1~2 分)。wdays: 0=週日 ... 6=週六。美股用 America/New_York, 夏冬令自動換算。",
+  "slots": [
+    {"name": "morning_recap",    "tz": "Asia/Taipei",      "time": "07:29", "wdays": [1,2,3,4,5,6], "workflow": "market_open_alert.yml", "inputs": {"market": "morning_recap"}},
+    {"name": "morning_brief",    "tz": "Asia/Taipei",      "time": "08:01", "wdays": [1,2,3,4,5], "workflow": "morning_brief.yml",     "inputs": {}},
+    {"name": "pre_market_815",   "tz": "Asia/Taipei",      "time": "08:13", "wdays": [1,2,3,4,5], "workflow": "pre_market.yml",        "inputs": {"slot": "pre_market_815"}},
+    {"name": "pre_market_830",   "tz": "Asia/Taipei",      "time": "08:29", "wdays": [1,2,3,4,5], "workflow": "pre_market.yml",        "inputs": {"slot": "pre_market_830"}},
+    {"name": "tw_open",          "tz": "Asia/Taipei",      "time": "09:29", "wdays": [1,2,3,4,5], "workflow": "market_open_alert.yml", "inputs": {"market": "tw_open"}},
+    {"name": "tw_mid",           "tz": "Asia/Taipei",      "time": "10:59", "wdays": [1,2,3,4,5], "workflow": "market_open_alert.yml", "inputs": {"market": "tw_mid"}},
+    {"name": "tw_close",         "tz": "Asia/Taipei",      "time": "15:00", "wdays": [1,2,3,4,5], "workflow": "market_open_alert.yml", "inputs": {"market": "tw_close"}},
+    {"name": "tw_foreign_chips", "tz": "Asia/Taipei",      "time": "16:29", "wdays": [1,2,3,4,5], "workflow": "market_open_alert.yml", "inputs": {"market": "tw_foreign_chips"}},
+    {"name": "us_emerging",      "tz": "America/New_York", "time": "06:59", "wdays": [1,2,3,4,5], "workflow": "market_open_alert.yml", "inputs": {"market": "us_emerging"}},
+    {"name": "us_buy_picks",     "tz": "America/New_York", "time": "08:29", "wdays": [1,2,3,4,5], "workflow": "market_open_alert.yml", "inputs": {"market": "us_buy_picks"}},
+    {"name": "us_open",          "tz": "America/New_York", "time": "09:59", "wdays": [1,2,3,4,5], "workflow": "market_open_alert.yml", "inputs": {"market": "us_open"}},
+    {"name": "us_mid",           "tz": "America/New_York", "time": "11:29", "wdays": [1,2,3,4,5], "workflow": "market_open_alert.yml", "inputs": {"market": "us_mid"}},
+    {"name": "us_close",         "tz": "America/New_York", "time": "17:59", "wdays": [1,2,3,4,5], "workflow": "market_open_alert.yml", "inputs": {"market": "us_close"}}
+  ]
+}

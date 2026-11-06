@@ -81,7 +81,7 @@ def check_yfinance() -> bool:
     """yfinance 是否能拿到 ^TWII."""
     _hr("2) yfinance 連線 (取 ^TWII 2 日 5m)")
     try:
-        import data_sources as ds
+        from radar.data import data_sources as ds
         df = ds.fetch_yf_history("^TWII", period="2d", interval="5m")
         if df is None or df.empty:
             print("  ❌ 回空 DataFrame — yfinance 可能被擋或假日 / 盤前")
@@ -97,7 +97,7 @@ def check_finmind() -> bool:
     """FinMind 是否能 fetch 台股清單 (用 cache 不要直接打 API 避免吃額度)."""
     _hr("3) FinMind 連線 (TaiwanStockInfo)")
     try:
-        import data_sources as ds
+        from radar.data import data_sources as ds
         df = ds.get_taiwan_stock_info()
         if df is None or df.empty:
             print("  ⚠️ 回空 — 可能 402 額度爆 + 無本地 fallback cache")
@@ -113,7 +113,7 @@ def send_test_message() -> bool:
     """發測試訊息到 TG."""
     _hr("4) 發測試訊息到 Telegram")
     try:
-        import notifier
+        from radar.notify import notifier
         now = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
         msg = f"🧪 <b>Smoke Test</b>\n推播管道測試訊息\n時間: {now}"
         ok, info = notifier.send_message(msg)

@@ -63,7 +63,7 @@ def _iter_repo_py_files() -> List[str]:
         # 跳過 venv / git / cache 等非本專案程式碼目錄
         dirnames[:] = [d for d in dirnames if d not in (
             ".git", "__pycache__", "venv", ".venv", "node_modules", ".streamlit",
-        )]
+        ) and not d.startswith("_backup_")]  # 舊備份資料夾不是現役程式碼
         for fn in filenames:
             if fn.endswith(".py"):
                 files.append(os.path.join(base, fn))
@@ -72,7 +72,14 @@ def _iter_repo_py_files() -> List[str]:
 
 def _module_stem(path: str) -> str:
     """檔案路徑 → 可以被 import 的模組名 (只看檔名, 不含資料夾, 因為 daily_selfcheck.py
-    有把 ROOT 和 ROOT/scripts 都塞進 sys.path, 兩層資料夾內的檔案都用單一檔名互相 import)."""
+    有把 ROOT 和 ROOT/scripts 都塞進 sys.path, 兩層資料夾內的檔案都用單一檔名互相 import).
+
+    radar/ 套件內的檔案回傳完整 dotted path: radar/notify/notifier.py → radar.notify.notifier,
+    radar/notify/__init__.py → radar.notify。"""
+    rel = os.path.relpath(path, ROOT).replace("\\", "/")
+    if rel.startswith("radar/"):
+        dotted = os.path.splitext(rel)[0].replace("/", ".")
+        return dotted[: -len(".__init__")] if dotted.endswith(".__init__") else dotted
     return os.path.splitext(os.path.basename(path))[0]
 
 
@@ -141,12 +148,21 @@ def check_local_imports() -> List[Tuple[str, str, str]]:
                     continue
                 if top not in local_stems:
                     continue  # 不認識的名字, 可能是尚未列進允許清單的第三方套件, 不誤判
-                target_names = symbol_map.get(top)
+                target = mod if mod in local_stems else top
+                if top == "radar" and mod not in local_stems:
+                    problems.append((
+                        rel, "missing_module",
+                        f"{rel}: `from {mod} import ...` — radar 套件裡沒有 {mod}",
+                    ))
+                    continue
+                target_names = symbol_map.get(target)
                 if target_names is None:
                     continue  # 目標模組解析失敗或有 star import, 無法確定, 跳過
                 for alias in node.names:
                     if alias.name == "*":
                         continue
+                    if f"{target}.{alias.name}" in local_stems:
+                        continue  # `from radar.notify import notifier` — 子模組
                     if alias.name not in target_names:
                         problems.append((
                             rel, "missing_symbol",
@@ -289,7 +305,7 @@ def check_notifier_empty_input() -> List[Tuple[str, str, str]]:
     problems: List[Tuple[str, str, str]] = []
     try:
         sys.path.insert(0, ROOT)
-        import notifier
+        from radar.notify import notifier
     except Exception as e:
         return [("notifier.py", "import_error", f"notifier.py import 失敗, 跳過空輸入測試: {e}")]
 

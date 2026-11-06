@@ -1,17 +1,25 @@
 name: Morning Brief (8AM TPE)
 
-# 與 market_open_alert 共用併發群組: 兩者都寫 monitor_state, 序列化避免併發競態.
-# cancel-in-progress: false → 排隊不取消推播.
+# 跟 market_open_alert 的「日推」佇列同組 (sd-daily) — 與時效性日推序列化, 但不跟每半小時
+# 的 monitor 佇列糾纏。cancel-in-progress: false → 排隊不取消推播.
 concurrency:
-  group: stock-dashboard-state
+  # 準時觸發 (workflow_dispatch) 獨立一組, 不會被遲到的 cron run 擠掉 pending 位置
+  group: ${{ github.event_name == 'workflow_dispatch' && 'sd-dispatch-morning_brief' || 'sd-daily' }}
   cancel-in-progress: false
 
 on:
   schedule:
-    # 平日台北早上 8:07 = UTC 00:07 (Mon-Fri only)
-    # 改到冷門分鐘 :07 — 避開 UTC 00:00 (全球最壅塞的整點+午夜) 造成的延遲
+    # 平日台北早上 8:02 = UTC 00:02 (Mon-Fri only)
     # 週末停 — 省 ~12 min/月, 且週末美股休市內容稀
-    - cron: '7 0 * * 1-5'
+    # 錯開 :00 — 午夜 00:00 UTC 是全球最壅塞 cron 分鐘, GitHub 常延遲/丟棄整點排程。
+    # morning_brief 直接跑 morning_brief.py (無 market dispatch), 改分鐘不需同步 router。
+    - cron: '2 0 * * 1-5'
+    # 備援 cron: GitHub Actions 的 schedule 是「盡力而為」, 高負載時單一 cron 可能
+    # 延遲 1~2 小時甚至被丟棄。多排幾條錯開的時間 → 只要其中一條準時跑到就準時推,
+    # 後面跑到的會被 morning_brief.py 的 push_dedup 守衛擋掉 (5 小時窗), 不會重複洗版。
+    # 成本: 被擋掉的 run 只跑到 dedup 就 return, 約 1~2 分鐘/次。
+    - cron: '13 0 * * 1-5'   # 08:13 TPE 備援
+    - cron: '27 0 * * 1-5'   # 08:27 TPE 備援
   workflow_dispatch:  # 允許手動觸發
 
 jobs:
@@ -26,10 +34,26 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-          cache: 'pip'
-          cache-dependency-path: requirements.txt
+
+      # 整個 Python 環境 (含已安裝套件) 一起快取: 命中時直接跳過 pip install,
+
+      # 每次 run 省 40~90 秒 → 推播更快送出。requirements.txt 一改 key 就變, 自動重裝。
+
+      - name: Cache Python environment
+
+        id: pyenv-cache
+
+        uses: actions/cache@v4
+
+        with:
+
+          path: ${{ env.pythonLocation }}
+
+          key: pyenv-${{ runner.os }}-${{ env.pythonLocation }}-${{ hashFiles('requirements.txt') }}
 
       - name: Install dependencies
+
+        if: steps.pyenv-cache.outputs.cache-hit != 'true'
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
@@ -39,9 +63,17 @@ jobs:
           FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          # 觸發本次 run 的 cron 字串 → radar/core/schedule_guard 判斷是否遲到太久 (手動觸發時為空)
+          SCHEDULE_CRON: ${{ github.event.schedule }}
+          STALE_GUARD: ${{ vars.STALE_GUARD || '1' }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           # monitor_state 跨 run 保存 (去重/冷卻/上限) — 缺這兩個所有去重都會失效
           GCP_SERVICE_ACCOUNT_JSON: ${{ secrets.GCP_SERVICE_ACCOUNT_JSON }}
           GOOGLE_SHEETS_ID: ${{ secrets.GOOGLE_SHEETS_ID }}
+          # 重大事件預告 (econ_calendar) 需要 Finnhub 抓財報/總經; US_WATCHLIST 讓財報也涵蓋自選美股。
+          # 缺 Finnhub 仍會顯示 FOMC/非農 (內建排程), 只是少了 CPI/其他財報。
+          FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
+          FINNHUB_TOKEN: ${{ secrets.FINNHUB_TOKEN }}
+          US_WATCHLIST: ${{ secrets.US_WATCHLIST }}
         run: |
           python scripts/morning_brief.py

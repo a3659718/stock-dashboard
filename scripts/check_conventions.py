@@ -43,7 +43,8 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BASELINE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                         ".conventions_baseline.json")
-SKIP_DIRS = {"__pycache__", ".git", ".github", "node_modules"}
+# .venv / venv: 本機虛擬環境的第三方套件不是本專案程式碼 (沒排除時本機跑會多算上千個 silent_except, 跟 CI 對不上)
+SKIP_DIRS = {"__pycache__", ".git", ".github", "node_modules", ".venv", "venv", ".cache"}
 
 
 def _is_skipped(path: str) -> bool:

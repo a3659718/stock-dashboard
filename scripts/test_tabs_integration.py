@@ -39,7 +39,7 @@ def main():
     # === tab_actionable: actionable_picks.compute_actionable_picks ===
     print("\n[tab 今日可行動]")
     def t_actionable_sig():
-        import actionable_picks as ap
+        from radar.screeners import actionable_picks as ap
         import inspect
         sig = inspect.signature(ap.compute_actionable_picks)
         params = list(sig.parameters.keys())
@@ -48,17 +48,17 @@ def main():
             assert p in params, f"compute_actionable_picks missing param: {p}"
 
     def t_actionable_fmt():
-        import actionable_picks as ap
+        from radar.screeners import actionable_picks as ap
         # 餵空 list 看格式化函式不會崩
         out = ap.fmt_actionable_picks_tg([])
         assert isinstance(out, str)
 
     def t_actionable_dynamic_levels():
-        import actionable_picks as ap
+        from radar.screeners import actionable_picks as ap
         from unittest.mock import patch
         import pandas as pd
         # _dynamic_levels 在無 yfinance 時應走 fallback
-        with patch("data_sources.fetch_yf_history", return_value=pd.DataFrame()):
+        with patch("radar.data.data_sources.fetch_yf_history", return_value=pd.DataFrame()):
             lv = ap._dynamic_levels("2330", current=1050.0)
         assert lv and lv.get("stop") and lv.get("target") and lv.get("rr")
 
@@ -69,7 +69,7 @@ def main():
     # === tab_tw: tw_screener.run_all_screens 簽名 + CONDITION_LABELS ===
     print("\n[tab 台股篩選]")
     def t_tw_labels():
-        import tw_screener
+        from radar.screeners import tw_screener
         labels = tw_screener.CONDITION_LABELS
         # app.py line 1418 expects these conditions
         required = ("break_ma", "volume_burst", "short_increase", "invtrust_first_buy_10",
@@ -82,14 +82,14 @@ def main():
             f"capital_ratio label 未更新: {labels['capital_ratio']}"
 
     def t_tw_params():
-        import tw_screener
+        from radar.screeners import tw_screener
         p = tw_screener.TWParams()
         # B7 fix: 預設值已調整
         assert p.capital_ratio_pct == 1.5
         assert hasattr(p, "capital_ratio_window")
 
     def t_tw_run_signature():
-        import tw_screener
+        from radar.screeners import tw_screener
         import inspect
         sig = inspect.signature(tw_screener.run_all_screens)
         for p in ("market", "params", "enabled", "progress_cb"):
@@ -102,7 +102,7 @@ def main():
     # === tab_stock: stock_analyzer.institutional_summary / margin_summary ===
     print("\n[tab 個股深度分析]")
     def t_stock_helpers():
-        import stock_analyzer, pandas as pd
+        from radar.analysis import stock_analyzer; import pandas as pd
         # 餵空 DataFrame 應該不崩 (回空 summary)
         assert stock_analyzer.institutional_summary(pd.DataFrame()).empty
         assert isinstance(stock_analyzer.margin_summary(pd.DataFrame()), dict)
@@ -111,7 +111,7 @@ def main():
     # === tab_us: us_screener.run_us_recommendation ===
     print("\n[tab 美股 Top 5]")
     def t_us_sig():
-        import us_screener
+        from radar.screeners import us_screener
         import inspect
         sig = inspect.signature(us_screener.run_us_recommendation)
         assert "top_n" in sig.parameters
@@ -119,13 +119,13 @@ def main():
         assert "dedup_correlated" in sig.parameters
 
     def t_us_etf_blacklist():
-        import us_screener
+        from radar.screeners import us_screener
         assert "SPY" in us_screener._US_ETF_BLACKLIST
         assert "ARKK" in us_screener._US_ETF_BLACKLIST
         assert len(us_screener._US_ETF_BLACKLIST) >= 20
 
     def t_us_dedup():
-        import us_screener
+        from radar.screeners import us_screener
         rows = [{"symbol": s, "score": 10 - i} for i, s in enumerate(
             ["NVDA", "TSM", "ASML", "AVGO", "MSFT", "GOOGL", "META", "AAPL"])]
         kept = us_screener._dedup_correlated(rows, min_kept=5)
@@ -138,14 +138,14 @@ def main():
     # === chip_analyzer 的 fetch_chip_data 回傳 dict 結構 (給 closing/holdings/chip_filter 用) ===
     print("\n[chip_analyzer 回傳 dict 結構驗證]")
     def t_chip_helpers():
-        import chip_analyzer as ca
+        from radar.analysis import chip_analyzer as ca
         # 餵空 dict, 確認 helper 不崩
         assert ca.calc_chip_consensus({}) is not None
         assert isinstance(ca.calc_chip_health_score({}, {}, {}), int)
         assert ca.calc_short_margin_ratio({"融資餘額": 1000, "融券餘額": 250}) == 25.0
 
     def t_chip_dual_cache():
-        import chip_analyzer as ca
+        from radar.analysis import chip_analyzer as ca
         # M2: 兩個 impl 路徑都存在
         assert hasattr(ca, "_fetch_chip_data_impl_raw")
         assert hasattr(ca, "_fetch_chip_data_impl_st")
@@ -153,7 +153,7 @@ def main():
 
     def t_chip_deepcopy():
         # H1: local cache deepcopy 確認
-        import chip_analyzer as ca
+        from radar.analysis import chip_analyzer as ca
         ca._local_cache_set(("__integration_test__", 1), {"x": {"v": 100}})
         d1 = ca._local_cache_get(("__integration_test__", 1))
         d1["x"]["v"] = 999
@@ -169,16 +169,16 @@ def main():
     def t_closing_none_margin():
         # closing_analyzer 第 122 行抓 margin_30d, 我已用 or 0 處理.
         # 模擬 chip dict 含 None margin
-        import closing_analyzer as ca
+        from radar.analysis import closing_analyzer as ca
         from unittest.mock import patch
         chip = {"margin": {"融資30日變化%": None}, "institutional": {
             "Foreign_Investor": {"5d_total_lots": -4000}}}
-        with patch("chip_analyzer.fetch_chip_data", return_value=chip):
+        with patch("radar.analysis.chip_analyzer.fetch_chip_data", return_value=chip):
             result = ca._fetch_one_chip("2330", "Test")
         assert result is not None and result["chip"]["margin_30d"] == 0
 
     def t_holdings_none_margin():
-        import holdings_analyzer as ha
+        from radar.analysis import holdings_analyzer as ha
         src = Path(ha.__file__).read_text(encoding="utf-8")
         assert "(margin.get('融資30日變化%') or 0)" in src, "holdings_analyzer 未加 or 0 fallback"
 
@@ -189,7 +189,7 @@ def main():
     # === upside_screener / us_upside_screener 整合性 ===
     print("\n[upside / us_upside / theme_analyzer]")
     def t_upside_cache():
-        import upside_screener as us
+        from radar.screeners import upside_screener as us
         import inspect
         sig = inspect.signature(us.run_upside_screen)
         assert "use_cache" in sig.parameters
@@ -197,7 +197,7 @@ def main():
         assert hasattr(us, "_run_upside_screen_impl")
 
     def t_us_upside_themes():
-        import us_upside_screener as ups
+        from radar.screeners import us_upside_screener as ups
         import inspect
         sig = inspect.signature(ups.run_us_upside_screen)
         assert "with_themes" in sig.parameters
@@ -205,7 +205,7 @@ def main():
         assert set(ups.CATEGORY_LABEL_US.keys()) == {"breakout", "acceleration", "squeeze_setup", "narrative_leader", "revival_setup"}
 
     def t_theme_analyzer():
-        import theme_analyzer as ta
+        from radar.analysis import theme_analyzer as ta
         # 12 大 narrative
         assert len(ta.THEME_KEYWORDS) >= 10
         # multiplier 邏輯

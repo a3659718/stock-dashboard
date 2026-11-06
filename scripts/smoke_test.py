@@ -37,17 +37,16 @@ def main():
     print("\n[1/4] Python syntax check")
     import py_compile
     files = [
-        "indicators.py",
-        "upside_screener.py",
-        "us_upside_screener.py",
-        "theme_analyzer.py",
-        "chip_analyzer.py",
-        "chip_filter.py",
-        "tw_screener.py",
-        "us_screener.py",
-        "market_open_picks.py",
-        "actionable_picks.py",
-        "backtest_upside.py",
+        "radar/analysis/indicators.py",
+        "radar/screeners/upside_screener.py",
+        "radar/screeners/us_upside_screener.py",
+        "radar/analysis/theme_analyzer.py",
+        "radar/analysis/chip_analyzer.py",
+        "radar/screeners/tw_screener.py",
+        "radar/screeners/us_screener.py",
+        "radar/screeners/market_open_picks.py",
+        "radar/screeners/actionable_picks.py",
+        "radar/analysis/backtest_upside.py",
         "scripts/run_upside_screen.py",
         "scripts/run_backtest.py",
         "scripts/run_us_upside.py",
@@ -58,20 +57,19 @@ def main():
 
     # --- 2. import 不炸 ---
     print("\n[2/4] Module import")
-    results.append(_try("import indicators", lambda: __import__("indicators")))
-    results.append(_try("import chip_analyzer", lambda: __import__("chip_analyzer")))
-    results.append(_try("import chip_filter", lambda: __import__("chip_filter")))
-    results.append(_try("import upside_screener", lambda: __import__("upside_screener")))
-    results.append(_try("import us_upside_screener", lambda: __import__("us_upside_screener")))
-    results.append(_try("import backtest_upside", lambda: __import__("backtest_upside")))
-    results.append(_try("import actionable_picks", lambda: __import__("actionable_picks")))
-    results.append(_try("import tw_screener", lambda: __import__("tw_screener")))
-    results.append(_try("import us_screener", lambda: __import__("us_screener")))
+    results.append(_try("import indicators", lambda: __import__("radar.analysis.indicators")))
+    results.append(_try("import chip_analyzer", lambda: __import__("radar.analysis.chip_analyzer")))
+    results.append(_try("import upside_screener", lambda: __import__("radar.screeners.upside_screener")))
+    results.append(_try("import us_upside_screener", lambda: __import__("radar.screeners.us_upside_screener")))
+    results.append(_try("import backtest_upside", lambda: __import__("radar.analysis.backtest_upside")))
+    results.append(_try("import actionable_picks", lambda: __import__("radar.screeners.actionable_picks")))
+    results.append(_try("import tw_screener", lambda: __import__("radar.screeners.tw_screener")))
+    results.append(_try("import us_screener", lambda: __import__("radar.screeners.us_screener")))
 
     # --- 3. 新加的函式可呼叫 ---
     print("\n[3/4] New helpers callable")
-    import indicators as ind
-    import chip_analyzer as ca
+    from radar.analysis import indicators as ind
+    from radar.analysis import chip_analyzer as ca
     import pandas as pd
     import numpy as np
 
@@ -142,7 +140,7 @@ def main():
 
     # --- 4. upside_screener cache wrapper 結構 ---
     print("\n[4/4] upside_screener cache wrapper")
-    import upside_screener as us
+    from radar.screeners import upside_screener as us
     results.append(_try("upside_screener has _cached_upside_screen", lambda: getattr(us, "_cached_upside_screen")))
     results.append(_try("upside_screener has _run_upside_screen_impl", lambda: getattr(us, "_run_upside_screen_impl")))
     results.append(_try("run_upside_screen accepts use_cache", lambda: (
@@ -150,7 +148,7 @@ def main():
         "use_cache" in us.run_upside_screen.__code__.co_varnames
     )))
     # actionable_picks 應該有 _build_from_upside / _dynamic_levels
-    import actionable_picks as ap
+    from radar.screeners import actionable_picks as ap
     results.append(_try("actionable_picks._build_from_upside exists", lambda: getattr(ap, "_build_from_upside")))
     results.append(_try("actionable_picks._dynamic_levels exists", lambda: getattr(ap, "_dynamic_levels")))
     results.append(_try("compute_actionable_picks accepts open_data", lambda: (
@@ -159,7 +157,7 @@ def main():
     results.append(_try("actionable_picks._dynamic_levels exists", lambda: getattr(ap, "_dynamic_levels")))
 
     # 美股 upside_screener
-    import us_upside_screener as ups
+    from radar.screeners import us_upside_screener as ups
     results.append(_try("us_upside_screener has DEFAULT_US_UNIVERSE",
                           lambda: len(ups.DEFAULT_US_UNIVERSE) > 50))
     results.append(_try("us_upside_screener.run_us_upside_screen exists",
@@ -169,7 +167,7 @@ def main():
                                   {"breakout", "acceleration", "squeeze_setup", "narrative_leader"}))
 
     # theme_analyzer
-    import theme_analyzer as ta
+    from radar.analysis import theme_analyzer as ta
     results.append(_try("theme_analyzer.THEME_KEYWORDS has 10+ themes",
                           lambda: len(ta.THEME_KEYWORDS) >= 10))
     results.append(_try("theme_analyzer.SYMBOL_TO_SECTOR_ETF NVDA→XLK",
@@ -212,7 +210,7 @@ def main():
                           lambda: getattr(ca, "_is_main_streamlit_thread")))
 
     # M3: dedup fallback
-    import us_screener as uss
+    from radar.screeners import us_screener as uss
     def t_m3_fallback():
         # 故意全給同 group 的 10 檔
         rows = [{"symbol": s, "score": 10 - i}
@@ -228,7 +226,7 @@ def main():
                                   else True))  # cache wrapper 可能 hide source
 
     # L1: _ind module level import
-    import actionable_picks as ap
+    from radar.screeners import actionable_picks as ap
     results.append(_try("[L1] actionable_picks 模組頂部有 _ind",
                           lambda: hasattr(ap, "_ind")))
 
@@ -243,7 +241,7 @@ def main():
                           lambda: getattr(ca, "_is_main_streamlit_thread")))
 
     # B13 us_screener dedup
-    import us_screener as uss
+    from radar.screeners import us_screener as uss
     results.append(_try("us_screener has _US_ETF_BLACKLIST",
                           lambda: len(getattr(uss, "_US_ETF_BLACKLIST", set())) > 20))
     results.append(_try("us_screener has _dedup_correlated",

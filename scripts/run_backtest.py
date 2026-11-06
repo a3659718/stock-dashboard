@@ -33,9 +33,9 @@ import pandas as pd
 # 支援從 scripts/ 直接跑
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import backtest_upside as bt  # noqa
-import chip_analyzer  # noqa
-import data_sources as ds  # noqa
+from radar.analysis import backtest_upside as bt  # noqa
+from radar.analysis import chip_analyzer  # noqa
+from radar.data import data_sources as ds  # noqa
 
 
 # 預設 30 檔代表性 universe

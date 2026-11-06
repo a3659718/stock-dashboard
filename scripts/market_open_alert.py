@@ -28,7 +28,140 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 #   push_dedup 的 slot claim 會據此拒絕登記, 讓備援 cron 還有第二次機會 —— 原本只看
 #   notifier.SEND_OK_COUNT 有沒有增加, 但「推播失敗通知」本身也是一封成功的推播,
 #   於是主推失敗時反而把 slot claim 掉, 備援 cron 整天不補推而 Actions 還是綠燈。
-_RUN_FLAGS = {"main_push_failed": False}
+_RUN_FLAGS = {"main_push_failed": False, "claimed": False}
+
+
+def _filter_by_dir(alerts, alert_type, dir_of):
+    """alert_priority 跨類去重, 但方向依每一筆決定 (原本固定 "up"/"down")。
+
+    Bug fix: 籌碼異常的「法人連賣」(direction=sell) 與盤中「反彈」(type=rebound) 都被用錯方向
+    去重 / 標記 → 賣訊被「早上推過的看多」擋掉, 或反彈被「剛推過的回檔」擋掉, 且標記成錯的方向
+    又反過來擋掉之後真正同方向的推播。
+    """
+    from radar.core import alert_priority as _apd
+    out = []
+    for d in ("up", "down"):
+        group = [a for a in alerts if dir_of(a) == d]
+        if group:
+            out += _apd.filter_dedup_picks(group, alert_type, d)
+    keep = {id(a) for a in out}
+    return [a for a in alerts if id(a) in keep]
+
+
+def _mark_by_dir(alerts, alert_type, dir_of):
+    from radar.core import alert_priority as _apd
+    for d in ("up", "down"):
+        group = [a for a in alerts if dir_of(a) == d]
+        if group:
+            _apd.mark_picks_pushed(group, alert_type, d)
+
+
+def _reversal_dir(a):
+    return "up" if a.get("type") == "rebound" else "down"
+
+
+def _chip_dir(a):
+    return "down" if str(a.get("direction", "")).lower() in ("sell", "down") else "up"
+
+
+def _claim_main_now(market: str) -> None:
+    """主推播「確定送達」的當下就登記 slot claim。
+
+    Bug fix: 原本只在 atexit 登記; 主推送完後若後面的慢工 (chip_div 掃 80 檔等) 把 run 拖過
+    timeout-minutes: 20 被砍, atexit 不會執行 → 沒有 claim → 備援 cron 再推一次整封 (重複)。
+    """
+    try:
+        from radar.core import push_dedup as _pdc
+        if _pdc.should_guard(market) and not _RUN_FLAGS.get("claimed"):
+            _pdc.force_claim(market)
+            _RUN_FLAGS["claimed"] = True
+            print(f"[push_dedup] '{market}' 主推播已送達 → 立即登記 claim", flush=True)
+    except Exception as _e:
+        print(f"[push_dedup] 立即 claim 失敗 (non-fatal, atexit 會再試): {_e}", flush=True)
+
+
+def _run_watchlist_triggers(tag: str) -> None:
+    """自選股條件觸發: 找到就「直接推播」, 送達才算用掉 (one-shot)。
+
+    Bug fix (2026-11): 原本只把觸發結果排進 watchlist_triggers_today, 等 15:00 盤後總結才顯示,
+    並且「排進去就 mark fired (解除警戒)」。但台股 KD/MACD/均線交叉要收盤後 (UTC 06:00 後) 才判斷,
+    亞股 monitor 最後一班是 05:08 UTC → 第一次能判斷交叉的是晚上的美股 monitor, 那時 15:00 總結
+    早就送出, 隔天又被「只留今天」濾掉 → 使用者設的觸發被用掉卻從來沒收到。
+    改成: 觸發 → 先 claim (避免併發重複) → 直接送 → 送失敗回滾重新上膛。15:00 總結仍會列出今日已觸發的。
+    """
+    try:
+        from radar.alerts import watchlist_triggers as _wt
+        fired = _wt.check_triggers() or []
+        if not fired:
+            return
+        print(f"[watchlist_triggers:{tag}] {len(fired)} fired → 直接推播", flush=True)
+        prev = _wt.mark_triggers_fired(fired)  # claim; 回傳舊狀態供回滾
+        try:
+            msg = _wt.fmt_trigger_alerts(fired)
+            ok, info = notifier.send_message(msg, disable_preview=True) if msg else (False, "empty")
+        except Exception as _se:
+            ok, info = False, str(_se)
+        print(f"[watchlist_triggers:{tag}] sent ok={ok} {info}", flush=True)
+        if not ok:
+            _wt.unmark_triggers_fired(fired, prev)
+            return
+        # 記進今日清單 (給 15:00 盤後總結顯示「今日已觸發」; 只是紀錄, 失敗不影響)
+        try:
+            from radar.core import watchlist_store
+            import datetime as _dt
+            state = watchlist_store.load_monitor_state()
+            today_str = (_dt.datetime.utcnow() + _dt.timedelta(hours=8)).date().strftime("%Y-%m-%d")
+            wt_today = [t for t in (state.get("watchlist_triggers_today") or []) if t.get("date") == today_str]
+            for f in fired:
+                if not any(t.get("stock_id") == f.get("stock_id") and t.get("trigger_type") == f.get("type")
+                           for t in wt_today):
+                    wt_today.append({"date": today_str, "stock_id": f.get("stock_id"),
+                                     "trigger_type": f.get("type"), "type_label": f.get("type_label"),
+                                     "current": f.get("current"), "value": f.get("value")})
+            state["watchlist_triggers_today"] = wt_today
+            watchlist_store.save_monitor_state(state)
+        except Exception as _qe:
+            print(f"[watchlist_triggers:{tag}] 今日清單紀錄失敗 (non-fatal, 已送出): {_qe}", flush=True)
+    except Exception as _wte:
+        print(f"[watchlist_triggers:{tag}] check failed (non-fatal): {_wte}", flush=True)
+
+
+# 盤中合併推播 (系統性大跌 / 反轉 / 開盤即弱即強) 各 check_* 寫入的 top-level state key
+_INTRADAY_CLAIM_KEYS = ("systemic_crash_alerts", "intraday_reversal", "weak_open")
+
+
+def _snapshot_state_keys(keys) -> dict:
+    """送出前先記下這幾個 key 的原值 (不存在記為 None), 送失敗時用來回滾。"""
+    import copy as _copy
+    try:
+        from radar.core import watchlist_store as _wss
+        st_ = _wss.load_monitor_state()
+        return {k: _copy.deepcopy(st_.get(k)) for k in keys}
+    except Exception as _e:
+        print(f"[rollback] snapshot failed (non-fatal): {_e}", flush=True)
+        return {}
+
+
+def _restore_state_keys(snapshot: dict, tag: str) -> None:
+    if not snapshot:
+        return
+    try:
+        from radar.core import watchlist_store as _wss
+        st_ = _wss.load_monitor_state()
+        for k, v in snapshot.items():
+            # 原本不存在 → 設成 {} 而不是 pop: save 只寫「改過的 key」, 刪除無法表達 (merge 會留住舊值);
+            # 這三個模組都用 setdefault 讀, {} 與「不存在」等價。
+            st_[k] = {} if v is None else v
+        _wss.save_monitor_state(st_)
+        print(f"[{tag}] 送出失敗 → 已回滾 {', '.join(snapshot)} (下個 tick 會重新判斷)", flush=True)
+    except Exception as _e:
+        print(f"[{tag}] rollback failed: {_e}", flush=True)
+
+
+def _main_push_failed(market: str, why: str) -> None:
+    """標記「主推播沒送出去」→ 不 claim slot, 讓備援 / 晚到的 cron 還能補推。"""
+    _RUN_FLAGS["main_push_failed"] = True
+    print(f"::warning::[{market}] 主推播未送出: {why}", flush=True)
 
 
 # ---------------------------------------------------------------------------
@@ -59,30 +192,32 @@ except ImportError:
 # ===== 自我診斷：依序 import 所有需要的模組 =====
 print("=== Module Imports ===")
 _required_modules = [
-    "data_sources", "tw_screener", "sector_pulse", "us_screener",
-    "notifier", "ai_analyzer", "market_predictor",
-    "stock_catalyst", "news_sources", "earnings_calendar",
-    "market_open_picks",
+    "radar.data.data_sources", "radar.screeners.tw_screener", "radar.analysis.sector_pulse",
+    "radar.screeners.us_screener", "radar.notify.notifier", "radar.analysis.ai_analyzer",
+    "radar.analysis.market_predictor", "radar.analysis.stock_catalyst",
+    "radar.data.news_sources", "radar.data.earnings_calendar",
+    "radar.screeners.market_open_picks",
 ]
 _missing = []
+import importlib as _importlib
 for _mod in _required_modules:
     try:
-        __import__(_mod)
+        _importlib.import_module(_mod)
         print(f"  [OK]   {_mod}")
     except Exception as _e:
         print(f"  [FAIL] {_mod}: {_e}")
         _missing.append(_mod)
 if _missing:
     print(f"❌ 失敗的 modules: {_missing}")
-    print("→ 請確認以下檔案都在 GitHub repo 根目錄:")
+    print("→ 請確認以下檔案都有上傳到 GitHub (含 radar/ 資料夾與各層 __init__.py):")
     for _m in _missing:
-        print(f"   - {_m}.py")
+        print(f"   - {_m.replace('.', '/')}.py")
     sys.exit(3)
 print("==================\n")
 
-import ai_analyzer
-import market_open_picks
-import notifier
+from radar.analysis import ai_analyzer
+from radar.screeners import market_open_picks
+from radar.notify import notifier
 
 
 # === Monitor check timeout helper — 防單一 check 卡死 ===
@@ -241,7 +376,7 @@ def _run_us_open_main(market: str) -> bool:
     try:
   
         try:
-            import news_sources as _ns
+            from radar.data import news_sources as _ns
             data["external_signals"] = _ns.fetch_external_signals_bounded(timeout_sec=5.0)
         except Exception as _ext_e:
             print(f"[{market}] external_signals 預抓失敗 (non-fatal, 主推照常送出): {_ext_e}", flush=True)
@@ -274,10 +409,17 @@ def main() -> int:
 
     # 心跳: cron 每次啟動都記 (給 system_health 判定 cron 是否健康)
     try:
-        import system_health as _sh_hb
+        from radar.core import system_health as _sh_hb
         _sh_hb.record_cron_run(market)
     except Exception as _hbe:
         print(f"[heartbeat] record_cron_run fail (non-fatal): {_hbe}", flush=True)
+
+    # === 遲到守衛: GitHub cron 延遲數小時時, 不推「已過時」的盤前 / 開盤 / 盤中內容 ===
+    from radar.core import schedule_guard as _sg
+    _stale = _sg.check_stale(market)
+    if _stale:
+        print(f"::warning::[schedule_guard] {_stale}", flush=True)
+        return 0
 
     # === 排程去重守衛 (cron drift 防重複) ===
     # 一天只該推一次的 slot (tw_open / us_close / morning_recap …) 若因 cron drift
@@ -286,30 +428,29 @@ def main() -> int:
     try:
         import os as _os
         _is_manual = _os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
-        import push_dedup as _pd
+        from radar.core import push_dedup as _pd
         # window 從 50 分拉到 5 小時: 原本 50 分只擋得住 cron drift 幾十分鐘的重複,
         # 但 GitHub Actions 排程佇列延遲常達 1~2 小時 —— 本機準時 dispatch 推完後,
         # 遲到的 cron run 會在 1~2 小時後把同一則再推一次 (50 分 window 擋不住)。
-        _DEDUP_WINDOW_MIN = 300
+        # 2026-11: 再拉到 16 小時。實測 GitHub cron 延遲已到 4~6.5 小時 (且逐月變長),
+        # 300 分窗擋不住「外部準時觸發推完 → 6 小時後遲到的 cron 又推一次」。
+        # 受守衛的 slot 每天最多一次, 隔天同 slot 在 24 小時後, 16 小時窗不會誤擋。
+        _DEDUP_WINDOW_MIN = 960
         if _pd.should_guard(market):
 
+            # Bug fix: 手動 / 外部準時觸發 (cron-job.org 的 workflow_dispatch) 原本「送出前」就
+            # force_claim → 這次若 FinMind 掛掉、主推沒送出, claim 已寫入, 晚到的 cron 備援會
+            # 被擋 →  當天這則永久遺失, Actions 還是綠燈。現在手動觸發只「不被擋」,
+            # claim 一樣等主推真的送達才登記 (下面的 _claim_main_now / atexit)。
             if _is_manual:
-                # 手動 / 本機準時觸發: 不被 dedup 擋 (要能強制補推), 但一定要「登記」,
-                # 否則後面遲到的 cron run 會重複推同一則。
-                try:
-                    # force_claim 而不是 reset()+claim_slot(): reset 在 merge-on-save 下
-                    # 一句誤導的「已送過, 跳過」log, 而且 claim 時間不會更新成這次手動的時間。
-                    _pd.force_claim(market)
-                    print(f"[push_dedup] 手動觸發 '{market}' — 不擋, 已重新登記 claim "
-                          f"({_DEDUP_WINDOW_MIN} 分內遲到的 cron 會被擋掉)", flush=True)
-                except Exception as _ce:
-                    print(f"[push_dedup] 手動 claim 失敗 (non-fatal): {_ce}", flush=True)
-            elif _pd.was_claimed_recently(market, window_min=_DEDUP_WINDOW_MIN):
+                print(f"[push_dedup] 手動 / 準時觸發 '{market}' — 不被去重擋; 送達後才登記 claim",
+                      flush=True)
+            if (not _is_manual) and _pd.was_claimed_recently(market, window_min=_DEDUP_WINDOW_MIN):
                 # 唯讀檢查 — 前面已經有一次「成功推出去」的 run, 這次是重複觸發
                 print(f"[push_dedup] '{market}' 稍早已成功推播過, 本次跳過。", flush=True)
                 return 0
-            else:
-                # 還沒人推過 → 這次去跑。等真的送出成功了才登記 claim,
+            if True:
+                # 還沒人推過 (或手動觸發) → 這次去跑。等真的送出成功了才登記 claim,
                 # 中途失敗就不登記, 讓備援 cron 還有第二次機會。
                 import atexit as _atexit
                 _send_before = getattr(notifier, "SEND_OK_COUNT", 0)
@@ -321,6 +462,8 @@ def main() -> int:
                         # 於是主推失敗時反而 claim 掉 slot → 備援 cron 整天不補推, 而
                         # Actions 顯示綠燈。現在失敗通知改用 count_as_push=False 不計數,
                         # 並且只要有 handler 明確標記「主推沒送出去」就不 claim。
+                        if _RUN_FLAGS.get("claimed"):
+                            return  # 主推送達當下已登記
                         if _RUN_FLAGS.get("main_push_failed"):
                             print(f"[push_dedup] '{_m}' 主推播未送出 → 不登記, "
                                   f"備援 cron 仍可補推", flush=True)
@@ -340,14 +483,16 @@ def main() -> int:
 
     # === 假日檢查 ===
     try:
-        import holiday_check
+        from radar.core import holiday_check
 
         if market == "monitor":
             # monitor 不檢查假日 (24x7 都跑, 自然會無新警報)
             print(f"=== Holiday Check ===")
             print(f"monitor mode: 24x7 執行，不檢查假日")
             print(f"=====================\n")
-        elif market in ("heartbeat", "crypto_picks"):
+        elif market in ("heartbeat", "crypto_picks", "policy_watch"):
+            # policy_watch (週報) 週一 09:47 TPE = 美東週日晚上, 若走下面的 US 檢查會被當成
+            # 「週日休市」而永遠在準時那一次被跳過 → 不檢查股市假日。
             # heartbeat 每天跑; crypto 24/7 無休市 — 都不檢查股市假日。
             # (Bug fix 2026-08: crypto_picks 原本落到下面的 else, 被當成美股 →
             #  美股休市日 crypto 推播整天不送, 但幣圈根本沒休市。)
@@ -366,7 +511,8 @@ def main() -> int:
             print(f"=====================\n")
         elif market == "holiday_news":
             # 反向邏輯: TW 開盤日才跳過 (其他正常推播會處理), 休市日才跑
-            if not holiday_check.is_market_closed_today("TW"):
+            from radar.core import schedule_guard as _sgh
+            if not holiday_check.is_market_closed_today("TW", today=_sgh.intended_market_date("TW")):
                 print(f"=== Holiday Check ===")
                 print(f"今日 TW 開盤交易日，holiday_news 跳過此次推播。")
                 print(f"市場狀態: {holiday_check.market_status_summary()}")
@@ -391,7 +537,11 @@ def main() -> int:
                 market_for_holiday = "TW"
             else:
                 market_for_holiday = "US"
-            if holiday_check.is_market_closed_today(market_for_holiday):
+            # 用「排定時間」的當地日期: cron 延遲數小時會跨過當地午夜 (例 週五 us_close 晚 6 小時
+            # 就被當成週六休市而整個跳過); 手動 / 準時觸發回 None → 照舊用現在時間。
+            from radar.core import schedule_guard as _sgh
+            _hol_day = _sgh.intended_market_date(market_for_holiday)
+            if holiday_check.is_market_closed_today(market_for_holiday, today=_hol_day):
                 print(f"=== Holiday Check ===")
                 print(f"今日 {market_for_holiday} 休市，跳過此次推播。")
                 print(f"市場狀態: {holiday_check.market_status_summary()}")
@@ -431,7 +581,7 @@ def main() -> int:
                 safety = None
             test_resp = test_model.generate_content(
                 "What is 2 plus 3? Answer with just the number.",
-                generation_config={"max_output_tokens": 20, "temperature": 0},
+                generation_config={"max_output_tokens": 20 + 4096, "temperature": 0},
                 safety_settings=safety,
             )
             # 不直接用 .text (會 raise), 改檢查 candidates
@@ -492,7 +642,7 @@ def main() -> int:
     # === 🇺🇸 川普政策推播 (monitor 跑時, 60min cooldown) ===
     if market == "monitor":
         try:
-            import trump_policy_alert as _tp
+            from radar.alerts import trump_policy_alert as _tp
             tp_alerts = _tp.check_trump_policy_news() or []
             if tp_alerts:
                 print(f"[trump_policy] triggered {len(tp_alerts)}", flush=True)
@@ -507,15 +657,24 @@ def main() -> int:
                         category="trump_policy",
                     )
                     print(f"[trump_policy] sent ok={ok_tp}", flush=True)
+                    if not ok_tp:
+                        _tp.unmark_alerts_sent(tp_alerts)  # 送失敗 / cap 擋 → 回滾, 下個 tick 重試
+                else:
+                    _tp.unmark_alerts_sent(tp_alerts)
         except Exception as _e:
             import traceback
             print(f"[trump_policy] failed: {_e}", flush=True)
             traceback.print_exc()
+            try:
+                if tp_alerts:
+                    _tp.unmark_alerts_sent(tp_alerts)
+            except Exception as _ue:
+                print(f"[trump_policy] unmark after failure also failed: {_ue}", flush=True)
 
     # === 🌏 日韓 leading alert (monitor 跑時, 台股盤中) ===
     if market == "monitor":
         try:
-            import asia_leading_alert as _al
+            from radar.alerts import asia_leading_alert as _al
             al_alerts = _al.check_asia_leading() or []
             if al_alerts:
                 print(f"[asia_leading] triggered {len(al_alerts)}", flush=True)
@@ -553,8 +712,17 @@ def main() -> int:
 
     if market == "us_open":
         try:
-            import analyst_insider_alert as _ai
+            from radar.alerts import analyst_insider_alert as _ai
             ai_alerts = _ai.check_analyst_insider() or []
+            # Bug fix: 推播每類只顯示前 5 筆, 但原本把「全部」都 claim (保留 45 天) → 第 6 筆以後
+            # 被標成已送卻從來沒出現在訊息裡。只 claim / 送出會顯示的那幾筆, 其餘下次再推。
+            if ai_alerts:
+                _ups = [a for a in ai_alerts if a.get("type") == "analyst_upgrade"][:5]
+                _ins = [a for a in ai_alerts if a.get("type") == "insider_buy"]
+                _ceo = [a for a in _ins if a.get("is_ceo_cfo")][:5]
+                _oth = [a for a in _ins if not a.get("is_ceo_cfo")][:5]
+                _rest = [a for a in ai_alerts if a.get("type") not in ("analyst_upgrade", "insider_buy")]
+                ai_alerts = _ceo + _oth + _ups + _rest
             if ai_alerts:
                 print(f"[analyst_insider] triggered {len(ai_alerts)}", flush=True)
                 _ai.mark_alerts_sent(ai_alerts)  # claim 在送出前 → 防併發重複
@@ -589,7 +757,7 @@ def main() -> int:
         try:
             import datetime as _dt2
             if _dt2.date.today().weekday() == 0:  # Monday only
-                import rate_cycle_advisor as _rc
+                from radar.analysis import rate_cycle_advisor as _rc
                 cyc = _rc.detect_cycle()
                 if cyc.get("cycle") != "unknown":
                     advice = _rc.get_sector_advice(cyc["cycle"])
@@ -616,7 +784,7 @@ def main() -> int:
     # 該 slot 已改為跟美股夏冬令連動、固定落在開盤前約 1 小時, 名副其實的盤前預測。
     if market == "us_buy_picks":
         try:
-            import daily_outlook_advisor as _doa_us
+            from radar.analysis import daily_outlook_advisor as _doa_us
             us_outlook = _doa_us.predict_us_outlook()
             us_ot_msg = _doa_us.format_outlook_for_tg(us_outlook)
             if us_ot_msg:
@@ -630,7 +798,7 @@ def main() -> int:
         try:
             import datetime as _dt3
             if _dt3.date.today().weekday() == 2:  # Wednesday only
-                import speculation_screener as _ss
+                from radar.screeners import speculation_screener as _ss
                 spec_picks = _ss.compute_speculation_picks(top_n=10, min_score=60) or []
                 if spec_picks:
                     spec_msg = notifier.fmt_speculation_picks(spec_picks)
@@ -654,7 +822,7 @@ def main() -> int:
     # === 🚀 美股盤整突破 (US session 內每次 monitor 都掃) ===
     if market in ("us_open", "us_mid", "monitor"):
         try:
-            import breakout_consolidation_alert as _bc
+            from radar.alerts import breakout_consolidation_alert as _bc
             bc_alerts = _bc.check_breakout_consolidation(top_n=5) or []
             # Bug fix: breakout_consolidation 之前是唯一沒接進 "intraday_strong_stock"
             # 跨模組去重命名空間的多方訊號模組 — 同一檔美股若同時滿足「20日盤整突破」
@@ -662,7 +830,7 @@ def main() -> int:
             # 各自獨立推播一次, 講的其實是同一件事. 補上跟其他三個模組一致的去重。
             if bc_alerts:
                 try:
-                    import alert_priority as _apbc
+                    from radar.core import alert_priority as _apbc
                     bc_alerts = _apbc.filter_dedup_picks(bc_alerts, "intraday_strong_stock", "up")
                 except Exception:
                     pass
@@ -703,7 +871,7 @@ def main() -> int:
     # === 📊 台股盤後總結 (TPE 16:00) ===
     if market == "tw_post_market":
         try:
-            import tw_post_market_summary as _pms
+            from radar.alerts import tw_post_market_summary as _pms
             pms_msg = _pms.build_post_market_msg()
             if pms_msg:
                 # 內容豐富 → 超過 TG 4096 就拆多封送 (以前直接截斷, Gemini 隔日策略整段被砍)
@@ -729,14 +897,14 @@ def main() -> int:
     # 16:32 三大法人已出齊 → 含今日外資動向, 名副其實。
     if market == "tw_foreign_chips":
         try:
-            import holiday_check as _hc
+            from radar.core import holiday_check as _hc
             if _hc.is_market_closed_today("TW"):
                 print("[tw_foreign_chips] TW 今日休市, skip", flush=True)
                 return 0
         except Exception as _hce:
             print(f"[tw_foreign_chips] holiday check fail (continue anyway): {_hce}", flush=True)
         try:
-            import closing_analyzer as _ca
+            from radar.analysis import closing_analyzer as _ca
             dumping = _ca.analyze_foreign_dumping(top_n=5, max_scan=80) or []
             fc_msg = notifier.fmt_foreign_dumping_alert(dumping)
             if fc_msg:
@@ -753,7 +921,7 @@ def main() -> int:
     # === 🎯 漲停前兆單獨觸發 (手動測試用; 正常走 tw_close 盤後那一段) ===
     if market == "limit_up_precursor":
         try:
-            import limit_up_precursor as _lup
+            from radar.screeners import limit_up_precursor as _lup
             picks = _lup.scan_limit_up_precursor(top_n=8)
             print(f"[limit_up_precursor] 掃到 {len(picks)} 檔", flush=True)
             if not picks:
@@ -775,7 +943,7 @@ def main() -> int:
     # === 🌅 pre_market_morning 推播 (TPE 08:15 / 08:30) ===
     if market in ("pre_market_815", "pre_market_830"):
         try:
-            import pre_market_alert as _pm
+            from radar.alerts import pre_market_alert as _pm
             slot = "08:15" if market == "pre_market_815" else "08:30"
             pm_msg = _pm.build_pre_market_msg(slot)
             if pm_msg:
@@ -783,10 +951,17 @@ def main() -> int:
                     pm_msg, disable_preview=True, disable_notification=False
                 )
                 print(f"[pre_market] {slot} sent ok={ok_pm} info={info_pm}", flush=True)
+                # Bug fix: 原本送失敗不標記 → 後面 IPO 推播成功就讓 atexit claim 掉 slot,
+                # 08:41 備援 cron 被擋, 盤前整天沒送到。
+                if ok_pm:
+                    _claim_main_now(market)
+                else:
+                    _main_push_failed(market, info_pm)
             else:
                 # 之前這裡靜默不送、連原因都不印 → 「完全沒收到」卻查不到為什麼。
                 print(f"[pre_market] {slot} 訊息為空 → 不送。可能原因: 台股休市判定 / "
                       f"美股+日韓資料全抓不到", flush=True)
+                _main_push_failed(market, "訊息為空")
         except Exception as _e:
             import traceback
             print(f"[pre_market] failed: {_e}", flush=True)
@@ -799,7 +974,7 @@ def main() -> int:
         # (對照組: 週五 us_open 的「下週 IPO 預告」是可達的, 所以只有「今日上市」壞掉。)
         if market == "pre_market_830":
             try:
-                import ipo_calendar_alert as _ipo
+                from radar.alerts import ipo_calendar_alert as _ipo
                 ipo_result = _ipo.check_and_push(mode="today")
                 print(f"[ipo_today] check: {ipo_result}", flush=True)
             except Exception as _ipoe:
@@ -818,7 +993,7 @@ def main() -> int:
         # ===== 主動式 ETF 持股變動 (只在 tw_open 跑, 09:30 時 MoneyDJ 應已更新昨日資料) =====
         if market == "tw_open":
             try:
-                import active_etf_monitor
+                from radar.alerts import active_etf_monitor
                 etf_changes = active_etf_monitor.check_all_active_etfs()
                 if etf_changes:
                     for diff in etf_changes:
@@ -855,7 +1030,7 @@ def main() -> int:
 
         # 持倉停損預警 — 在主分析前先檢查, 跌破立刻另外推一封
         try:
-            import holdings_tracker
+            from radar.alerts import holdings_tracker
             sl_breaches = holdings_tracker.check_stop_loss_breaches()
             if sl_breaches:
                 sl_msg = notifier.fmt_stop_loss_alerts(sl_breaches)
@@ -883,7 +1058,7 @@ def main() -> int:
         if market == "tw_mid":
             should_skip_tw_mid = False
             try:
-                import data_sources as _ds
+                from radar.data import data_sources as _ds
                 # 抓今日 + 昨日 5m, 用收盤算 vs 昨收
                 twii = _ds.fetch_yf_history("^TWII", period="2d", interval="5m")
                 if twii is None or twii.empty:
@@ -969,7 +1144,7 @@ def main() -> int:
             # 在格式化當下自己序列現抓 7 次外部連線, 這裡改成有界時間 (5 秒) 平行預抓,
             # 抓不完就跳過, 避免拖累「開盤 30 分」主推的準時送出。
             try:
-                import news_sources as _ns
+                from radar.data import news_sources as _ns
                 data["external_signals"] = _ns.fetch_external_signals_bounded(timeout_sec=5.0)
             except Exception as _ext_e:
                 print(f"[{market}] external_signals 預抓失敗 (non-fatal, 主推照常送出): {_ext_e}", flush=True)
@@ -982,6 +1157,8 @@ def main() -> int:
             msg = ""
     elif market == "tw_close":
         print("Running TW market close analysis (15:00)...")
+        # 收盤後第一個能判斷台股 KD/MACD/均線交叉的時點 (monitor 最後一班 13:08 TPE 還在盤中)
+        _run_watchlist_triggers("tw_close")
         try:
             data = market_open_picks.get_tw_close_analysis()
         except Exception as e:
@@ -1007,7 +1184,7 @@ def main() -> int:
         # === 合併 16:00「今日總結 + 隔日策略」進這封 15:00 盤後 (用戶要求 15:00+16:00 整合成一個) ===
         # 兩者資料 15:00 都已就緒 (加權/日韓已收盤); 過長會由 send_message 自動分段, 不截斷。
         try:
-            import tw_post_market_summary as _pms
+            from radar.alerts import tw_post_market_summary as _pms
             _pm_msg = _pms.build_post_market_msg()
             if _pm_msg:
                 msg = (msg + "\n\n━━━━━━━━━━━━━━━━━\n\n" + _pm_msg) if msg else _pm_msg
@@ -1018,7 +1195,11 @@ def main() -> int:
         if msg:
             ok_c, info_c = notifier.send_message(msg, disable_preview=True)
             print(f"[tw_close] 盤後總結(合併)優先送出: ok={ok_c} {info_c}", flush=True)
-            _tw_main_sent = True
+            # Bug fix: 原本不管成敗都設 True → 送失敗時下面不會重試, 也不會標記失敗,
+            # 後續其他推播成功就讓 slot 被 claim, 15:19 備援被擋。失敗時留給下面再送一次。
+            _tw_main_sent = bool(ok_c)
+            if ok_c:
+                _claim_main_now(market)
 
         # === 🎯 漲停前兆 / 潛伏吸籌 — 盤後推一封 (2026-08 新增: 原本只在 dashboard) ===
         # 為什麼放 15:00 盤後: 這個篩選器吃「今天完整的日線 + 籌碼」, 盤中資料還沒收完,
@@ -1026,7 +1207,7 @@ def main() -> int:
         # 為什麼不套 push_cap 的 category: 這是使用者指名要的主推, 不該跟次要 alert
         # 搶那 6 封的每日額度而被默默擋掉 (擋掉時只有 log, 你在 TG 端完全看不出來)。
         try:
-            import limit_up_precursor as _lup
+            from radar.screeners import limit_up_precursor as _lup
             _lup_picks = _lup.scan_limit_up_precursor(top_n=8)
             if _lup_picks:
                 _lup_msg = _lup.fmt_limit_up_precursor_msg(_lup_picks)
@@ -1046,18 +1227,18 @@ def main() -> int:
 
         # 盤後籌碼-價量 12 模式分析 — 額外推一封 (極強看好/警示/看壞 標的)
         try:
-            import chip_price_divergence as _cpd
+            from radar.analysis import chip_price_divergence as _cpd
             # 從 upside_screener top picks + 用戶 watchlist 一起分析
             cpd_stocks = []
             try:
-                import upside_screener as _us
+                from radar.screeners import upside_screener as _us
                 up_result = _us.run_upside_screen(market="all", max_stocks=80, use_cache=True)
                 cpd_stocks = [p.get("stock_id") for p in (up_result.get("all") or [])[:20]
                               if p.get("stock_id")]
             except Exception as _e:
                 print(f"  cpd: upside_screener fetch failed: {_e}", flush=True)
             try:
-                import watchlist_store as _ws
+                from radar.core import watchlist_store as _ws
                 # Bug fix (2026-09-07): load_watchlist() 回 dict 陣列, 這裡 list(dict.fromkeys(
                 # list_of_str + list_of_dict)) 會 TypeError: unhashable type: 'dict',
                 # 被下面沒有 log 的 except 吞掉 -> 自選股從來沒進過盤後籌碼-價量分析。
@@ -1078,8 +1259,8 @@ def main() -> int:
 
         # 持倉日報 — 額外推一封
         try:
-            import holdings_analyzer
-            import holdings_tracker
+            from radar.analysis import holdings_analyzer
+            from radar.alerts import holdings_tracker
 
             # 先驗證舊預測 (隔日已收盤 → 對昨天的預測算對錯)
             try:
@@ -1129,8 +1310,15 @@ def main() -> int:
         elif msg:
             ok_tw, info_tw = notifier.send_message(msg, disable_preview=True)
             print(f"[{market}] 主分析 TG send: ok={ok_tw} {info_tw}", flush=True)
+            if ok_tw:
+                _claim_main_now(market)
+            else:
+                _main_push_failed(market, info_tw)
+                return 2
         else:
             print(f"[{market}] 主分析訊息為空, 不送 (可能 FinMind 失效/無資料)", flush=True)
+            _main_push_failed(market, "主分析訊息為空")
+            return 2
         return 0
 
     # (「IPO 今日上市推播」已搬到上面 pre_market 區塊的 return 之前 — 放在這裡是死碼)
@@ -1141,7 +1329,7 @@ def main() -> int:
         try:
             import datetime as _dt
             if _dt.datetime.utcnow().weekday() == 4:  # 週五
-                import ipo_calendar_alert as _ipo
+                from radar.alerts import ipo_calendar_alert as _ipo
                 # 週五推台股下週 IPO
                 ipo_result = _ipo.check_and_push(mode="next_week", market="TW")
                 print(f"[ipo_tw_next_week] friday preview: {ipo_result}", flush=True)
@@ -1151,7 +1339,7 @@ def main() -> int:
     # 手動觸發 ipo_weekly (workflow_dispatch) — 推台股下週預告 (跟週五自動一致)
     if market == "ipo_weekly":
         try:
-            import ipo_calendar_alert as _ipo
+            from radar.alerts import ipo_calendar_alert as _ipo
             ipo_result = _ipo.check_and_push(mode="next_week", market="TW")
             print(f"[ipo_tw_next_week] manual push: {ipo_result}", flush=True)
         except Exception as _ipoe:
@@ -1161,7 +1349,7 @@ def main() -> int:
     # 早安推播 (UTC 23:30 = TPE 07:30 隔日) — 摘要昨夜美股 + 昨夜推播
     if market == "morning_recap":
         try:
-            import morning_recap_alert as _mr
+            from radar.alerts import morning_recap_alert as _mr
             r = _mr.check_and_push()
             print(f"[morning_recap] result: {r}", flush=True)
         except Exception as _mre:
@@ -1172,7 +1360,7 @@ def main() -> int:
     if market == "us_emerging":
         print("Running US emerging breakout scan (19:00 TPE)...")
         try:
-            import us_screener as _uss
+            from radar.screeners import us_screener as _uss
             data = _uss.run_emerging_breakout(top_n=10)
             print(f"[us_emerging] scanned {data.get('scanned', 0)} / "
                   f"universe {data.get('universe_size', 0)}", flush=True)
@@ -1194,14 +1382,14 @@ def main() -> int:
     if market == "us_buy_picks":
         # BUG #2 fix: 美股假日 (7/4, Thanksgiving, Christmas) 跳過, 避免推過時資料
         try:
-            import holiday_check as _hc
+            from radar.core import holiday_check as _hc
             if _hc.is_market_closed_today("US"):
                 print("[us_buy_picks] US market closed today, skip", flush=True)
                 return 0
         except Exception as _hce:
             print(f"[us_buy_picks] holiday check fail (continue anyway): {_hce}", flush=True)
         try:
-            import us_actionable as _ua
+            from radar.screeners import us_actionable as _ua
             import html as _html
             picks = _ua.compute_us_actionable_picks(top_n=10) or []
             # Bug fix: 原本 `entry_score is None or ... >= 70` 讓「沒有分數」的股票
@@ -1258,8 +1446,13 @@ def main() -> int:
                     if p.get("entry_timing_label"):
                         lines.append(f"   {p['entry_timing_label']}")
             msg = "\n".join(lines)
-            notifier.send_message(msg)
-            print(f"[us_buy_picks] sent {len(buy_picks)} BUY picks", flush=True)
+            ok_ub, info_ub = notifier.send_message(msg)
+            print(f"[us_buy_picks] sent {len(buy_picks)} BUY picks ok={ok_ub} {info_ub}", flush=True)
+            # Bug fix: 原本忽略送出結果, 送失敗仍記帳 (晨報去驗收使用者根本沒收到的推薦) 且回 0。
+            if not ok_ub:
+                _main_push_failed(market, info_ub)
+                return 2
+            _claim_main_now(market)
 
             # === 帳本: 記下今晚推的美股 BUY, 明早晨報驗收「隔一個交易日有沒有漲」 ===
             # 這是 NYSE 開盤前 ~1hr 推的, current 是【前一個美股交易日】的收盤 →
@@ -1267,7 +1460,7 @@ def main() -> int:
             # 明天早上 08:00 晨報就拿得到結果。
             if buy_picks:
                 try:
-                    import pick_review as _pr
+                    from radar.core import pick_review as _pr
                     _n = _pr.record_picks(
                         "us_buy_picks", buy_picks, market="US",
                         source="美股盤前 BUY Top 5", price_is_last_close=True,
@@ -1286,6 +1479,8 @@ def main() -> int:
 
     elif market == "us_close":
         print("Running US market close analysis (+2h, 18:00 EDT)...")
+        # 美股收盤後判斷交叉 (EST 季 monitor 最後一班 20:15 UTC 還沒收盤, 交叉原本只在週末才被檢查)
+        _run_watchlist_triggers("us_close")
         try:
             data = market_open_picks.get_us_close_analysis()
             if data.get("ai_text"):
@@ -1330,7 +1525,7 @@ def main() -> int:
                 return 0
             # 設 dedup flag — 讓 30 min 後的 holiday_news cron 知道週末摘要已推, 不要重複
             try:
-                import watchlist_store
+                from radar.core import watchlist_store
                 state = watchlist_store.load_monitor_state()
                 state["weekend_recap_last_fired"] = today_str
                 watchlist_store.save_monitor_state(state)
@@ -1348,7 +1543,7 @@ def main() -> int:
         print("Running TW holiday news summary (22:30 台北)...")
         # I2-like dedup: 若今天 weekend_recap 已推, 跳過 holiday_news 避免雙推
         try:
-            import watchlist_store
+            from radar.core import watchlist_store
             import datetime as _dt
             today_str = _dt.date.today().strftime("%Y-%m-%d")
             state = watchlist_store.load_monitor_state()
@@ -1385,18 +1580,38 @@ def main() -> int:
         print("[crypto_picks] 已停用 (用戶要求取消加密貨幣)")
         return 0
 
+    elif market == "policy_watch":
+        # 政策情境族群週報 (2027 民主黨國會 / 分裂政府): 族群籃子 20 日相對大盤強弱
+        try:
+            from radar.analysis import policy_regime as _prg
+            rows = _prg.scan_policy_themes()
+            if not any(r.get("us") or r.get("tw") for r in rows):
+                print("[policy_watch] 抓不到任何族群報酬, 不推", flush=True)
+                _RUN_FLAGS["main_push_failed"] = True
+                return 0
+            ok, info = notifier.send_message(_prg.fmt_policy_regime_tg(rows),
+                                             disable_notification=True)
+            print(f"[policy_watch] sent ok={ok} info={info}", flush=True)
+            if not ok:
+                _RUN_FLAGS["main_push_failed"] = True
+            return 0 if ok else 2
+        except Exception as _pe:
+            print(f"[policy_watch] failed: {_pe}", flush=True)
+            _RUN_FLAGS["main_push_failed"] = True
+            return 2
+
     elif market == "heartbeat":
         # 系統健康日報: 探外部 API + 印 ETF 資料新鮮度
         # Bug fix #3: 順便跑 signal_tracker.evaluate_pending() — 累積真實勝率
         print("Running heartbeat health check...")
         try:
-            import signal_tracker as _st_eval
+            from radar.core import signal_tracker as _st_eval
             n_validated = _st_eval.evaluate_pending()
             print(f"[signal_tracker] auto-evaluate validated {n_validated} signals", flush=True)
         except Exception as _se:
             print(f"[signal_tracker] auto-evaluate failed (non-fatal): {_se}", flush=True)
         try:
-            import heartbeat
+            from radar.core import heartbeat
             msg, all_healthy = heartbeat.build_heartbeat_message()
             print(f"Heartbeat message length: {len(msg)} chars / {len(msg.encode('utf-8'))} bytes")
             # BUG FIX (使用者要求精簡推播): 原本每天固定推送, 不管健不健康都送一封
@@ -1420,7 +1635,7 @@ def main() -> int:
 
 
         try:
-            import index_alerts as _ia_pre
+            from radar.alerts import index_alerts as _ia_pre
             import datetime as _dt
             now_utc = _dt.datetime.now(_dt.timezone.utc)
             cur_hour = now_utc.hour
@@ -1445,7 +1660,7 @@ def main() -> int:
         # context 結束時一次 flush 到 GSheet. 從每 tick ~12 個 GSheet API call
         # 降到 2 個 (1 read + 1 write). atexit 註冊保險, 確保即使中途 return/exception
         # 也會 close + flush.
-        import watchlist_store as _ws_batch
+        from radar.core import watchlist_store as _ws_batch
         import atexit as _atexit
         _ws_batch.open_batched_state()
         _atexit.register(_ws_batch.close_batched_state)
@@ -1459,9 +1674,13 @@ def main() -> int:
         crash_ai_text = ""
         reversal_alerts = []
         bucket_alerts = []
+        # Bug fix: 三個 check_* 在「回傳前」就把 last_alert_at / alerts_today / weak_alerted 等存檔,
+        # 送出結果原本只印出來 → TG 失敗時: 系統性大跌 60 分不再推且吃掉每日 5 次額度、反轉要再多
+        # 0.5pp 才會再觸發、開盤即弱整天不再推。先記原值, 送失敗就回滾。
+        _intraday_snap = _snapshot_state_keys(_INTRADAY_CLAIM_KEYS)
 
         try:
-            import index_alerts as _ia
+            from radar.alerts import index_alerts as _ia
             crash_data = _ia.check_systemic_crash()
             if crash_data:
                 print(
@@ -1483,15 +1702,13 @@ def main() -> int:
             print(f"[systemic crash] check failed (non-fatal): {_e}", flush=True)
 
         try:
-            import index_alerts as _ia_rev
+            from radar.alerts import index_alerts as _ia_rev
             reversal_alerts = _ia_rev.check_intraday_reversal() or []
             # B: 跨類去重 — 同 symbol 30min 內已推過 → skip
             try:
-                import alert_priority as _ap
+                from radar.core import alert_priority as _ap
                 original_n = len(reversal_alerts)
-                reversal_alerts = _ap.filter_dedup_picks(
-                    reversal_alerts, "intraday_reversal", "down"
-                )
+                reversal_alerts = _filter_by_dir(reversal_alerts, "intraday_reversal", _reversal_dir)
                 if original_n > len(reversal_alerts):
                     print(f"[intraday reversal] dedup 過濾 {original_n - len(reversal_alerts)}", flush=True)
             except Exception:
@@ -1504,12 +1721,7 @@ def main() -> int:
                     ),
                     flush=True,
                 )
-                # mark 已推 (送 TG 成功後再標, 但 super combined 流程後段才送, 在此先標保險)
-                try:
-                    import alert_priority as _ap2
-                    _ap2.mark_picks_pushed(reversal_alerts, "intraday_reversal", "down")
-                except Exception:
-                    pass
+                # 跨類去重的「已推」標記改到合併訊息送達後才寫 (見下方 combined intraday)
         except Exception as _e:
             import traceback
             print(f"[intraday reversal] check failed (non-fatal): {_e}", flush=True)
@@ -1518,7 +1730,7 @@ def main() -> int:
         # M3: 開盤即弱/即強警報 (跟 reversal 互補, 抓開盤後沒給機會的場景)
         weak_open_alerts = []
         try:
-            import index_alerts as _ia_wo
+            from radar.alerts import index_alerts as _ia_wo
             weak_open_alerts = _ia_wo.check_weak_open_alerts() or []
             #         (reversal 訊息語境更完整, 含 severity/速度/同向股)
             if weak_open_alerts and reversal_alerts:
@@ -1536,7 +1748,7 @@ def main() -> int:
             # B: 跨類去重 — 同 symbol+方向 30min 內已推
             if weak_open_alerts:
                 try:
-                    import alert_priority as _ap_wo
+                    from radar.core import alert_priority as _ap_wo
                     # weak_open 含 type=weak/strong, direction 對應 down/up
                     # Bug fix (2026-09-18): 產生端 (index_alerts.py:1231/1254) 寫的是
                     # "weak_open"/"strong_open", 這裡原本只比對 "weak"/"strong" →
@@ -1559,15 +1771,7 @@ def main() -> int:
                     ),
                     flush=True,
                 )
-                # mark 已推
-                try:
-                    import alert_priority as _ap_wo2
-                    for a in weak_open_alerts:
-                        d = "down" if a.get("type") in ("weak", "weak_open") else "up"
-                        _ap_wo2.mark_picks_pushed([a],
-                                                    "weak_open" if d == "down" else "strong_open", d)
-                except Exception:
-                    pass
+                # 「已推」標記改到合併訊息送達後才寫 (見下方 combined intraday)
         except Exception as _e:
             import traceback
             print(f"[weak/strong open] check failed (non-fatal): {_e}", flush=True)
@@ -1597,19 +1801,35 @@ def main() -> int:
                     weak_open_alerts=weak_open_alerts,
                     crash_ai_text=crash_ai_text,
                 )
+                _any_ok = False
                 for _cp in (_combined_parts or []):
                     if _cp:
                         _okc, _infoc = notifier.send_message(_cp, disable_preview=True)
                         print(f"[combined intraday] sent ok={_okc}: {_infoc}", flush=True)
+                        _any_ok = _any_ok or bool(_okc)
+                if _any_ok:
+                    try:
+                        if reversal_alerts:
+                            _mark_by_dir(reversal_alerts, "intraday_reversal", _reversal_dir)
+                        from radar.core import alert_priority as _ap_wo2
+                        for a in weak_open_alerts:
+                            d = "down" if a.get("type") in ("weak", "weak_open") else "up"
+                            _ap_wo2.mark_picks_pushed([a], "weak_open" if d == "down" else "strong_open", d)
+                    except Exception as _me:
+                        print(f"[combined intraday] 跨類去重標記失敗 (non-fatal): {_me}", flush=True)
+                else:
+                    _restore_state_keys(_intraday_snap, "combined intraday")
         except Exception as _ce:
             import traceback
             print(f"[combined intraday] send failed (non-fatal): {_ce}", flush=True)
             traceback.print_exc()
+            if crash_data or reversal_alerts or weak_open_alerts:
+                _restore_state_keys(_intraday_snap, "combined intraday")
 
 
         ssa_result = None
         try:
-            import strong_stock_alert as _ssa
+            from radar.alerts import strong_stock_alert as _ssa
             ssa_result = _ssa.check_and_push_if_surge()
             if ssa_result:
                 print(f"[strong stock alert] {ssa_result}", flush=True)
@@ -1627,7 +1847,7 @@ def main() -> int:
                   flush=True)
         else:
             def _strong_check():
-                import strong_stock_alert as _ssa2
+                from radar.alerts import strong_stock_alert as _ssa2
                 return _ssa2.check_and_push_intraday_strong()
             ssa2_result = _run_with_timeout(_strong_check, "intraday_strong", timeout_sec=60)
             if ssa2_result:
@@ -1635,7 +1855,7 @@ def main() -> int:
 
         # === 新增: 常態 intraday 弱勢個股推播 (短空候選, 多空雙向; 帶 timeout) ===
         def _weak_check():
-            import short_candidates as _sc
+            from radar.screeners import short_candidates as _sc
             return _sc.check_and_push_intraday_weak()
         sc_result = _run_with_timeout(_weak_check, "intraday_weak", timeout_sec=60)
         if sc_result:
@@ -1643,53 +1863,19 @@ def main() -> int:
 
         # === A: 台指期 / 微台專屬 alert (升貼水 + 法人 + 散戶反指標) ===
         def _tx_check():
-            import tx_futures_alert as _tx
+            from radar.alerts import tx_futures_alert as _tx
             return _tx.check_and_push()
         tx_result = _run_with_timeout(_tx_check, "tx_futures", timeout_sec=60)
         if tx_result:
             print(f"[tx_futures] {tx_result}", flush=True)
 
 
-        try:
-            import watchlist_triggers as _wt
-            fired = _wt.check_triggers() or []
-            if fired:
-                print(f"[watchlist_triggers] {len(fired)} fired (queued for 15:00 summary)", flush=True)
-
-                try:
-                    import watchlist_store
-                    state = watchlist_store.load_monitor_state()
-                    wt_today = state.setdefault("watchlist_triggers_today", [])
-                    import datetime as _dt
-                    today_str = (_dt.datetime.utcnow() + _dt.timedelta(hours=8)).date().strftime("%Y-%m-%d")
-                    # 過濾掉舊日的, 只留今天
-                    wt_today = [t for t in wt_today if t.get("date") == today_str]
-                    # 加入新觸發
-                    for f in fired:
-                        if not any(t.get("stock_id") == f.get("stock_id") and
-                                   t.get("trigger_type") == f.get("type")
-                                   for t in wt_today):
-                            wt_today.append({
-                                "date": today_str,
-                                "stock_id": f.get("stock_id"),
-                                "trigger_type": f.get("type"),
-                                "type_label": f.get("type_label"),
-                                "current": f.get("current"),
-                                "value": f.get("value"),
-                            })
-                    state["watchlist_triggers_today"] = wt_today
-                    watchlist_store.save_monitor_state(state)
-                    _wt.mark_triggers_fired(fired)
-                except Exception as _save_e:
-                    print(f"[watchlist_triggers] queue-for-summary save failed, "
-                          f"NOT disarming — will retry next check: {_save_e}", flush=True)
-        except Exception as _wte:
-            print(f"[watchlist_triggers] check failed (non-fatal): {_wte}", flush=True)
+        _run_watchlist_triggers("monitor")
 
     
         holdings_intraday_alerts = []
         try:
-            import holdings_intraday_alert as _hi
+            from radar.alerts import holdings_intraday_alert as _hi
             holdings_intraday_alerts = _hi.check_holdings_intraday_risk() or []
             if holdings_intraday_alerts:
                 print(
@@ -1715,7 +1901,7 @@ def main() -> int:
 
         news_event_alerts = []
         try:
-            import news_event_alert as _ne
+            from radar.alerts import news_event_alert as _ne
             news_event_alerts = _ne.check_news_events() or []
             if news_event_alerts:
                 print(
@@ -1734,7 +1920,7 @@ def main() -> int:
 
                 # C: 對 HIGH urgency 跑 Gemini 影響分析 (加進 message)
                 try:
-                    import news_impact_analyzer as _nia
+                    from radar.analysis import news_impact_analyzer as _nia
                     impact_block = _nia.analyze_news_impact(news_event_alerts)
                 except Exception as _ie:
                     print(f"[news event] impact analyzer failed (skip): {_ie}", flush=True)
@@ -1744,7 +1930,17 @@ def main() -> int:
                 _need_ai = any(a.get("urgency") in ("HIGH", "MED") for a in news_event_alerts)
                 ne_msg = notifier.fmt_news_event_alerts(news_event_alerts,
                                                           impact_analysis=impact_block)
+                # 缺 AI 分析時最多等 NEWS_AI_WAIT_MAX_MIN 分; Gemini 根本沒設定就不等。
+                _ai_gave_up = False
                 if _need_ai and not impact_block:
+                    _waited = (float(_ne.NEWS_AI_WAIT_MAX_MIN) if not ai_analyzer.gemini_available()
+                               else _ne.note_ai_wait(news_event_alerts))
+                    if _waited >= _ne.NEWS_AI_WAIT_MAX_MIN:
+                        _ai_gave_up = True
+                        print(f"[news event] AI 分析已等 {_waited:.0f} 分仍失敗 → 不帶 AI 直接送", flush=True)
+                        if ne_msg:
+                            ne_msg += "\n\n<i>⚠️ AI 影響分析暫時無法取得 (Gemini 額度 / 服務異常), 先送原始新聞</i>"
+                if _need_ai and not impact_block and not _ai_gave_up:
                     print("[news event] 急報/注意 缺 AI 分析 → 跳過送出 + 回滾 claim, 等下個 tick 補 AI 版",
                           flush=True)
                     if _ne_claimed:
@@ -1769,6 +1965,8 @@ def main() -> int:
                     )
                     print(f"[news event] TG result: ok={ok_n} info={info_n} urgent={has_urgent}",
                           flush=True)
+                    if ok_n:
+                        _ne.clear_ai_wait(news_event_alerts)
                     # 已在送出前 claim; 送失敗才回滾 (讓下次能重試), 成功則維持已標記.
                     if not ok_n and _ne_claimed:
                         try:
@@ -1789,12 +1987,12 @@ def main() -> int:
 
         # === P2-A: 量爆突破 (Tier 1 — 立即響鈴) ===
         try:
-            import volume_breakout_alert as _vb
+            from radar.alerts import volume_breakout_alert as _vb
             vb_alerts = _vb.check_volume_breakout() or []
             # 跨類去重: 濾掉本 tick 已被強勢股/大盤大漲等看多推播推過的同一檔 (共用去重命名空間)
             if vb_alerts:
                 try:
-                    import alert_priority as _apx
+                    from radar.core import alert_priority as _apx
                     _n0 = len(vb_alerts)
                     vb_alerts = _apx.filter_dedup_picks(vb_alerts, "intraday_strong_stock", "up")
                     if _n0 != len(vb_alerts):
@@ -1817,7 +2015,7 @@ def main() -> int:
                     if ok_vb:
                         print(f"[vol_breakout] sent ok", flush=True)
                         try:
-                            import alert_priority as _apx2
+                            from radar.core import alert_priority as _apx2
                             _apx2.mark_picks_pushed(vb_alerts, "intraday_strong_stock", "up")
                         except Exception:
                             pass
@@ -1842,14 +2040,14 @@ def main() -> int:
 
         # === P2-B: chip anomaly (Tier 2) ===
         try:
-            import chip_anomaly_alert as _ca
+            from radar.alerts import chip_anomaly_alert as _ca
             ca_alerts = _ca.check_chip_anomaly() or []
             # 跨類去重: 濾掉本 tick 已被強勢股/量爆突破等看多推播推過的同一檔
             if ca_alerts:
                 try:
-                    import alert_priority as _apc
+                    from radar.core import alert_priority as _apc
                     _nc0 = len(ca_alerts)
-                    ca_alerts = _apc.filter_dedup_picks(ca_alerts, "intraday_strong_stock", "up")
+                    ca_alerts = _filter_by_dir(ca_alerts, "intraday_strong_stock", _chip_dir)
                     if _nc0 != len(ca_alerts):
                         print(f"[chip_anomaly] 跨類去重濾掉 {_nc0 - len(ca_alerts)} 檔 (已被看多推播推過)",
                               flush=True)
@@ -1868,8 +2066,8 @@ def main() -> int:
                     if ok_ca:
                         print("[chip_anomaly] sent ok", flush=True)
                         try:
-                            import alert_priority as _apc2
-                            _apc2.mark_picks_pushed(ca_alerts, "intraday_strong_stock", "up")
+                            from radar.core import alert_priority as _apc2
+                            _mark_by_dir(ca_alerts, "intraday_strong_stock", _chip_dir)
                         except Exception:
                             pass
                     else:

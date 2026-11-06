@@ -60,6 +60,7 @@ def scan_file(path: str) -> list:
 
 def main() -> int:
     files = (glob.glob(os.path.join(ROOT, "*.py")) +
+             glob.glob(os.path.join(ROOT, "radar", "**", "*.py"), recursive=True) +
              glob.glob(os.path.join(ROOT, "scripts", "*.py")))
     total = 0
     for f in sorted(files):

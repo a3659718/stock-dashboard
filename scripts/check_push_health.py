@@ -45,19 +45,19 @@ def main():
     chk("GEMINI_API_KEY (optional)", lambda: bool(os.environ.get("GEMINI_API_KEY")))
 
     print("\n=== Phase 2: 核心模組可 import ===")
-    chk("import notifier", lambda: __import__("notifier"))
-    chk("import data_sources", lambda: __import__("data_sources"))
-    chk("import upside_screener", lambda: __import__("upside_screener"))
-    chk("import us_upside_screener", lambda: __import__("us_upside_screener"))
-    chk("import strong_stock_alert", lambda: __import__("strong_stock_alert"))
+    chk("import notifier", lambda: __import__("radar.notify.notifier"))
+    chk("import data_sources", lambda: __import__("radar.data.data_sources"))
+    chk("import upside_screener", lambda: __import__("radar.screeners.upside_screener"))
+    chk("import us_upside_screener", lambda: __import__("radar.screeners.us_upside_screener"))
+    chk("import strong_stock_alert", lambda: __import__("radar.alerts.strong_stock_alert"))
     chk("import scripts.morning_brief", lambda: __import__("scripts.morning_brief"))
 
     print("\n=== Phase 3: 推播函式可呼叫 ===")
-    import notifier
+    from radar.notify import notifier
     chk("notifier.is_configured()", notifier.is_configured)
 
     print("\n=== Phase 4: 抓資料測試 (yfinance / FinMind) ===")
-    import data_sources as ds
+    from radar.data import data_sources as ds
     chk("yfinance ^TWII 5d", lambda: not ds.fetch_yf_history("^TWII", period="5d").empty)
     chk("yfinance ^SOX 5d", lambda: not ds.fetch_yf_history("^SOX", period="5d").empty)
     # Bug fix (2026-09): 原本是 `>= 0`, 對任何 list 都成立 —— fetch_yahoo_news 自己有

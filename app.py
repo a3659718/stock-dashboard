@@ -14,21 +14,21 @@ from typing import List, Optional
 import pandas as pd
 import streamlit as st
 
-import ai_analyzer
-import app_styles
-import backtest
-import data_sources as ds
-import dashboard_actions
-import earnings_calendar
-import market_open_picks
-import news_picks
-import notifier
-import sector_pulse
-import stock_analyzer
-import stock_catalyst
-import tracker
-import tw_screener
-import us_screener
+from radar.analysis import ai_analyzer
+from radar.ui import app_styles
+from radar.analysis import backtest
+from radar.data import data_sources as ds
+from radar.ui import dashboard_actions
+from radar.data import earnings_calendar
+from radar.screeners import market_open_picks
+from radar.screeners import news_picks
+from radar.notify import notifier
+from radar.analysis import sector_pulse
+from radar.analysis import stock_analyzer
+from radar.analysis import stock_catalyst
+from radar.core import tracker
+from radar.screeners import tw_screener
+from radar.screeners import us_screener
 
 
 # ---------------------------------------------------------------------------
@@ -237,7 +237,7 @@ with st.sidebar:
                     pass
                 # 也清 yfinance in-mem cache (G9)
                 try:
-                    import data_sources as _ds_clear
+                    from radar.data import data_sources as _ds_clear
                     if hasattr(_ds_clear, "_yf_cache_clear"):
                         _ds_clear._yf_cache_clear()
                 except Exception:
@@ -256,7 +256,7 @@ with st.sidebar:
                       help="會打 FinMind / yfinance / Gemini 各一次 (約 3-5 秒)"):
             with st.spinner("探測中..."):
                 try:
-                    import heartbeat as _hb
+                    from radar.core import heartbeat as _hb
                     yf_ok, yf_info = _hb._probe_yfinance()
                     fm_ok, fm_info = _hb._probe_finmind()
                     gm_ok, gm_info = _hb._probe_gemini()
@@ -300,7 +300,7 @@ with st.sidebar:
     # 部位規模設定 — 用於 picks card 給張數建議
     with st.expander("💰 部位規模設定 (用於目標價推薦)"):
         try:
-            import position_sizer as _ps_mod
+            from radar.analysis import position_sizer as _ps_mod
             _ps_cfg = _ps_mod.load_user_config()
         except Exception:
             _ps_cfg = {"account_capital": 1_000_000, "risk_per_trade_pct": 1.0, "max_position_pct": 20.0}
@@ -317,7 +317,7 @@ with st.sidebar:
                             key="ps_max")
         if st.button("儲存部位規模設定", use_container_width=True, key="ps_save"):
             try:
-                import position_sizer as _ps_mod
+                from radar.analysis import position_sizer as _ps_mod
                 ok = _ps_mod.save_user_config(ps_cap, ps_risk, ps_max)
                 if ok:
                     st.toast("已儲存", icon="✅")
@@ -411,7 +411,7 @@ def _save_dedup_state(state: dict) -> None:
     """Atomic 寫入 dedup state — 用 watchlist_store._atomic_write_text 保證
     並發 cron / Streamlit 不會看到半寫狀態."""
     try:
-        import watchlist_store
+        from radar.core import watchlist_store
         watchlist_store._atomic_write_text(
             _ALERT_STATE_FILE,
             _json.dumps(state, ensure_ascii=False, indent=2),
@@ -484,7 +484,7 @@ watchlist = parse_watchlist(watchlist_raw)
 # ---------------------------------------------------------------------------
 # 資料源連線狀態提示 (#5 空狀態改善): 缺金鑰時明確告知, 讓使用者知道台股/AI 為何可能空白
 try:
-    import data_sources as _dss
+    from radar.data import data_sources as _dss
     _miss = []
     if not _dss.get_finmind_token():
         _miss.append("FinMind (台股資料)")
@@ -515,7 +515,7 @@ with tab_overview:
     # 大局 4 個 metric
     col1, col2, col3, col4 = st.columns(4)
     try:
-        import data_sources as _ds_ov
+        from radar.data import data_sources as _ds_ov
         sp = _ds_ov.fetch_yf_history("^GSPC", period="2d", interval="1d")
         sox = _ds_ov.fetch_yf_history("^SOX", period="2d", interval="1d")
         twii = _ds_ov.fetch_yf_history("^TWII", period="2d", interval="1d")
@@ -542,8 +542,8 @@ with tab_overview:
     with cols_ov[0]:
         st.markdown("### 🟢 今日該關注 (快速評估)")
         try:
-            import entry_evaluator as _ee_ov
-            import watchlist_store as _ws_ov
+            from radar.analysis import entry_evaluator as _ee_ov
+            from radar.core import watchlist_store as _ws_ov
             # Bug fix (2026-09): load_watchlist() 回的是 dict 陣列, 直接丟給 quick_evaluate
             # 會在 detect_market 的 (symbol or "").strip() 上 AttributeError, 被它自己的
             # except 吞掉並回 entry_label="—" → shown_any 恆為 False → 這一區永遠顯示
@@ -582,7 +582,7 @@ with tab_overview:
         st.markdown("### 🔴 該避開 / 持倉警報")
         # 持倉風險 (從 holdings_intraday_alert)
         try:
-            import holdings_intraday_alert as _hi_ov
+            from radar.alerts import holdings_intraday_alert as _hi_ov
             risks = _hi_ov.check_holdings_intraday_risk() or []
             if risks:
                 for r in risks[:5]:
@@ -633,7 +633,7 @@ with _tab_stock_outer:
                      f"deep_{sid_input.strip()}", f"ensemble_{sid_input.strip()}"):
             st.session_state.pop(_key, None)
         try:
-            import entry_evaluator as _ee_top
+            from radar.analysis import entry_evaluator as _ee_top
             with st.spinner(f"入場評估 {sid_input.strip()} 中…"):
                 st.session_state["entry_result"] = _ee_top.evaluate_entry(
                     sid_input.strip(), market="auto", with_ai=include_ai)
@@ -710,14 +710,14 @@ with tab_actionable:
         st.session_state.pop("actionable_tg_result", None)
         with st.spinner("整合所有訊號中… (這需要呼叫 Gemini + yfinance, 30-60 秒)"):
             try:
-                import actionable_picks as _ap
+                from radar.screeners import actionable_picks as _ap
                 _picks = _ap.compute_actionable_picks(
                     top_n=10, mainstream_only=mainstream_only,
                 )
                 # AI ensemble (可選)
                 if ai_ensemble and _picks:
                     try:
-                        import ai_confidence_scorer as _acs
+                        from radar.analysis import ai_confidence_scorer as _acs
                         _picks = _acs.rescore_with_ai(_picks, market="TW")
                     except Exception as _ae:
                         st.warning(f"⚠️ AI ensemble 失敗 (用原始排序): {_ae}")
@@ -736,7 +736,7 @@ with tab_actionable:
     # 先處理發送，再畫結果卡片；錯誤不藏在十張卡片底下。
     if send_actionable_tg:
         try:
-            import actionable_picks as _ap
+            from radar.screeners import actionable_picks as _ap
             with st.spinner("正在發送台股 Top 10 到 Telegram…"):
                 _send_tg(_ap.fmt_actionable_picks_tg(raw_picks or []), "台股 Top 10",
                          status_key="actionable_tg_result")
@@ -870,7 +870,7 @@ with tab_actionable:
                         pos = p.get("position") or {}
                         if pos:
                             try:
-                                import position_sizer
+                                from radar.analysis import position_sizer
                                 advice = position_sizer.fmt_position_advice(pos, market="TW")
                                 if advice:
                                     if pos.get("shares", 0) > 0:
@@ -910,29 +910,36 @@ with tab_wl:
         "基準價可選「自動抓當前股價」或「自訂入場價」。"
     )
 
-    import watchlist_store
-    import watchlist_alerts
+    from radar.core import watchlist_store
+    from radar.alerts import watchlist_alerts
 
     # 條件觸發 expander (整合 watchlist_triggers)
     with st.expander("⚡ 條件觸發 (穿價/MA/KD/MACD)", expanded=False):
         try:
-            import watchlist_triggers as _wt
+            from radar.alerts import watchlist_triggers as _wt
             st.caption("可設條件: 跌破 1000 / 站上 20MA / KD 黃金交叉")
             ctr = st.columns([2, 2, 2, 1])
             wt_sid = ctr[0].text_input("代號", key="wt_sid_in")
-            wt_type = ctr[1].selectbox("條件", [
-                "price_below", "price_above",
-                "ma_cross_up", "ma_cross_down",
-                "kd_golden_cross", "kd_death_cross",
-                "macd_golden_cross", "macd_death_cross",
-            ], key="wt_type_in")
+            # Bug fix: 原本選項 "ma_cross_up"/"ma_cross_down" 不在 TRIGGER_TYPES (只有 _5/_20/_60)
+            # → add_trigger 回 None, 畫面卻顯示「已加」, 實際上從來沒存。改成直接用 TRIGGER_TYPES。
+            wt_type = ctr[1].selectbox("條件", list(_wt.TRIGGER_TYPES), key="wt_type_in",
+                                       format_func=lambda k: _wt.TRIGGER_TYPES.get(k, k))
             wt_val = ctr[2].number_input("值", min_value=0.0, value=0.0, key="wt_val_in")
             if ctr[3].button("加", key="wt_add_btn"):
-                if wt_sid.strip():
-                    _wt.add_trigger(wt_sid.strip().upper(), wt_type,
-                                     value=wt_val if wt_val > 0 else None)
-                    st.success(f"已加: {wt_sid} {wt_type}")
-                    st.rerun()
+                _sid = wt_sid.strip().upper()
+                if _sid:
+                    if wt_type in ("price_above", "price_below") and wt_val <= 0:
+                        st.error("價位條件要填「值」(> 0)")
+                    else:
+                        # Bug fix: 原本沒傳 market → 一律 TW, 美股代號被當 NVDA.TW 查, 永遠不觸發
+                        _tid = _wt.add_trigger(_sid, wt_type,
+                                               value=wt_val if wt_val > 0 else None,
+                                               market="TW" if _sid.isdigit() else "US")
+                        if _tid:
+                            st.toast(f"已加: {_sid} {_wt.TRIGGER_TYPES.get(wt_type, wt_type)}")
+                            st.rerun()
+                        else:
+                            st.error(f"新增失敗: {_sid} {wt_type} (代號或條件不正確)")
             triggers = _wt.list_triggers() or []
             if triggers:
                 for t in triggers:
@@ -993,7 +1000,7 @@ with tab_wl:
                 lookup_ok = True  # MED fix: 用 flag 代替 st.stop()
                 if looks_like_chinese_name:
                     try:
-                        import data_sources as ds
+                        from radar.data import data_sources as ds
                         info = ds.get_taiwan_stock_info()
                         # LOW fix: 防 KeyError, 確認欄位存在
                         if (info is not None and not info.empty
@@ -1359,7 +1366,7 @@ index_alerts.check_index_alerts() 從來沒有被任何自動排程呼叫過 —
     if st.button("🔍 立即手動檢查警報", use_container_width=True, key="manual_check_alerts"):
         with st.spinner("檢查中..."):
             try:
-                import index_alerts
+                from radar.alerts import index_alerts
                 wl_alerts = watchlist_alerts.check_watchlist_alerts()
                 idx_alerts = index_alerts.check_index_alerts()
                 cry_alerts = []  # 已停用加密
@@ -1379,7 +1386,7 @@ index_alerts.check_index_alerts() 從來沒有被任何自動排程呼叫過 —
             if wl:
                 st.markdown("自選股觸發:")
                 for a in wl:
-                    st.text(f"  {a['stock_id']} {a['name']}: {a['current']} ({a['primary_pct']:+.2f}%) 觸發 {int(a['threshold'])}%")
+                    st.text(f"  {a['stock_id']} {a['name']}: {a['current']} ({a['primary_pct']:+.2f}%) 觸發 {float(a['threshold']):g}%")
             if idx:
                 st.markdown("大盤觸發:")
                 for a in idx:
@@ -1396,6 +1403,9 @@ index_alerts.check_index_alerts() 從來沒有被任何自動排程呼叫過 —
                         watchlist_alerts.mark_alerts_sent(wl)
                     except Exception as _me:
                         st.warning(f"警報已送出, 但登記去重失敗 (下次檢查可能重複顯示): {_me}")
+                if _ok_alert:
+                    # 送出後清掉, 否則按鈕一直在, 每按一次就重送同一批警報
+                    st.session_state.pop("last_manual_alerts", None)
         else:
             st.info("目前無新觸發警報")
 
@@ -1415,7 +1425,7 @@ with tab_hold:
     # 🆕 組合風險檢視 (sector 集中度 / 單檔權重)
     with st.expander("⚠️ 組合風險檢視 (sector 集中度 / 單檔權重)", expanded=False):
         try:
-            import portfolio_risk
+            from radar.analysis import portfolio_risk
             risk = portfolio_risk.analyze_portfolio_risk()
             if risk.get("holdings_n", 0) > 0:
                 # 警告區塊 (大字醒目)
@@ -1465,9 +1475,9 @@ with tab_hold:
         except Exception as _re:
             st.warning(f"⚠️ 組合風險分析失敗: {_re}")
 
-    import holdings_store
-    import holdings_analyzer
-    import holdings_tracker
+    from radar.core import holdings_store
+    from radar.analysis import holdings_analyzer
+    from radar.alerts import holdings_tracker
 
     current_h = holdings_store.load_holdings()
 
@@ -1687,7 +1697,7 @@ with tab_tw:
         if auto_send_on_alert and notifier.is_configured():
             _is_tw_closed = False
             try:
-                import holiday_check
+                from radar.core import holiday_check
                 _is_tw_closed = holiday_check.is_market_closed_today("TW")
             except Exception:
                 pass
@@ -1770,7 +1780,7 @@ with tab_tw:
         latest_str = pd.Timestamp(latest).strftime("%Y-%m-%d") if latest is not None else "N/A"
         if not res["ready"]:
             st.warning(
-                f"⚠️ 今日({dt.date.today().strftime('%Y-%m-%d')})盤後資料尚未更新，"
+                f"⚠️ 今日({(dt.datetime.utcnow() + dt.timedelta(hours=8)).strftime('%Y-%m-%d')})盤後資料尚未更新，"
                 f"目前以最新一個交易日 {latest_str} 的資料計算。"
                 "建議台股 14:30 之後再查詢。"
             )
@@ -1870,7 +1880,9 @@ with tab_tw:
 
             # Telegram 自動推播
             if auto_send_on_hit and notifier.is_configured() and not view.empty:
-                fingerprint = (latest_str, tuple(view["stock_id"].head(40)))
+                # Bug fix: 原本用篩選後的 view 當指紋 → 切換「至少 N 項」下拉選單就換指紋又推一次。
+                # 改用未篩選的掃描結果。
+                fingerprint = (latest_str, tuple(combined["stock_id"].head(80)))
                 if st.session_state.get("_tw_last_sent") != fingerprint:
                     msg = notifier.fmt_tw_combined(view, latest_str, market_label="自動推播")
                     ok, info = notifier.send_message(msg)
@@ -1914,7 +1926,7 @@ with tab_pulse:
             help="送出最近一次漲停前兆掃描結果，不需重新掃描。",
         )
         if send_lup_top:
-            import limit_up_precursor as _lup_top
+            from radar.screeners import limit_up_precursor as _lup_top
             _send_tg(_lup_top.fmt_limit_up_precursor_msg(
                 st.session_state.get("limit_up_precursor") or []), "漲停前兆")
     with cF:
@@ -1944,9 +1956,9 @@ with tab_pulse:
     if smart_btn:
         try:
             with st.spinner("掃描大戶偷進場標的 (跑籌碼 + 價量, 約 30s)..."):
-                import smart_money_stealth as _sms
+                from radar.analysis import smart_money_stealth as _sms
                 st.session_state["smart_stealth"] = _sms.scan_smart_money_stealth(top_n=5)
-                import hot_theme_v2 as _htv2
+                from radar.analysis import hot_theme_v2 as _htv2
                 st.session_state["hot_patterns"] = _htv2.find_all_patterns(top_themes=3)
         except Exception as e:
             st.error(f"智慧潛伏股分析失敗: {e}")
@@ -1954,7 +1966,7 @@ with tab_pulse:
     if limit_up_btn:
         try:
             with st.spinner("掃描漲停前兆 / 潛伏吸籌標的 (全題材池 ~110 檔, 約 60-90s)..."):
-                import limit_up_precursor as _lup
+                from radar.screeners import limit_up_precursor as _lup
                 st.session_state["limit_up_precursor"] = _lup.scan_limit_up_precursor(top_n=8)
         except Exception as e:
             st.error(f"漲停前兆分析失敗: {e}")
@@ -2010,6 +2022,7 @@ with tab_pulse:
                                  key="us_open_btn", type="primary")
 
     if tw_open_btn:
+        st.session_state.pop("tw_open_data", None)  # 失敗時不要繼續顯示 / 推送上一輪的舊結果
         try:
             with st.spinner("計算台股開盤資金流向…"):
                 data = market_open_picks.get_tw_open_picks()
@@ -2022,6 +2035,7 @@ with tab_pulse:
             st.error(f"台股分析失敗：{e}")
 
     if us_open_btn:
+        st.session_state.pop("us_open_data", None)
         try:
             with st.spinner("計算美股開盤資金流向…"):
                 data = market_open_picks.get_us_open_picks()
@@ -2033,6 +2047,8 @@ with tab_pulse:
 
     # 顯示台股開盤結果
     tw_open = st.session_state.get("tw_open_data")
+    if tw_open and tw_open.get("error"):
+        st.error(f"台股開盤分析失敗：{tw_open.get('error')}")
     if tw_open and not tw_open.get("error"):
         # 大盤預測區塊
         pred = tw_open.get("prediction") or {}
@@ -2200,7 +2216,7 @@ with tab_pulse:
             )
             if send_smart_tg:
                 try:
-                    import smart_money_stealth as _sms_fmt
+                    from radar.analysis import smart_money_stealth as _sms_fmt
                     _send_tg(_sms_fmt.fmt_smart_stealth_msg(smart_picks), "大戶偷進場")
                 except Exception as _e:
                     st.error(f"推播失敗: {type(_e).__name__}: {_e}")
@@ -2255,7 +2271,7 @@ with tab_pulse:
             )
             if send_lup_tg:
                 try:
-                    import limit_up_precursor as _lup_fmt
+                    from radar.screeners import limit_up_precursor as _lup_fmt
                     _send_tg(_lup_fmt.fmt_limit_up_precursor_msg(lup_picks), "漲停前兆")
                 except Exception as _e:
                     st.error(f"推播失敗: {type(_e).__name__}: {_e}")
@@ -2402,7 +2418,7 @@ with tab_pulse:
                 try:
                     _is_tw_closed = False
                     try:
-                        import holiday_check
+                        from radar.core import holiday_check
                         _is_tw_closed = holiday_check.is_market_closed_today("TW")
                     except Exception:
                         pass
@@ -2454,7 +2470,7 @@ with tab_pulse:
     cCF1, cCF2, cCF3 = st.columns([3, 1, 1])
     with cCF1:
         try:
-            import concept_finder
+            from radar.analysis import concept_finder
             preset = concept_finder.PRESET_THEMES
         except Exception:
             preset = ["矽光子", "AI 伺服器", "低軌衛星"]
@@ -2481,7 +2497,7 @@ with tab_pulse:
         else:
             with st.spinner(f"探勘「{kw}」概念股中... (掃 200 檔 × {cf_days} 天新聞)"):
                 try:
-                    import concept_finder
+                    from radar.analysis import concept_finder
                     results = concept_finder.find_hidden_concept_stocks(
                         kw, days=int(cf_days), max_scan=200,
                     )
@@ -2552,7 +2568,7 @@ with tab_growth:
                       help="若「沒反應」連續好幾次, 點這個強制清 Streamlit cache + yfinance cache"):
             try:
                 st.cache_data.clear()
-                import data_sources as _ds
+                from radar.data import data_sources as _ds
                 if hasattr(_ds, "_yf_cache_clear"):
                     _ds._yf_cache_clear()
                 # 也清 session_state 的 growth 結果
@@ -2657,7 +2673,7 @@ with tab_stock:
                     _progress.progress(40, text=f"🔬 步驟 2/4 {sid} - 深度分析 (預計 10s)")
                     st.write("🔬 步驟 2/4: 跑深度分析 (PE 同業比 / 月營收 / K 形態 / 法說)...")
                     try:
-                        import stock_deep_analyzer
+                        from radar.analysis import stock_deep_analyzer
                         deep = stock_deep_analyzer.get_deep_analysis(
                             sid, market="US" if full.get("is_us") else "TW",
                         )
@@ -2699,7 +2715,7 @@ with tab_stock:
                     _progress.progress(90, text=f"🗳️ 步驟 4/4 {sid} - 6 策略投票...")
                     st.write("🗳️ 步驟 4/4: 跑 6 策略 ensemble vote...")
                     try:
-                        import ensemble_voter as _ev_deep
+                        from radar.analysis import ensemble_voter as _ev_deep
                         vote = _ev_deep.vote_for_stock(sid)
                         st.session_state[f"ensemble_{sid}"] = vote
                         st.write(f"✅ Ensemble: {vote['verdict_emoji']} {vote['verdict']} "
@@ -2776,7 +2792,7 @@ with tab_stock:
                       use_container_width=False):
             with st.spinner("深度分析中..."):
                 try:
-                    import stock_deep_analyzer
+                    from radar.analysis import stock_deep_analyzer
                     deep = stock_deep_analyzer.get_deep_analysis(
                         sid, market="US" if full.get("is_us") else "TW",
                     )
@@ -2973,7 +2989,7 @@ with tab_stock:
         if news_list:
             # 補上 sentiment
             try:
-                import news_sources
+                from radar.data import news_sources
                 news_list = news_sources.enrich_news_with_sentiment(
                     news_list, lang_default="zh" if market_label == "TW" else "en",
                 )
@@ -2991,6 +3007,11 @@ with tab_stock:
                     link = n.get("link", "")
                     date = n.get("date", "")
                     src = n.get("source", "")
+                    # 第三方新聞標題 / 來源要跳脫, 否則含 < 或 & 的標題會吃掉後面版面 (unsafe_allow_html)
+                    import html as _html_esc
+                    title_orig = _html_esc.escape(str(title_orig or ""))
+                    title_zh = _html_esc.escape(str(title_zh or ""))
+                    src = _html_esc.escape(str(src or ""))
                     sent = n.get("sentiment", 0)
                     if sent > 0:
                         tag = "📈"
@@ -3129,7 +3150,7 @@ with tab_stock:
         )
 
     if uploaded is not None and not image_too_big:
-        st.image(uploaded, caption="上傳的圖片", use_column_width=True)
+        st.image(uploaded, caption="上傳的圖片", use_container_width=True)  # use_column_width 已棄用
 
     if analyze_image_btn and uploaded is not None and not image_too_big:
         try:
@@ -3215,7 +3236,7 @@ with tab_us:
                 else:
                     st.success(f"✅ 候選池抓到 {len(_tp)} 檔, 計算入場分中…")
                 try:
-                    import us_actionable as _ua
+                    from radar.screeners import us_actionable as _ua
                     st.session_state["us_actionable"] = _ua.compute_us_actionable_picks(
                         top_n=10, min_score=65, us_pool=_us_pool,
                     )
@@ -3420,7 +3441,7 @@ with tab_us:
                  help="約 60-90 秒, 掃約 140 檔"):
         try:
             with st.spinner("掃描美股潛在爆發股中 (約 60-90 秒)..."):
-                import us_upside_screener as _uus
+                from radar.screeners import us_upside_screener as _uus
                 st.session_state["us_upside"] = _uus.run_us_upside_screen(
                     top_n_per_category=5, use_cache=True, with_themes=True,
                     with_entry_label=False,
@@ -3488,14 +3509,14 @@ with tab_mood:
             st.session_state["sector_rot_cache_mkt"] = rot_mkt
             with st.spinner("計算 sector rotation..."):
                 try:
-                    import sector_rotation as _sr
+                    from radar.analysis import sector_rotation as _sr
                     st.session_state["sector_rot_cache"] = _sr.compute_sector_rotation(rot_mkt)
                 except Exception as _re:
                     st.error(f"輪動矩陣失敗: {_re}")
                     st.session_state["sector_rot_cache"] = None
         rot = st.session_state.get("sector_rot_cache")
         if rot and rot.get("quadrants"):
-            import sector_rotation as _sr
+            from radar.analysis import sector_rotation as _sr
             quads = rot["quadrants"]
             cols = st.columns(4)
             for i, (qkey, items) in enumerate(quads.items()):
@@ -3602,7 +3623,7 @@ with tab_mood:
     if refresh_news_btn:
         st.session_state.pop("world_news", None)
         try:
-            import news_sources
+            from radar.data import news_sources
             with st.spinner("抓取全球新聞..."):
                 world_news = news_sources.fetch_world_news()
                 trump_posts = news_sources.fetch_trump_truth_social(max_items=5)
@@ -3677,6 +3698,12 @@ with tab_mood:
             # 標題顯示策略: 中文 (主) + 英文 (副), 或單獨原文
             has_translation = title_zh and title_zh != title_orig
             link = n.get("link", "")
+            # 第三方 RSS / Gemini 翻譯文字直接塞進 unsafe_allow_html → 要跳脫; href 含 ' 會斷掉屬性
+            import html as _html_esc
+            src = _html_esc.escape(str(src or ""))
+            title_orig = _html_esc.escape(str(title_orig or ""))
+            title_zh = _html_esc.escape(str(title_zh or ""))
+            link = _html_esc.escape(str(link or ""), quote=True)
             summary = (n.get("summary", "") or "").strip()
             if summary and len(summary) > 200:
                 summary = summary[:200] + "…"
@@ -3704,6 +3731,43 @@ with tab_mood:
             card_html += "</div></div>"
             st.markdown(card_html, unsafe_allow_html=True)
 
+    # === 🏛️ 政策情境族群 (2027 民主黨國會 / 分裂政府) ===
+    with st.expander("🏛️ 政策情境族群：2027 民主黨國會 × 川普白宮", expanded=False):
+        from radar.analysis import policy_regime as _prg
+        st.caption("2026 期中選舉初步結果民主黨拿下參眾兩院，2027-01 起為分裂政府。下表是"
+                   "「受惠 / 受壓 / 觀察」族群假設，並用近 20 日相對大盤報酬檢查市場是否已反映。"
+                   "情境假設，非投資建議。")
+        if st.button("🔄 計算族群相對強弱", key="policy_regime_run"):
+            with st.spinner("抓取族群籃子報酬 (約 60 檔)..."):
+                try:
+                    st.session_state["policy_regime_rows"] = _prg.scan_policy_themes()
+                except Exception as _pe:
+                    st.error(f"政策族群計算失敗: {_pe}")
+                    st.session_state["policy_regime_rows"] = None
+        _prows = st.session_state.get("policy_regime_rows")
+        if _prows:
+            _tbl = []
+            for _r in _prows:
+                _us, _tw = _r.get("us") or {}, _r.get("tw") or {}
+                _tbl.append({
+                    "方向": _prg.DIRECTION_LABEL[_r["direction"]],
+                    "族群": _r["name"],
+                    "美股 20日 vs SPY": _prg._pct(_us.get("rel20")),
+                    "台股 20日 vs 0050": _prg._pct(_tw.get("rel20")),
+                    "價格驗證": _r["verdict"],
+                    "美股代表": " ".join(_r["us_symbols"]),
+                    "台股代表": " ".join(s.split(".")[0] for s in _r["tw_symbols"]),
+                })
+            st.dataframe(pd.DataFrame(_tbl), use_container_width=True, hide_index=True)
+            for _r in _prows:
+                st.markdown(f"**{_prg.DIRECTION_LABEL[_r['direction']]} {_r['name']}** — {_r['thesis']}  \n"
+                            f"催化劑：{'、'.join(_r['catalysts'])}")
+            if st.button("📤 送到 Telegram", key="policy_regime_tg"):
+                _send_tg(_prg.fmt_policy_regime_tg(_prows), "政策情境族群")
+        else:
+            for _t in _prg.get_themes():
+                st.markdown(f"**{_prg.DIRECTION_LABEL[_t['direction']]} {_t['name']}** — {_t['thesis']}")
+
 
 # =============================================================================
 # Tab — 回測勝率
@@ -3718,8 +3782,8 @@ with tab_bt:
     #   2. 讀 bt_res["trades"] — 回傳的 key 是 "raw" / "summary", 沒有 "trades"。
     #   3. 讀欄位 "return%" — 實際欄位是 r5d / r10d / r20d。
     #   另外 backtest.py 內部全部走 tw_screener, 只支援台股, 原本的「市場 TW/US」下拉是假的。
-    import backtest as _bt_mod
-    import tw_screener as _tw_mod
+    from radar.analysis import backtest as _bt_mod
+    from radar.screeners import tw_screener as _tw_mod
 
     st.caption("⚠️ 回測僅支援台股 (條件篩選器是 tw_screener)。")
     cBT1, cBT2 = st.columns([1, 1])
@@ -3801,7 +3865,7 @@ with tab_bt:
 with tab_track:
     st.subheader("📈 推薦追蹤")
     st.caption("追蹤過往推送過的標的後續表現. 自動跑每筆「推送日 vs 現價」的報酬計算.")
-    import tracker
+    from radar.core import tracker
     cT1, cT2, cT3 = st.columns([1, 1, 1])
     with cT1:
         track_window = st.number_input("追蹤天數", 7, 90, 30, step=7, key="track_window")
@@ -3823,9 +3887,12 @@ with tab_track:
         )
 
     upload = st.file_uploader("📤 還原之前下載的歷史 CSV (可選)", type=["csv"], key="track_upload")
-    if upload is not None:
+    # Bug fix: uploader 保留檔案期間, 每次 rerun 都會重新匯入 (整檔覆寫 LOCAL_CSV) →
+    # 同一次 run 稍早 save_snapshot 新增的紀錄被舊檔蓋掉。同一個檔只匯入一次。
+    if upload is not None and st.session_state.get("_track_imported_id") != getattr(upload, "file_id", upload.name):
         res = tracker.import_history_from_csv(upload.getvalue())
         if res.get("ok"):
+            st.session_state["_track_imported_id"] = getattr(upload, "file_id", upload.name)
             st.success(f"已匯入 {res['rows']} 筆 (encoding: {res.get('encoding_detected', '?')})")
         else:
             st.error(f"匯入失敗：{res.get('msg')}")
@@ -3972,7 +4039,7 @@ with tab_entry:
 # ===== 🩺 系統健康 =====
 with tab_health:
     st.subheader("🩺 系統健康度")
-    import system_health
+    from radar.core import system_health
     try:
         last_ping_ts = st.session_state.get("_health_last_ping_ts")
         import time as _time
@@ -4013,7 +4080,7 @@ with tab_health:
     st.divider()
     st.subheader("📐 台指期 / 微台訊號")
     try:
-        import tx_futures_alert as _tx
+        from radar.alerts import tx_futures_alert as _tx
         if st.button("🔄 掃描台指期訊號", key="btn_tx_futures"):
             with st.spinner("分析升貼水/法人/散戶..."):
                 tx_alerts = _tx.check_tx_futures_alerts()
@@ -4041,8 +4108,8 @@ with tab_health:
     st.divider()
     st.subheader("🎯 訊號績效排行 (最近 30 日)")
     try:
-        import signal_tracker as _st_perf
-        s = _st_perf.accuracy_summary(None, lookback_days=30)
+        from radar.core import signal_tracker as _st_perf
+        s = _st_perf.accuracy_summary(None, lookback_days=30, dedup_by_stock=True)  # 同股同日跨訊號不重複計
         n = s.get("n") or 0
         pct = s.get("pct")
         if n == 0:

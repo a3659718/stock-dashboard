@@ -25,7 +25,7 @@ ws.load_monitor_state = lambda: json.loads(json.dumps(_STATE))
 def _save(s):
     _STATE.clear(); _STATE.update(json.loads(json.dumps(s)))
 ws.save_monitor_state = _save
-sys.modules["watchlist_store"] = ws
+sys.modules["radar.core.watchlist_store"] = ws
 
 # ---------- stub data_sources (時間感知) ----------
 BARS = {
@@ -49,10 +49,10 @@ def fetch_yf_history(symbol, period="6mo", interval="1d", max_retries=3):
                           "High": [r[1] * 1.02 for r in rows],
                           "Low": [r[1] * 0.98 for r in rows]})
 ds.fetch_yf_history = fetch_yf_history
-sys.modules["data_sources"] = ds
+sys.modules["radar.data.data_sources"] = ds
 
-import signal_tracker as st
-import pick_review as pr
+from radar.core import signal_tracker as st
+from radar.core import pick_review as pr
 
 CLOCK = {"tpe": "2026-08-24", "tw_partial": "2026-08-24", "us_partial": "2026-08-24"}
 st._today_str = lambda: CLOCK["tpe"]

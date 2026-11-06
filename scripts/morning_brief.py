@@ -31,13 +31,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import data_sources as ds
-import notifier
+from radar.data import data_sources as ds
+from radar.notify import notifier
 # Bug fix (2026-09-07): 本檔原本把 Yahoo 新聞標題 / 連結 / 股名原封不動塞進 HTML 訊息。
 # 英文財經標題含 "&" (AT&T / S&P / M&A) 與 "<...>" 是常態, Yahoo 連結也一定帶 "&" query,
 # 會讓 Telegram 400 -> notifier 退成純文字重送 -> 整封晨報的粗體/連結全失效, 還會被
 # 正則把 "<NVDA>" 這種字連內容一起刪掉。統一用 notifier 既有的 escape helper。
-from notifier import _esc as _E, _esc_attr as _EA
+from radar.notify.notifier import _esc as _E, _esc_attr as _EA
 
 
 # Telegram 訊息上限 4096 chars (HTML)
@@ -63,7 +63,7 @@ def _safe(label: str, fn, default=""):
 # ---------------------------------------------------------------------------
 def _section_recap_and_tldr() -> str:
     try:
-        import morning_recap_alert as _mr
+        from radar.alerts import morning_recap_alert as _mr
         lines = []
         sox = _mr._fetch_us_close("^SOX")
         ixic = _mr._fetch_us_close("^IXIC")
@@ -91,7 +91,7 @@ def _section_pick_review() -> str:
     推薦當下價記進去), 這裡只負責把「已經有隔日收盤結果」的那批算出來並排版。
     """
     try:
-        import pick_review
+        from radar.core import pick_review
         return pick_review.build_review_block(refresh=True)
     except Exception as e:
         print(f"[morning_brief] pick_review section failed: {e}", flush=True)
@@ -240,7 +240,7 @@ def _section_macro_news() -> str:
 # ---------------------------------------------------------------------------
 def _section_tw_picks() -> str:
     try:
-        import upside_screener
+        from radar.screeners import upside_screener
         # 用 cache, 避免每天 8am 重複呼叫 (15 分鐘 cache + 排程必然 cache miss)
         result = upside_screener.run_upside_screen(
             market="all", max_stocks=120, use_cache=False,  # 排程 fresh
@@ -275,7 +275,7 @@ def _section_tw_picks() -> str:
         # 其實是前一交易日的收盤 → asof 要標成前一交易日, 這樣「往後一個交易日」才會
         # 落在今天的盤 (= 使用者看到推薦後真正能進場的那一天), 而不是明天。
         try:
-            import pick_review
+            from radar.core import pick_review
             _n = pick_review.record_picks(
                 "morning_tw_top5", all_picks[:5], market="TW",
                 source="晨報台股 Top 5", price_is_last_close=True,
@@ -305,7 +305,7 @@ def _section_today_focus() -> str:
     lines = [f"📅 <b>今日 ({today.strftime('%Y-%m-%d %a')})</b>"]
     # 台股是否開盤
     try:
-        import holiday_check
+        from radar.core import holiday_check
         tw_closed = holiday_check.is_market_closed_today("TW")
         us_closed = holiday_check.is_market_closed_today("US")
         if tw_closed:
@@ -326,8 +326,8 @@ def _section_today_focus() -> str:
 def _section_chip_price_pattern() -> str:
     """分析 upside_screener top picks 的盤後籌碼 + 價量模式."""
     try:
-        import upside_screener
-        import chip_price_divergence as cpd
+        from radar.screeners import upside_screener
+        from radar.analysis import chip_price_divergence as cpd
         result = upside_screener.run_upside_screen(market="all", max_stocks=80, use_cache=True)
         all_picks = (result.get("all") or [])[:15]  # 取 top 15 分析
         if not all_picks:
@@ -370,12 +370,15 @@ def _section_chip_price_pattern() -> str:
 def _section_events() -> str:
     try:
         import os
-        import econ_calendar
+        from radar.data import econ_calendar
         # 用戶自訂美股池 (US_WATCHLIST) 也納入財報涵蓋範圍
         us_wl = [s.strip().upper() for s in
                  os.environ.get("US_WATCHLIST", "").replace(",", " ").split() if s.strip()]
-        mode = "week" if dt.datetime.utcnow().weekday() == 0 else "today"
-        return econ_calendar.build_events_digest(mode=mode, watchlist=us_wl)
+        # Bug fix: 用台北日期判斷「週一」與「今天」。UTC 日期在 TPE 00:00~08:00 是前一天 →
+        # 週一早上會被當週日 (整週預告變成只有今天), 其他天把昨天的事件標成「今天」。
+        tpe_today = (dt.datetime.utcnow() + dt.timedelta(hours=8)).date()
+        mode = "week" if tpe_today.weekday() == 0 else "today"
+        return econ_calendar.build_events_digest(mode=mode, watchlist=us_wl, today=tpe_today)
     except Exception as e:
         print(f"[morning_brief] events section failed: {e}", flush=True)
         return ""
@@ -387,8 +390,8 @@ def _section_events() -> str:
 # 晨報的「排程目標時間」(TPE 分鐘數) — 只用來算延遲幾分, 改 cron 時請同步。
 SCHEDULED_TPE_MIN = 8 * 60  # 08:00 TPE
 # 去重時間窗: 主 cron + 備援 cron 之間可能差 1~2 小時 (GitHub 排隊延遲),
-# 窗要夠大才擋得住; 5 小時內只推一封晨報。
-DEDUP_WINDOW_MIN = 300
+# 窗要夠大才擋得住。2026-11 實測延遲 4~6.5 小時 → 拉到 16 小時 (每天一封, 不會誤擋隔天)。
+DEDUP_WINDOW_MIN = 960
 
 
 def compose_brief() -> str:
@@ -428,6 +431,13 @@ def main():
         print("[morning_brief] TG 未設定, 略過", flush=True)
         return 1
 
+    # 遲到守衛: cron 延遲到下午才跑的「08:00 晨報」內容已過時, 不推 (外部準時觸發不受影響)
+    from radar.core import schedule_guard as _sg
+    _stale = _sg.check_stale("morning_brief")
+    if _stale:
+        print(f"::warning::[morning_brief] {_stale}", flush=True)
+        return 0
+
     # === 排程去重守衛 ===
     # 為什麼晨報也需要: GitHub Actions 的 cron 排隊延遲不可控 (常 1~2 小時),
     # 所以 morning_brief.yml 現在排了「主 + 2 條備援」共 3 條 cron —— 哪條先跑到就哪條推,
@@ -437,13 +447,13 @@ def main():
     # fail-open: 守衛自己出任何錯都照送, 寧可重複也不漏推。
     try:
         import os as _os
-        import push_dedup as _pd
+        from radar.core import push_dedup as _pd
         _slot = "morning_brief"
         _is_manual = _os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
         if _is_manual:
-            # 用 force_claim: reset() 在 merge-on-save 下刪不掉已持久化的 claim
-            _pd.force_claim(_slot)
-            print("[morning_brief] 手動觸發 — 不擋, 已重新登記 claim", flush=True)
+            # Bug fix: 原本在「送出前」就 force_claim → 準時觸發那次若組稿 / 送出失敗,
+            # 晚到的 cron 備援會被擋掉, 當天沒有晨報。送成功後下面才 claim (原本就有)。
+            print("[morning_brief] 手動 / 準時觸發 — 不被去重擋; 送達後才登記 claim", flush=True)
         elif _pd.was_claimed_recently(_slot, window_min=DEDUP_WINDOW_MIN):
             # 唯讀檢查。注意「已成功推過」才算數 —— claim 是在下面送出成功後才登記的,
             # 若 08:02 那班在組稿階段就掛了, 這裡不會被擋, 08:13 / 08:27 的備援 cron
@@ -463,7 +473,7 @@ def main():
         print(f"[morning_brief] ✓ 推播成功", flush=True)
         # 推成功了才登記 claim → 備援 cron 之後才會被擋掉
         try:
-            import push_dedup as _pd2
+            from radar.core import push_dedup as _pd2
             _pd2.force_claim("morning_brief")
         except Exception as _ce:
             print(f"[morning_brief] claim 登記失敗 (non-fatal): {_ce}", flush=True)

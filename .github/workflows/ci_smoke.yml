@@ -35,9 +35,16 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-          cache: 'pip'
-          cache-dependency-path: requirements.txt
+      # 整個 Python 環境 (含已安裝套件) 一起快取: 命中時直接跳過 pip install,
+      # 每次 run 省 40~90 秒 → 推播更快送出。requirements.txt 一改 key 就變, 自動重裝。
+      - name: Cache Python environment
+        id: pyenv-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.pythonLocation }}
+          key: pyenv-${{ runner.os }}-${{ env.pythonLocation }}-${{ hashFiles('requirements.txt') }}
       - name: 安裝相依
+        if: steps.pyenv-cache.outputs.cache-hit != 'true'
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt

@@ -6,6 +6,8 @@ import unittest
 from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
+import sys
+sys.path.insert(0, str(ROOT))
 
 
 def load_functions(filename, names, namespace):
@@ -23,7 +25,9 @@ class TelegramRegressionTests(unittest.TestCase):
                    "_tpe_now_str": lambda: "12:00",
                    "_record_push_safe": Mock(),
                    "_send_message_inner": Mock(return_value=(True, "sent"))}
-        load_functions("notifier.py", {"_u16_len", "_split_tg_msg", "send_message"}, self.ns)
+        self.ns["_MAX_RETRY_AFTER_SEC"] = 30
+        load_functions("radar/notify/notifier.py",
+                       {"_u16_len", "_split_tg_msg", "send_message", "_retry_delay_sec"}, self.ns)
 
     def test_emoji_long_message_terminates_and_preserves_content(self):
         text = "🎯" * 2500
@@ -45,7 +49,8 @@ class TelegramRegressionTests(unittest.TestCase):
     def test_cap_does_not_send_uncategorized_tail(self):
         cap = types.ModuleType("push_cap")
         cap.would_allow = Mock(return_value=False)
-        with patch.dict("sys.modules", {"push_cap": cap}):
+        with patch.dict("sys.modules", {"radar.core.push_cap": cap}), \
+             patch("radar.core.push_cap", cap, create=True):
             ok, info = self.ns["send_message"]("股" * 9000, category="test")
         self.assertFalse(ok)
         self.assertIn("daily_cap_skip", info)
@@ -53,7 +58,7 @@ class TelegramRegressionTests(unittest.TestCase):
 
     def test_precursor_eight_results_send(self):
         ns = {"List": list, "Dict": dict}
-        load_functions("limit_up_precursor.py", {"fmt_limit_up_precursor_msg"}, ns)
+        load_functions("radar/screeners/limit_up_precursor.py", {"fmt_limit_up_precursor_msg"}, ns)
         picks = [{"stock_id": str(2300 + i), "name": "A&B <測試>",
                   "theme": "題材", "reasons": ["🎯吸籌" * 40] * 4,
                   "warnings": [], "current": 100, "score": 40}
@@ -73,12 +78,23 @@ class TelegramRegressionTests(unittest.TestCase):
         module.fmt_limit_up_precursor_msg = Mock(return_value="precursor message")
         picks = [{"stock_id": "2330"}]
         send = Mock()
-        with patch.dict("sys.modules", {"limit_up_precursor": module}):
+        with patch.dict("sys.modules", {"radar.screeners.limit_up_precursor": module}), \
+             patch("radar.screeners.limit_up_precursor", module, create=True):
             exec(compile(ast.Module(body=[branch], type_ignores=[]), "app.py", "exec"),
                  {"send_lup_top": True, "st": types.SimpleNamespace(
                      session_state={"limit_up_precursor": picks}), "_send_tg": send})
         module.fmt_limit_up_precursor_msg.assert_called_once_with(picks)
         send.assert_called_once_with("precursor message", "漲停前兆")
+
+    def test_rate_limit_waits_retry_after(self):
+        ns = {}
+        load_functions("radar/notify/notifier.py", {"_retry_delay_sec"}, ns)
+        ns["_MAX_RETRY_AFTER_SEC"] = 30
+        delay = ns["_retry_delay_sec"]
+        body = 'HTTP 429: {"ok":false,"error_code":429,"parameters":{"retry_after":7}}'
+        self.assertEqual(delay(body, 0), 7.5)
+        self.assertEqual(delay(body.replace(":7}", ":120}"), 0), 30)   # 上限, 不卡死 run
+        self.assertEqual(delay("HTTP 502: bad gateway", 1), 2.0)       # 非 429 維持退避
 
     def test_html_fallback_keeps_silent_delivery(self):
         requests = types.SimpleNamespace(Response=object, post=Mock(side_effect=[
@@ -86,7 +102,7 @@ class TelegramRegressionTests(unittest.TestCase):
             types.SimpleNamespace(status_code=200, text="ok")]))
         ns = {"Optional": __import__("typing").Optional, "requests": requests,
               "_bot_token": lambda: "fake", "_chat_id": lambda: "fake"}
-        load_functions("notifier.py", {"_send_message_inner", "_looks_like_html_parse_error"}, ns)
+        load_functions("radar/notify/notifier.py", {"_send_message_inner", "_looks_like_html_parse_error"}, ns)
         self.assertTrue(ns["_send_message_inner"]("<b>test", disable_notification=True)[0])
         self.assertTrue(requests.post.call_args.kwargs["data"]["disable_notification"])
 
