@@ -233,6 +233,7 @@ def send_message(text: str, disable_preview: bool = True,
                 disable_notification=(disable_notification or _i > 0),          # 只有第一封響鈴
                 category=(category if _i == 0 else None),                      # daily cap 只算一次
                 _stamped=True,                                                  # 已戳過, 分段不重複加
+                _part_idx=_i,
                 chat_id=chat_id,                                                # 分段要送同一個 chat
                 count_as_push=count_as_push,
             )
@@ -288,13 +289,15 @@ def send_message(text: str, disable_preview: bool = True,
             # 備援 cron 一起擋掉 (主推失敗了卻宣稱推過)。
             if count_as_push:
                 SEND_OK_COUNT += 1
-            _record_push_safe(text, ok, info, category)
+            if not _kwargs.get("_part_idx"):
+                _record_push_safe(text, ok, info, category)
             return ok, info
         if any(k in info for k in ("尚未設定", "chat not found", "Forbidden", "Unauthorized")):
             break  # 永久錯不重試
         if attempt < 2:
             _time.sleep(_retry_delay_sec(info, attempt))
-    _record_push_safe(text, False, last_info, category)
+    if not _kwargs.get("_part_idx"):
+        _record_push_safe(text, False, last_info, category)
     return False, last_info
 
 

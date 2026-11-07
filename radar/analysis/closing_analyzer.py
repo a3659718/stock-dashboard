@@ -227,7 +227,8 @@ def _gemini_finalize_dumping(cands: List[Dict], top_n: int) -> List[Dict]:
                 break
             if not isinstance(d, dict):
                 continue
-            sid = str(d.get("stock_id", "")).strip().split()[0] if d.get("stock_id") else ""
+            _m_sid = re.match(r"\d{4,6}[A-Z]?", str(d.get("stock_id", "")).strip())  # "3017.TW" / "3017奇鋐"
+            sid = _m_sid.group(0) if _m_sid else ""
             if sid not in name_map:
                 continue  # Gemini 編出不在候選名單的代號 → 丟掉
             out.append({
@@ -236,6 +237,9 @@ def _gemini_finalize_dumping(cands: List[Dict], top_n: int) -> List[Dict]:
                 "reason": str(d.get("reason", "")),
                 "confidence": int(d.get("confidence", 50) or 50),
             })
+        if not out:
+            # Gemini 回的代號全部對不上候選 → 交給下面 except 退回規則排名, 不要整區空白
+            raise ValueError("Gemini 回傳的代號都不在候選名單")
         return out
     except Exception as e:
         print(f"[closing_analyzer] Gemini dumping failed: {e}", flush=True)

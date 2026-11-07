@@ -559,7 +559,13 @@ def run_all_screens(
             # 當天缺資料的股票會用一週前的突破、爆量、MACD 翻紅出現在「今天」的命中名單。
             # 只保留最後一根 = 全市場最新交易日的股票 (投信條件原本就有同樣檢查)。
             try:
-                _mkt_last = daily["date"].max()
+                # 市場最新日取「最多股票共同的最新日」, 不用單一最大值: FinMind 盤後上市 / 上櫃分批更新,
+                # 只要有一檔先有今天的資料, 用 max 會把其餘還沒更新的整批濾掉。過半才套用。
+                _per_stock_last = daily.groupby("stock_id")["date"].max()
+                _mode = _per_stock_last.mode()
+                _mkt_last = _mode.max() if not _mode.empty else daily["date"].max()
+                if (_per_stock_last == _mkt_last).mean() < 0.5:
+                    raise ValueError("最新日不到半數股票共有, 跳過過濾")
                 _last_by = daily.groupby("stock_id")["date"].transform("max")
                 _stale_n = int(daily.loc[_last_by != _mkt_last, "stock_id"].nunique())
                 if _stale_n:

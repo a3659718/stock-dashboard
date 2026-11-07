@@ -75,7 +75,45 @@ class StateStoreTests(unittest.TestCase):
         self.assertEqual(sum(1 for r in big["signals"] if r["hit"] is None), 20)  # 未驗收的保留
 
 
+class StateStoreRound4Tests(StateStoreTests):
+    """第四輪: 寫入失敗不可前進快照、push_history 併發合併。"""
+
+    def test_failed_flush_keeps_change_pending(self):
+        s = ws.load_monitor_state()
+        s["slot_dedup"] = {"tw_close": "2026-11-07T07:01:00Z"}
+        with patch.object(ws, "_flush_state", return_value=False) as fl:
+            ws.save_monitor_state(s)
+        self.assertIn("slot_dedup", fl.call_args.args[0])
+        ws.save_monitor_state(s)                     # 下一次 save 仍要帶著這個 key
+        self.assertEqual(self._disk()["slot_dedup"], {"tw_close": "2026-11-07T07:01:00Z"})
+
+    def test_push_history_union_merge(self):
+        a = ws.load_monitor_state()
+        b = ws.load_monitor_state()
+        a["push_history"] = [{"ts": "2026-11-07T07:00:00", "type": "tw_close"}]
+        ws.save_monitor_state(a)
+        b["push_history"] = [{"ts": "2026-11-07T06:59:00", "type": "monitor"}]
+        ws.save_monitor_state(b)
+        types = [h["type"] for h in self._disk()["push_history"]]
+        self.assertEqual(types, ["monitor", "tw_close"])   # 修正前: 後寫的把前一筆蓋掉
+
+    def test_immediate_save_in_batch_mode(self):
+        ws.open_batched_state()
+        try:
+            s = ws.load_monitor_state()
+            s["watchlist_triggers"] = {"t1": {"armed": False}}
+            ws.save_monitor_state(s, immediate=True)
+            self.assertEqual(self._disk()["watchlist_triggers"], {"t1": {"armed": False}})  # batch 還沒結束就已寫入
+        finally:
+            ws.close_batched_state()
+
+
 class ScheduleDateTests(unittest.TestCase):
+    def test_pre_open_absolute_deadline(self):
+        env = {"GITHUB_EVENT_NAME": "schedule", "SCHEDULE_CRON": "41 0 * * 1-5"}
+        self.assertIsNone(sg.check_stale("pre_market_830", dt.datetime(2026, 11, 9, 0, 55), env))
+        self.assertIsNotNone(sg.check_stale("pre_market_830", dt.datetime(2026, 11, 9, 1, 5), env))
+
     def test_intended_market_date_uses_scheduled_time(self):
         env = {"GITHUB_EVENT_NAME": "schedule", "SCHEDULE_CRON": "2 23 * * 1-5"}
         # 週五 18:02 EST 的 us_close, 晚 6.5 小時在 UTC 週六 05:32 才跑 → 仍是週五
@@ -96,6 +134,15 @@ class TextMatchTests(unittest.TestCase):
         self.assertFalse(tm.kw_hit("ai", "X Retail Holdings"))
         self.assertTrue(tm.kw_hit("tariff", "new tariffs announced"))
         self.assertTrue(tm.kw_hit("併購", "宣布併購案"))
+
+    def test_inflections_still_match(self):
+        self.assertTrue(tm.kw_hit("upgrade", "Nvidia upgraded to Buy at Morgan Stanley"))
+        self.assertTrue(tm.kw_hit("downgrade", "Apple downgraded"))
+        self.assertTrue(tm.kw_hit("robot", "Robotics startup files for IPO"))
+        self.assertTrue(tm.kw_hit("acquisition", "acquisitions spree"))
+        self.assertFalse(tm.kw_hit("ev", "development update"))   # 短詞不放寬
+        self.assertEqual(tm.distinct_concepts(["rate", "rates", "corporate tax"]), ["rate", "corporate tax"])
+        self.assertEqual(tm.distinct_concepts(["us", "tariff"]), ["us", "tariff"])
 
     def test_overlapping_keywords_count_once(self):
         found = tm.hits(["trump", "tariff", "tariffs", "china tariff"], "Trump's China tariffs")

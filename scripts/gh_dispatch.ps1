@@ -73,7 +73,9 @@ $ref = if ($cfg.ref) { $cfg.ref } else { 'main' }
 
 # --- 組 payload ---
 $body = @{ ref = $ref }
-if ($InputName) { $body.inputs = @{ $InputName = $InputValue } }
+# source=punctual: 準時觸發仍會檢查「同 slot 是否已推過」(只有手動補推才略過去重)
+$body.inputs = @{ source = 'punctual' }
+if ($InputName) { $body.inputs[$InputName] = $InputValue }
 $json = $body | ConvertTo-Json -Depth 5 -Compress
 $uri = "https://api.github.com/repos/$($cfg.repo)/actions/workflows/$Workflow/dispatches"
 

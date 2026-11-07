@@ -418,6 +418,9 @@ def find_stealth_followers(top_themes: int = 5) -> dict:
         return {"stealth": pd.DataFrame(), "hot_themes": themes_df.head(top_themes)}
 
     all_df = pd.concat(pool, ignore_index=True)
+    # 用「全部成分股」後同一檔可能屬於多個熱門題材 → 只保留第一個 (題材依熱度排序)
+    if "stock_id" in all_df.columns:
+        all_df = all_df.drop_duplicates(subset=["stock_id"], keep="first").reset_index(drop=True)
     # 條件: 0 < 今日% ≤ +2 + 量比 ≥ 1.5 + -3 ≤ 5日% ≤ +5 (潛伏: 量先動、股還沒動)
     # Bug fix (2026-08): 原本三個條件都「只有上界沒有下界」, 任何崩跌中的爆量股都符合;
     # 又因為按量比降冪排序, 跌最兇、量最大的 (通常正是恐慌殺盤) 會排在推薦名單第一名。

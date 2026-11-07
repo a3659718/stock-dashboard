@@ -38,3 +38,6 @@ scripts/logs/
 *.lock
 *.tmp
 _diagnose_write.txt
+
+# Claude Code 本機設定
+.claude/

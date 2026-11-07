@@ -36,6 +36,15 @@ STALE_LIMIT_MIN = {
 }
 
 
+# 「開盤前」類 slot 的絕對截止時間 (台北): 不論是哪一條 cron (主 / 備援) 觸發, 過了就不推。
+# 只用相對延遲時, 08:41 的備援 cron + 30 分容忍 = 09:11 才送到, 已經開盤。
+ABS_DEADLINE_TPE = {
+    "pre_market_815": (9, 0),
+    "pre_market_830": (9, 0),
+    "morning_brief": (9, 0),
+}
+
+
 def _field_match(field: str, value: int) -> bool:
     for part in field.split(","):
         part = part.strip()
@@ -129,6 +138,14 @@ def check_stale(slot: str, now_utc: Optional[dt.datetime] = None,
         if limit is None or not cron:
             return None
         late = lateness_minutes(cron, now_utc)
+        deadline = ABS_DEADLINE_TPE.get(slot)
+        if deadline is not None and late is not None:
+            _now = now_utc or dt.datetime.utcnow()
+            fire_tpe = (_now - dt.timedelta(minutes=late)) + dt.timedelta(hours=8)
+            cutoff = fire_tpe.replace(hour=deadline[0], minute=deadline[1], second=0, microsecond=0)
+            if _now + dt.timedelta(hours=8) >= cutoff:
+                return (f"已過 {slot} 的截止時間 台北 {deadline[0]:02d}:{deadline[1]:02d} "
+                        f"(cron '{cron}' 延遲 {late:.0f} 分) → 開盤前內容已過時, 本次不推播。")
         if late is None or late <= limit:
             return None
         return (f"GitHub 排程延遲 {late:.0f} 分鐘 (cron '{cron}'), 超過 {slot} 的容忍上限 "

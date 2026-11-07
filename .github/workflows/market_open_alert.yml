@@ -9,9 +9,10 @@ name: Market Open Alert
 # monitor 之間仍自我序列化 (同組); monitor 與日推「跨組併發」寫 monitor_state 由
 # watchlist_store 的 merge-on-save (讀回持久化版本再 shallow merge, 保留對方 dedup) 保護, 不會互相清掉。
 concurrency:
-  # workflow_dispatch (cron-job.org / 手動準時觸發) 每個 slot 獨立一組: GitHub 每組最多只留 1 個 pending,
-  # 新排進來的會把舊的 pending 取消 → 遲到數小時的 cron run 會把準時觸發的 run 擠掉。
-  group: ${{ github.event_name == 'workflow_dispatch' && format('sd-dispatch-{0}', github.event.inputs.market) || (contains(fromJSON('["8,38 1,2,3,4 * * 1-5","8 5 * * 1-5","15 14,15,16,17,18,19,20 * * 1-5","45 13 * * 1-5","45 14 * * 1-5","0 2,6,10,18,22 * * 0,6"]'), github.event.schedule) && 'sd-monitor' || 'sd-daily') }}
+  # 每個推播 slot 一組 (準時觸發 workflow_dispatch 與同 slot 的 cron run 同組 → 依序跑, 後跑的會看到先跑的 claim 而跳過);
+  # monitor 自成一組。不同 slot 互不排隊 → 遲到數小時的別的 cron 不會擠掉準時觸發的 pending run。
+  # (2026-11 修: 原本 dispatch 與 cron 分組 → GitHub 準時時兩邊並行, 同一則推兩次)
+  group: ${{ github.event_name == 'workflow_dispatch' && format('sd-slot-{0}', github.event.inputs.market) || (contains(fromJSON('["8,38 1,2,3,4 * * 1-5","8 5 * * 1-5","15 14,15,16,17,18,19,20 * * 1-5","45 13 * * 1-5","45 14 * * 1-5","0 2,6,10,18,22 * * 0,6"]'), github.event.schedule) && 'sd-monitor' || format('sd-slot-{0}', fromJSON('{"32 1 * * 1-5":"tw_open","2 3 * * 1-5":"tw_mid","3 7 * * 1-5":"tw_close","19 7 * * 1-5":"tw_close","32 8 * * 1-5":"tw_foreign_chips","2 14 * * 1-5":"us_open","2 15 * * 1-5":"us_open","32 15 * * 1-5":"us_mid","32 16 * * 1-5":"us_mid","2 22 * * 1-5":"us_close","2 23 * * 1-5":"us_close","32 14 * * *":"holiday_news","2 11 * * 1-5":"us_emerging","2 12 * * 1-5":"us_emerging","32 12 * * 1-5":"us_buy_picks","32 13 * * 1-5":"us_buy_picks","32 6 * * *":"heartbeat","32 23 * * 0-5":"morning_recap","2 14 * * 0,6":"weekend_recap","47 1 * * 1":"policy_watch"}')[github.event.schedule] || 'other')) }}
   cancel-in-progress: false
 
 on:
@@ -95,6 +96,12 @@ on:
     - cron: '47 1 * * 1'
   workflow_dispatch:
     inputs:
+      source:
+        description: '觸發來源 (punctual = cron-job.org / 工作排程器準時觸發, 仍會檢查是否已推過; manual = 手動強制補推)'
+        required: false
+        default: 'manual'
+        type: choice
+        options: [manual, punctual]
       market:
         description: '市場 (tw_open / tw_mid / tw_close / us_open / us_mid / us_close / holiday_news / crypto_picks / monitor / heartbeat / weekend_recap)'
         required: true
@@ -416,6 +423,7 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           # 觸發本次 run 的 cron 字串 → radar/core/schedule_guard 判斷是否遲到太久 (手動觸發時為空)
           SCHEDULE_CRON: ${{ github.event.schedule }}
+          DISPATCH_SOURCE: ${{ github.event.inputs.source }}
           STALE_GUARD: ${{ vars.STALE_GUARD || '1' }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}

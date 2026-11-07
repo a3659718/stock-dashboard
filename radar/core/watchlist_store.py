@@ -122,12 +122,18 @@ def _read_persisted_raw() -> Dict:
     """直接從 backend 讀目前持久化的 monitor_state (不碰 batch cache) — 給 _flush_state merge 用."""
     sheet = _get_sheet("monitor_state")
     if sheet is not None:
-        try:
-            cell = sheet.acell("A1").value
-            if cell:
-                return json.loads(cell)
-            return {}  # 讀成功, 但真的是空的
-        except Exception as e:
+        import time as _time
+        _last_err = None
+        for _attempt in range(3):  # 讀取額度偶發失敗 → 退避重試, 避免一次失敗就略過寫入 (claim 遺失)
+            try:
+                cell = sheet.acell("A1").value
+                return json.loads(cell) if cell else {}  # 空的 = 讀成功但真的沒資料
+            except Exception as e:
+                _last_err = e
+                if _attempt < 2:
+                    _time.sleep(1 + _attempt)
+        if _last_err is not None:
+            e = _last_err
             # Bug fix: 原本讀失敗 (Sheets 讀取額度 60/分 很容易撞到) 回 {} = 「什麼都沒存」,
             # merge 被略過, 只帶「改過的 key」的 payload 直接整格覆寫 A1 → slot_dedup / signals /
             # 每日上限全被抹掉。回 None 讓 _flush_state 知道「不確定」, 不去覆寫 Sheets。
@@ -250,7 +256,7 @@ def _shrink_to_fit(state: Dict, blob: str) -> str:
     return json.dumps(state, ensure_ascii=False, separators=(",", ":"))
 
 
-def _flush_state(state: Dict) -> None:
+def _flush_state(state: Dict) -> bool:
     """實際寫入 state (本地檔案 + GSheet). 跟舊版 save_monitor_state 邏輯相同.
 
     Bug fix (lost-update): 各模組各自管自己的 top-level key (push_cap→secondary_push_cap /
@@ -289,6 +295,23 @@ def _flush_state(state: Dict) -> None:
                     merged["slot_dedup"] = _u
             except Exception:
                 pass
+            # push_history / cron_runs 是只會 append 的紀錄 → 併發的兩個 run 各自加的都要留下
+            # (原本 last-writer-wins: 晚到的 monitor flush 會蓋掉同時段準時推播寫的紀錄)。
+            for _lk in ("push_history", "cron_runs"):
+                try:
+                    _la = persisted.get(_lk) or []
+                    _lb = state.get(_lk) or []
+                    if isinstance(_la, list) and isinstance(_lb, list) and _la and _lb:
+                        _seen, _ul = set(), []
+                        for _it in _la + _lb:
+                            _key = json.dumps(_it, sort_keys=True, ensure_ascii=False)
+                            if _key not in _seen:
+                                _seen.add(_key)
+                                _ul.append(_it)
+                        _ul.sort(key=lambda x: str(x.get("ts", "")) if isinstance(x, dict) else "")
+                        merged[_lk] = _ul
+                except Exception as _ue:
+                    print(f"[watchlist_store] {_lk} union merge skipped: {_ue}", flush=True)
             state = merged
     except Exception as _me:
         print(f"[watchlist_store] monitor_state merge skip (non-fatal): {_me}", flush=True)
@@ -325,6 +348,8 @@ def _flush_state(state: Dict) -> None:
             sheet.update_acell("A1", blob)
         except Exception as _e:
             print(f"[watchlist_store] monitor_state gsheets update failed: {_e}", flush=True)
+            return False
+    return not _skip_sheet_write
 
 
 def _atomic_write_text(path: Path, blob: str) -> None:
@@ -544,14 +569,22 @@ def _remember_snapshot(state: Dict) -> Dict:
 
 
 def _changed_keys(state: Dict) -> Optional[Dict]:
-    """state 若是 load_monitor_state() 回傳的物件 → 回傳改過的 top-level key; 否則 None (整包寫)。"""
+    """state 若是 load_monitor_state() 回傳的物件 → 回傳改過的 top-level key; 否則 None (整包寫)。
+
+    不會自動前進快照 —— 等真的寫成功再呼叫 _advance_snapshot(), 否則寫入失敗 (例 Sheets 讀取
+    失敗而略過寫入) 時, 同一物件下次 save 就不會再帶這些 key, 變更 (例 slot claim) 永久遺失。
+    """
     entry = _LOAD_SNAPSHOTS.get(id(state))
     if not entry or entry[0] is not state:
         return None
     snap = entry[1]
-    changed = {k: v for k, v in state.items() if k not in snap or snap[k] != v}
-    _LOAD_SNAPSHOTS[id(state)] = (state, copy.deepcopy(state))  # 同物件再 save 時跟最新版比
-    return changed
+    return {k: v for k, v in state.items() if k not in snap or snap[k] != v}
+
+
+def _advance_snapshot(state: Dict) -> None:
+    entry = _LOAD_SNAPSHOTS.get(id(state))
+    if entry and entry[0] is state:
+        _LOAD_SNAPSHOTS[id(state)] = (state, copy.deepcopy(state))
 
 
 def load_monitor_state() -> Dict:
@@ -611,7 +644,7 @@ def _load_monitor_state_impl() -> Dict:
     return default
 
 
-def save_monitor_state(state: Dict) -> None:
+def save_monitor_state(state: Dict, immediate: bool = False) -> None:
     """儲存 monitor state.
 
     I1 fix:
@@ -622,6 +655,7 @@ def save_monitor_state(state: Dict) -> None:
     changed = _changed_keys(state)
     if changed is not None and not changed:
         return  # 沒有任何變更
+    payload = changed if changed is not None else state
     if _BATCH_MODE:
         # 批次模式 — 只更新 cache, 不打 GSheet。只套用改過的 key, 不讓舊快照蓋掉 cache 裡
         # 其他模組在同一個 batch 內剛寫進去的 key。
@@ -630,9 +664,16 @@ def save_monitor_state(state: Dict) -> None:
         else:
             _BATCH_CACHE.update(copy.deepcopy(changed))
         _BATCH_DIRTY = True
+        _advance_snapshot(state)
+        if not immediate:
+            return
+        # immediate=True: 「已推播 / 已觸發」這類 claim 必須馬上讓其他並行的 run 看得到
+        # (batch 要等整個 monitor 跑完才寫; 被 20 分鐘 timeout 砍掉時更是完全不寫)。
+        _flush_state(copy.deepcopy(payload))
         return
     # 預設 — 立刻 flush (只寫改過的 key, 其餘由 _flush_state 的 merge 保留持久化版本)
-    _flush_state(changed if changed is not None else state)
+    if _flush_state(payload):
+        _advance_snapshot(state)
 
 
 # ---------------------------------------------------------------------------

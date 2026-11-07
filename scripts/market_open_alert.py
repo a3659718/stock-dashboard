@@ -393,6 +393,8 @@ def _run_us_open_main(market: str) -> bool:
         # 送失敗時上層會以為主推已出去。
         if not ok_uo:
             _RUN_FLAGS["main_push_failed"] = True
+        else:
+            _claim_main_now(market)  # 主推送達即登記 (後面的次要掃描可能拖到 timeout, atexit 不會跑)
         return bool(ok_uo)
     # fmt 失敗 / 空訊息 → 主推沒送出去, 不可以讓次要 alert 的成功把 slot claim 掉
     _RUN_FLAGS["main_push_failed"] = True
@@ -427,7 +429,12 @@ def main() -> int:
     # claim 一次, window 內已送過就跳過。monitor 等「本來就多跑」的不套; 手動觸發
     try:
         import os as _os
-        _is_manual = _os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
+        # 準時觸發 (cron-job.org / 工作排程器, source=punctual) 跟 cron 一樣要先查「是否已推過」;
+        # 只有真正的手動補推 (source=manual) 才不被去重擋。
+        # (2026-11 修: 原本所有 workflow_dispatch 都略過去重 → GitHub 準時那天, cron 先推完後
+        #  準時觸發又推一次)
+        _is_manual = (_os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
+                      and (_os.environ.get("DISPATCH_SOURCE") or "manual") != "punctual")
         from radar.core import push_dedup as _pd
         # window 從 50 分拉到 5 小時: 原本 50 分只擋得住 cron drift 幾十分鐘的重複,
         # 但 GitHub Actions 排程佇列延遲常達 1~2 小時 —— 本機準時 dispatch 推完後,
@@ -644,6 +651,13 @@ def main() -> int:
         try:
             from radar.alerts import trump_policy_alert as _tp
             tp_alerts = _tp.check_trump_policy_news() or []
+            try:
+                from radar.core import push_cap as _pc_tp
+                if tp_alerts and not _pc_tp.would_allow("trump_policy"):
+                    print("[trump_policy] 今日推播上限已滿 → 不跑 Gemini、不 claim", flush=True)
+                    tp_alerts = []
+            except Exception as _pce:
+                print(f"[trump_policy] push_cap 預檢失敗 (照常): {_pce}", flush=True)
             if tp_alerts:
                 print(f"[trump_policy] triggered {len(tp_alerts)}", flush=True)
                 _tp.mark_alerts_sent(tp_alerts)  # claim 在送出前 → 併發兩 tick 不會各送一次
@@ -714,6 +728,13 @@ def main() -> int:
         try:
             from radar.alerts import analyst_insider_alert as _ai
             ai_alerts = _ai.check_analyst_insider() or []
+            try:
+                from radar.core import push_cap as _pc_ai
+                if ai_alerts and not _pc_ai.would_allow("analyst_insider"):
+                    print("[analyst_insider] 今日推播上限已滿 → 不跑 Gemini、不 claim", flush=True)
+                    ai_alerts = []
+            except Exception as _pce:
+                print(f"[analyst_insider] push_cap 預檢失敗 (照常): {_pce}", flush=True)
             # Bug fix: 推播每類只顯示前 5 筆, 但原本把「全部」都 claim (保留 45 天) → 第 6 筆以後
             # 被標成已送卻從來沒出現在訊息裡。只 claim / 送出會顯示的那幾筆, 其餘下次再推。
             if ai_alerts:
@@ -966,6 +987,7 @@ def main() -> int:
             import traceback
             print(f"[pre_market] failed: {_e}", flush=True)
             traceback.print_exc()
+            _main_push_failed(market, str(_e))  # 否則後面 IPO 推播成功會讓 slot 被 claim, 備援被擋
 
         # === IPO 今日上市推播 (原本寫在 ~1000 行, 是死碼) ===
         # Bug fix: 原本這段放在下面 `if market == "pre_market_830":`, 但本區塊
@@ -1490,14 +1512,22 @@ def main() -> int:
             if msg:
                 ok_uc, info_uc = notifier.send_message(msg, disable_preview=True)
                 print(f"[us_close] TG send: ok={ok_uc}, info={info_uc}")
-                return 0 if ok_uc else 2
+                # Bug fix: 前面的自選股觸發推播成功會讓 SEND_OK_COUNT 增加 → 主推失敗時 atexit 仍會
+                # claim us_close, 晚到的 cron 備援被擋。主推結果要明確標記。
+                if ok_uc:
+                    _claim_main_now(market)
+                    return 0
+                _main_push_failed(market, info_uc)
+                return 2
             else:
                 print("[us_close] empty msg, skip send")
-                return 0
+                _main_push_failed(market, "主分析訊息為空")
+                return 2
         except Exception as e:
             import traceback
             print(f"us_close fatal: {e}", flush=True)
             traceback.print_exc()
+            _main_push_failed(market, str(e))
             return 1
 
     elif market == "weekend_recap":

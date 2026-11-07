@@ -40,7 +40,9 @@ def _load_state() -> Dict:
 def _save_state(state: Dict) -> None:
     try:
         from radar.core import watchlist_store
-        watchlist_store.save_monitor_state(state)
+        # immediate: 觸發的 claim / 回滾要馬上寫入, 否則 monitor 的 batch 模式要等跑完才寫,
+        # 同時間的 tw_close / us_close 會看到同一個觸發還上膛而重複推播。
+        watchlist_store.save_monitor_state(state, immediate=True)
     except Exception as e:
         print(f"[watchlist_triggers] save failed: {e}", flush=True)
 
@@ -103,9 +105,12 @@ def _is_market_closed_now(market: str = "TW") -> bool:
             dst = index_alerts._is_us_in_dst(now_utc.date())
         except Exception:
             dst = True
-        return now_utc.hour >= (20 if dst else 21)
+        # 16:00 ET 收盤 + 15 分緩衝 (收盤後幾分鐘的日 K 可能還沒定案)
+        return (now_utc.hour, now_utc.minute) >= ((20, 15) if dst else (21, 15))
     # TW 收盤 13:30 TPE = 05:30 UTC; 盤後撮合結束 + 5 分鐘緩衝
-    return (now_utc.hour, now_utc.minute) >= (5, 35)
+    # 13:30 收盤; Yahoo 台股報價約延遲 20 分 → 13:55 前拿到的日 K 收盤其實是 13:3x 前的價,
+    # 收盤集合競價翻轉的交叉會誤觸發 (一次性觸發無法事後更正)。13:55 TPE 起才判斷。
+    return (now_utc.hour, now_utc.minute) >= (5, 55)
 
 
 def _fetch_kd_macd_state(stock_id: str, market: str = "TW",

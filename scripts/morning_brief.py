@@ -449,7 +449,9 @@ def main():
         import os as _os
         from radar.core import push_dedup as _pd
         _slot = "morning_brief"
-        _is_manual = _os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
+        # 準時觸發 (source=punctual) 也要查是否已推過; 只有手動補推不被擋
+        _is_manual = (_os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
+                      and (_os.environ.get("DISPATCH_SOURCE") or "manual") != "punctual")
         if _is_manual:
             # Bug fix: 原本在「送出前」就 force_claim → 準時觸發那次若組稿 / 送出失敗,
             # 晚到的 cron 備援會被擋掉, 當天沒有晨報。送成功後下面才 claim (原本就有)。

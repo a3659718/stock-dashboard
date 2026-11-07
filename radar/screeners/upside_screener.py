@@ -639,7 +639,11 @@ def _run_upside_screen_impl(market: str = "all", max_stocks: int = DEFAULT_MAX_S
     try:
         _known = [f["_last_date"] for f in features_list if f.get("_last_date") is not None]
         if _known:
-            _mkt_last = max(_known)
+            # 「最多股票共同的最新日」(同 data_date 的 M5 邏輯), 且過半才過濾 —— 分批更新時不會誤殺
+            from collections import Counter as _Counter
+            _mkt_last, _cnt = _Counter(_known).most_common(1)[0]
+            if _cnt < len(_known) * 0.5:
+                raise ValueError("最新日不到半數股票共有, 跳過過濾")
             _before = len(features_list)
             features_list = [f for f in features_list
                              if f.get("_last_date") is None or f["_last_date"] == _mkt_last]

@@ -1,4 +1,4 @@
-streamlit>=1.36.0,<2.0.0
+streamlit>=1.40.0,<2.0.0  # st.image(use_container_width=) 需要 1.40+
 # 關鍵: Starlette 1.4.0 給 GZipResponder.__init__ 加了「必填」關鍵字參數 thread_minimum_size,
 # 但 Streamlit(含最新 1.61)的 gzip 子類別沒傳它 → 每個 HTTP request 在中介層就 500,
 # 網頁顯示「Oh no. Error running app」。程式碼本身沒問題, 純粹是相依版本不相容。

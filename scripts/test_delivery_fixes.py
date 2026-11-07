@@ -69,15 +69,19 @@ class WatchlistTriggerDeliveryTests(_TempState):
         self.assertEqual(d["watchlist_triggers_today"][0]["stock_id"], "2330")
         self.assertIn("2330", send.call_args.args[0])
 
-    def test_tw_close_check_after_1335(self):
+    def test_tw_close_check_after_1355(self):
         from radar.alerts import watchlist_triggers as wt
 
-        class _FakeDT(dt.datetime):
-            @classmethod
-            def now(cls, tz=None):
-                return dt.datetime(2026, 11, 6, 5, 40, tzinfo=dt.timezone.utc)
-        with patch.object(wt.dt, "datetime", _FakeDT):
-            self.assertTrue(wt._is_market_closed_now("TW"))   # 13:40 TPE: 已收盤, 可判斷交叉
+        def _at(h, m):
+            class _FakeDT(dt.datetime):
+                @classmethod
+                def now(cls, tz=None):
+                    return dt.datetime(2026, 11, 6, h, m, tzinfo=dt.timezone.utc)
+            return _FakeDT
+        with patch.object(wt.dt, "datetime", _at(5, 40)):
+            self.assertFalse(wt._is_market_closed_now("TW"))  # 13:40 TPE: Yahoo 延遲 ~20 分, 日 K 還沒定案
+        with patch.object(wt.dt, "datetime", _at(5, 56)):
+            self.assertTrue(wt._is_market_closed_now("TW"))   # 13:56 TPE: 可判斷交叉 (15:00 tw_close 也會再查)
 
 
 class IntradayRollbackTests(_TempState):

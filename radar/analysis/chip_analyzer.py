@@ -123,13 +123,8 @@ def fetch_chip_data(stock_id: str, days: int = 30) -> Dict:
     if isinstance(data, dict) and (data.get("institutional") or data.get("margin")
                                    or (data.get("price") is not None and len(data.get("price") or []) > 0)):
         _local_cache_set(key, data)
-    else:
-        # 全空 (多半是 FinMind 限流 / 逾時) → 不快取, 下次再抓; st.cache_data 版也一起清掉
-        try:
-            if _is_main_streamlit_thread():
-                _fetch_chip_data_impl_st.clear()
-        except Exception as _ce:
-            print(f"[chip_analyzer] 清除空結果快取失敗 (non-fatal): {_ce}", flush=True)
+    # 全空 (多半是 FinMind 限流 / 逾時) → 不寫本地快取, 下次再抓。
+    # (不呼叫 st.cache_data 的 .clear(): 不帶參數會清掉「所有股票」的快取, 反而加重限流)
     return data
 
 

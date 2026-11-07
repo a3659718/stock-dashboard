@@ -9,6 +9,7 @@ app.py — 台美股盤前盤後雷達網站
 from __future__ import annotations
 
 import datetime as dt
+import re
 from typing import List, Optional
 
 import pandas as pd
@@ -934,7 +935,7 @@ with tab_wl:
                         # Bug fix: 原本沒傳 market → 一律 TW, 美股代號被當 NVDA.TW 查, 永遠不觸發
                         _tid = _wt.add_trigger(_sid, wt_type,
                                                value=wt_val if wt_val > 0 else None,
-                                               market="TW" if _sid.isdigit() else "US")
+                                               market="TW" if re.fullmatch(r"\d{4,6}[A-Z]?", _sid) else "US")
                         if _tid:
                             st.toast(f"已加: {_sid} {_wt.TRIGGER_TYPES.get(wt_type, wt_type)}")
                             st.rerun()

@@ -29,7 +29,7 @@ TRUMP_KEYWORDS_EN = [
     "trump", "white house", "executive order", "tariff", "tariffs",
     "trade war", "china tariff", "fed pressure", "powell",
     "deportation", "immigration", "border",
-    "drill", "energy independence", "oil", "exxon",
+    "drill", "drilling", "energy independence", "oil", "exxon", "exxonmobil",
     "tesla", "musk", "dogecoin", "spacex",
     "dell", "nvda", "ai chip", "semiconductor",
     "lockheed", "defense", "military",

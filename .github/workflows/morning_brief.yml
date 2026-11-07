@@ -1,10 +1,8 @@
 name: Morning Brief (8AM TPE)
 
-# 跟 market_open_alert 的「日推」佇列同組 (sd-daily) — 與時效性日推序列化, 但不跟每半小時
-# 的 monitor 佇列糾纏。cancel-in-progress: false → 排隊不取消推播.
+# 晨報自成一組 (準時觸發 + 主 / 備援 cron 依序跑); cancel-in-progress: false → 排隊不取消推播.
 concurrency:
-  # 準時觸發 (workflow_dispatch) 獨立一組, 不會被遲到的 cron run 擠掉 pending 位置
-  group: ${{ github.event_name == 'workflow_dispatch' && 'sd-dispatch-morning_brief' || 'sd-daily' }}
+  group: sd-slot-morning_brief   # 準時觸發與 3 條 cron 同組依序跑, 後跑的看到 claim 就跳過
   cancel-in-progress: false
 
 on:
@@ -21,6 +19,13 @@ on:
     - cron: '13 0 * * 1-5'   # 08:13 TPE 備援
     - cron: '27 0 * * 1-5'   # 08:27 TPE 備援
   workflow_dispatch:  # 允許手動觸發
+    inputs:
+      source:
+        description: '觸發來源 (punctual = cron-job.org / 工作排程器準時觸發, 仍會檢查是否已推過; manual = 手動強制補推)'
+        required: false
+        default: 'manual'
+        type: choice
+        options: [manual, punctual]
 
 jobs:
   morning_brief:
@@ -65,6 +70,7 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           # 觸發本次 run 的 cron 字串 → radar/core/schedule_guard 判斷是否遲到太久 (手動觸發時為空)
           SCHEDULE_CRON: ${{ github.event.schedule }}
+          DISPATCH_SOURCE: ${{ github.event.inputs.source }}
           STALE_GUARD: ${{ vars.STALE_GUARD || '1' }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           # monitor_state 跨 run 保存 (去重/冷卻/上限) — 缺這兩個所有去重都會失效

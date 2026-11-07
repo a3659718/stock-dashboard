@@ -65,7 +65,8 @@ def build_job(slot: dict, repo: str, ref: str, gh_token: str) -> dict:
                 "X-GitHub-Api-Version": "2022-11-28",
                 "Content-Type": "application/json",
             },
-            "body": json.dumps({"ref": ref, "inputs": slot.get("inputs") or {}}),
+            # source=punctual: 準時觸發仍會檢查「同 slot 是否已推過」, 不會跟同時間的 cron 重複推
+            "body": json.dumps({"ref": ref, "inputs": {**(slot.get("inputs") or {}), "source": "punctual"}}),
         },
         # GitHub 成功回 204; 失敗時寄信通知 (cron-job.org 帳號信箱)
         "notification": {"onFailure": True, "onSuccess": False, "onDisable": True},
