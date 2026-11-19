@@ -157,20 +157,35 @@ GitHub 官方說明排程在高負載時可能延遲或跳過，調 cron 分鐘�
 1. **GitHub Fine-grained PAT**：GitHub → Settings → Developer settings → Fine-grained tokens →
    Repository access 只選 `stock-dashboard` → Permissions：**Actions = Read and write**。
 2. **cron-job.org**：免費註冊 → Settings → API → 建立 API key。
-3. 在專案資料夾執行（PowerShell）：
+3. 開 **Windows PowerShell**（開始選單搜尋 PowerShell），執行：
 
 ```powershell
-$env:CRONJOB_API_KEY="你的 cron-job.org API key"
-$env:GH_DISPATCH_TOKEN="github_pat_..."
-python scripts/setup_cronjob_org.py --repo a3659718/stock-dashboard --dry-run
-python scripts/setup_cronjob_org.py --repo a3659718/stock-dashboard
+cd C:\Users\user\Desktop\Project\stock_dashboard
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\setup_cronjob_org.ps1
 ```
 
+   依提示貼上兩組金鑰（**按滑鼠右鍵貼上**，畫面不會顯示字元），各按一次 Enter。
+   金鑰只存在該視窗記憶體，不寫檔。腳本會先檢查 GitHub token 權限，再建立 job（每分鐘最多 5 個，約 4 分鐘）。
 4. 到 cron-job.org 對任一 job 按 **Test run**，GitHub Actions 頁面應立刻出現一個 `workflow_dispatch` run。
 
-會建立 13 個 job（時刻表在 `scripts/punctual_slots.json`，比目標時間早約 3 分觸發）。
-美股 job 直接用 `America/New_York` 時區，夏令 / 冬令自動換算。重跑腳本只會更新、不會重複建立；
-`--delete` 可全部移除。GitHub 上原本的 cron 保留當備援。
+會建立 18 個 job（時刻表在 `scripts/punctual_slots.json`，比目標時間早約 2~3 分觸發）：
+
+| 類別 | 台北 / 美東時間 |
+|---|---|
+| 晨報、盤前 08:15 / 08:30、台股開盤 / 中盤 / 盤後 / 外資籌碼 | 08:01、08:13、08:29、09:29、10:59、15:00、16:29（台北，平日） |
+| **台股盤中監控**（大跌 / 反轉 / 強勢股 / 新聞 / 籌碼 / 自選股觸發） | 09:05 ~ 13:05 每 30 分（台北，平日） |
+| 假日重大消息 / 週末摘要 | 每天 22:29 / 週六日 21:59（台北） |
+| 美股新興突破、盤前 BUY、開盤、中盤、收盤 | 06:59、08:29、09:59、11:29、17:59（美東，平日） |
+| **美股盤中監控** | 09:45、10:15 ~ 15:45 每 30 分（美東，平日） |
+
+美股 job 直接用 `America/New_York` 時區，夏令 / 冬令自動換算。重跑腳本只會更新、不會重複建立，
+時刻表裡已移除的舊 job 會自動刪掉；`-Delete` 參數可全部移除。GitHub 上原本的 cron 保留當備援
+（同一則已推過的會被去重擋掉）。
+
+> ⚠️ **為什麼盤中監控也要準時觸發**：GitHub 排程除了延遲 4~7 小時，實測還會**直接丟掉約一半的執行**；
+> 盤中監控只在開盤時段內才動作，延遲後落在收盤後 → 盤中警報幾乎全部失效。
+>
+> **GitHub token 到期**後所有 job 會失敗（cron-job.org 會寄信通知），重新產生 token 再跑一次上面的腳本即可。
 
 > 備案：若不想用第三方服務，`scripts/register_punctual_tasks.ps1` 可註冊到 Windows 工作排程器
 > （需要電腦開機）。

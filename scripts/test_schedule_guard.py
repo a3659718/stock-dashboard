@@ -36,5 +36,44 @@ class ScheduleGuardTests(unittest.TestCase):
         self.assertTrue(g.cron_matches("*/15 * * * *", U(2026, 11, 6, 3, 45)))
 
 
+class PunctualSlotsTests(unittest.TestCase):
+    """準時觸發表 (scripts/punctual_slots.json) 必須對得上 workflow 的 workflow_dispatch 輸入。"""
+
+    def test_every_slot_is_dispatchable(self):
+        import json
+        import yaml
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import setup_cronjob_org as sc
+        root = Path(__file__).resolve().parents[1]
+        slots = json.loads((root / "scripts" / "punctual_slots.json").read_text(encoding="utf-8"))["slots"]
+        self.assertEqual(len({s["name"] for s in slots}), len(slots))
+        for s in slots:
+            wf = yaml.safe_load((root / ".github" / "workflows" / s["workflow"]).read_text(encoding="utf-8"))
+            inputs = (wf[True].get("workflow_dispatch") or {}).get("inputs") or {}
+            self.assertIn("source", inputs, s["workflow"])
+            for k, v in (s.get("inputs") or {}).items():
+                self.assertIn(k, inputs, f"{s['name']}: {k}")
+                opts = inputs[k].get("options")
+                if opts:
+                    self.assertIn(v, opts, f"{s['name']}: {k}={v}")
+            job = sc.build_job(s, "owner/repo", "main", "tok")
+            body = json.loads(job["extendedData"]["body"])
+            self.assertEqual(body["inputs"]["source"], "punctual")
+            self.assertTrue(job["schedule"]["hours"] and job["schedule"]["minutes"])
+
+    def test_monitor_covers_tw_session(self):
+        import json
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import setup_cronjob_org as sc
+        root = Path(__file__).resolve().parents[1]
+        slots = json.loads((root / "scripts" / "punctual_slots.json").read_text(encoding="utf-8"))["slots"]
+        tw = sorted(f"{h:02d}:{m:02d}" for s in slots
+                    if s["inputs"].get("market") == "monitor" and s["tz"] == "Asia/Taipei"
+                    for h in sc.slot_times(s)[0] for m in sc.slot_times(s)[1])
+        self.assertEqual(tw[0], "09:05")
+        self.assertEqual(tw[-1], "13:05")
+        self.assertEqual(len(tw), 9)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -2,7 +2,7 @@
   "counts": {
     "claim_rollback": 7,
     "cron_coverage": 0,
-    "orphan_keys": 65
+    "orphan_keys": 69
   },
   "items": {
     "claim_rollback": [
@@ -18,10 +18,10 @@
     "orphan_keys": [
       "ALL  @ radar/core/pick_review.py:243",
       "Adj Close  @ radar/analysis/policy_regime.py:153",
-      "CRONJOB_API_KEY  @ scripts/setup_cronjob_org.py:106",
+      "CRONJOB_API_KEY  @ scripts/setup_cronjob_org.py:123",
       "DISPATCH_SOURCE  @ scripts/market_open_alert.py:437",
       "ForeignInvestmentShareRatio  @ radar/analysis/stock_deep_analyzer.py:297",
-      "GH_DISPATCH_TOKEN  @ scripts/setup_cronjob_org.py:119",
+      "GH_DISPATCH_TOKEN  @ scripts/setup_cronjob_org.py:136",
       "RS  @ radar/screeners/us_actionable.py:221",
       "SBLShortSalesCurrentDayBalance  @ radar/analysis/smart_money_stealth.py:102",
       "US_WATCHLIST  @ scripts/morning_brief.py:376",
@@ -44,14 +44,16 @@
       "fmt_limit_up_precursor_msg  @ scripts/test_tg_regressions.py:66",
       "holidays  @ Claude outputs/order_bridge.py:130",
       "inst_futures  @ radar/alerts/tx_futures_alert.py:99",
-      "jobId  @ scripts/setup_cronjob_org.py:87",
-      "jobs  @ scripts/setup_cronjob_org.py:86",
+      "jobId  @ scripts/setup_cronjob_org.py:104",
+      "jobs  @ scripts/setup_cronjob_org.py:103",
       "key_signals  @ radar/analysis/daily_outlook_advisor.py:302",
       "last_year_revenue  @ radar/analysis/stock_deep_analyzer.py:555",
       "listing_date  @ radar/alerts/ipo_calendar_alert.py:110",
       "main_broker_net_pct  @ radar/analysis/entry_evaluator.py:484",
+      "options  @ scripts/test_schedule_guard.py:56",
       "ownership  @ radar/screeners/us_screener.py:385",
       "password  @ Claude outputs/order_bridge.py:751",
+      "path  @ scripts/setup_cronjob_org.py:150",
       "rate_5d  @ radar/screeners/us_upside_screener.py:230",
       "result  @ scripts/tg_callback_listener.py:286",
       "rs_vs_market  @ app.py:3954",
@@ -72,13 +74,15 @@
       "trading_session  @ radar/analysis/institutional_positioning.py:255",
       "trigger_id  @ app.py:947",
       "tw_symbols  @ app.py:3760",
-      "tz  @ scripts/setup_cronjob_org.py:101",
+      "tz  @ scripts/setup_cronjob_org.py:118",
       "update_id  @ scripts/tg_callback_listener.py:290",
       "us_symbols  @ app.py:3759",
       "user_count_limit  @ radar/core/system_health.py:198",
       "user_id  @ Claude outputs/order_bridge.py:750",
       "valuation_label  @ radar/analysis/entry_evaluator.py:333",
-      "workflow  @ scripts/setup_cronjob_org.py:102",
+      "workflow  @ scripts/setup_cronjob_org.py:119",
+      "workflow_dispatch  @ scripts/test_schedule_guard.py:52",
+      "workflows  @ scripts/setup_cronjob_org.py:150",
       "平均報酬  @ scripts/test_dashboard_ui.py:209",
       "總命中筆數  @ scripts/test_dashboard_ui.py:208"
     ]

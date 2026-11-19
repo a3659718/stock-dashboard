@@ -40,8 +40,25 @@ def load_slots() -> list:
     return json.loads(SLOTS_FILE.read_text(encoding="utf-8"))["slots"]
 
 
+def slot_times(slot: dict) -> tuple:
+    """回傳 (hours, minutes): 單一 time "HH:MM", 或 hours + minutes 兩個 list (cron-job.org 取笛卡兒積)。"""
+    if slot.get("time"):
+        hh, mm = (int(x) for x in slot["time"].split(":"))
+        return [hh], [mm]
+    hours, minutes = list(slot.get("hours") or []), list(slot.get("minutes") or [])
+    if not hours or not minutes:
+        raise ValueError(f"slot {slot.get('name')} 需要 time 或 hours + minutes")
+    return hours, minutes
+
+
+def describe_times(slot: dict) -> str:
+    hours, minutes = slot_times(slot)
+    times = [f"{h:02d}:{m:02d}" for h in hours for m in minutes]
+    return times[0] if len(times) == 1 else f"{times[0]}~{times[-1]} 共 {len(times)} 次"
+
+
 def build_job(slot: dict, repo: str, ref: str, gh_token: str) -> dict:
-    hh, mm = (int(x) for x in slot["time"].split(":"))
+    hours, minutes = slot_times(slot)
     return {
         "title": PREFIX + slot["name"],
         "url": f"https://api.github.com/repos/{repo}/actions/workflows/{slot['workflow']}/dispatches",
@@ -52,8 +69,8 @@ def build_job(slot: dict, repo: str, ref: str, gh_token: str) -> dict:
         "schedule": {
             "timezone": slot["tz"],
             "expiresAt": 0,
-            "hours": [hh],
-            "minutes": [mm],
+            "hours": hours,
+            "minutes": minutes,
             "mdays": [-1],
             "months": [-1],
             "wdays": slot["wdays"],
@@ -98,7 +115,7 @@ def main() -> int:
     slots = load_slots()
     if args.dry_run:
         for s in slots:
-            print(f"{PREFIX + s['name']:<34} {s['tz']:<17} {s['time']}  wdays={s['wdays']}  "
+            print(f"{PREFIX + s['name']:<34} {s['tz']:<17} {describe_times(s):<22} wdays={s['wdays']}  "
                   f"{s['workflow']} {s.get('inputs') or ''}")
         print(f"\n共 {len(slots)} 個 (dry-run, 沒有呼叫任何 API)")
         return 0
@@ -121,6 +138,18 @@ def main() -> int:
         print("需要 --repo 與環境變數 GH_DISPATCH_TOKEN (Fine-grained PAT, Actions: Read and write)")
         return 2
 
+    # 先確認 GitHub token 讀得到這個 repo 的 Actions (錯了就不要建 13 個會失敗的 job)
+    r = requests.get(f"https://api.github.com/repos/{args.repo}/actions/workflows", timeout=30,
+                     headers={"Authorization": f"Bearer {gh_token}",
+                              "Accept": "application/vnd.github+json",
+                              "X-GitHub-Api-Version": "2022-11-28"})
+    if r.status_code != 200:
+        print(f"GitHub token 檢查失敗 (HTTP {r.status_code}): {r.text[:200]}\n"
+              f"請確認 token 的 Repository access 有選 {args.repo}, 且 Permissions → Actions = Read and write。")
+        return 2
+    names = sorted(w.get("path", "").split("/")[-1] for w in r.json().get("workflows", []))
+    print(f"GitHub token OK — 看得到 workflows: {', '.join(names)}")
+
     for s in slots:
         job = build_job(s, args.repo, args.ref, gh_token)
         if job["title"] in have:
@@ -130,6 +159,12 @@ def main() -> int:
             _api("PUT", "/jobs", key, data=json.dumps({"job": job}))
             print(f"created {job['title']}  (建立 API 限 5 次/分鐘, 等 13 秒…)", flush=True)
             time.sleep(13)
+    # 時刻表移除的舊 job (例 已併入晨報的 morning_recap) 一併刪掉, 不留無用的觸發
+    wanted = {PREFIX + s["name"] for s in slots}
+    for title, jid in have.items():
+        if title not in wanted:
+            _api("DELETE", f"/jobs/{jid}", key)
+            print(f"deleted (已不在時刻表) {title}")
     print(f"\n完成 {len(slots)} 個。到 cron-job.org 對任一 job 按「Test run」, "
           "GitHub Actions 頁面應立刻出現一個 workflow_dispatch run (HTTP 204 = 成功)。")
     return 0
