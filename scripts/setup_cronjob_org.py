@@ -148,7 +148,22 @@ def main() -> int:
               f"請確認 token 的 Repository access 有選 {args.repo}, 且 Permissions → Actions = Read and write。")
         return 2
     names = sorted(w.get("path", "").split("/")[-1] for w in r.json().get("workflows", []))
-    print(f"GitHub token OK — 看得到 workflows: {', '.join(names)}")
+    print(f"GitHub token 可讀取 — 看得到 workflows: {', '.join(names)}")
+
+    # 觸發需要 Actions「寫入」權限; 只有讀取權限時上面會通過, 但每次觸發都會 403。
+    # 用一個不存在的分支試觸發: 有寫入權限 → 422 (找不到分支, 什麼都不會執行); 沒有 → 403。
+    probe = requests.post(
+        f"https://api.github.com/repos/{args.repo}/actions/workflows/market_open_alert.yml/dispatches",
+        timeout=30,
+        headers={"Authorization": f"Bearer {gh_token}", "Accept": "application/vnd.github+json",
+                 "X-GitHub-Api-Version": "2022-11-28"},
+        json={"ref": "__permission_probe_no_such_branch__", "inputs": {"market": "monitor"}})
+    if probe.status_code in (401, 403, 404):
+        print(f"GitHub token 沒有觸發權限 (HTTP {probe.status_code}): {probe.text[:200]}\n"
+              f"請到 GitHub token 設定把 Permissions → Repository permissions → Actions 改成 "
+              f"「Read and write」(或重新產生 token), 再跑一次這個腳本。")
+        return 2
+    print(f"GitHub token 可觸發 workflow (權限探測 HTTP {probe.status_code}, 預期 422) ✓")
 
     for s in slots:
         job = build_job(s, args.repo, args.ref, gh_token)
