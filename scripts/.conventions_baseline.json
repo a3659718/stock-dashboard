@@ -2,7 +2,7 @@
   "counts": {
     "claim_rollback": 7,
     "cron_coverage": 0,
-    "orphan_keys": 70
+    "orphan_keys": 75
   },
   "items": {
     "claim_rollback": [
@@ -22,8 +22,12 @@
       "DISPATCH_SOURCE  @ scripts/market_open_alert.py:438",
       "ForeignInvestmentShareRatio  @ radar/analysis/stock_deep_analyzer.py:297",
       "GH_DISPATCH_TOKEN  @ scripts/setup_cronjob_org.py:136",
+      "GITHUB_REF_NAME  @ scripts/punctual_scheduler.py:165",
+      "GITHUB_REPOSITORY  @ scripts/punctual_scheduler.py:164",
+      "GITHUB_TOKEN  @ scripts/punctual_scheduler.py:163",
       "RS  @ radar/screeners/us_actionable.py:221",
       "SBLShortSalesCurrentDayBalance  @ radar/analysis/smart_money_stealth.py:102",
+      "SCHEDULER_AFTER  @ scripts/punctual_scheduler.py:170",
       "US_WATCHLIST  @ scripts/morning_brief.py:376",
       "_part_idx  @ radar/notify/notifier.py:292",
       "_retry_delay_sec  @ scripts/test_tg_regressions.py:93",
@@ -63,7 +67,8 @@
       "scores  @ radar/analysis/ai_confidence_scorer.py:92",
       "sector_type  @ radar/notify/notifier.py:2677",
       "send_message  @ scripts/test_tg_regressions.py:37",
-      "slots  @ scripts/setup_cronjob_org.py:40",
+      "slot  @ scripts/test_punctual_scheduler.py:72",
+      "slots  @ scripts/punctual_scheduler.py:41",
       "source_link  @ radar/data/event_sources.py:144",
       "spot_price  @ radar/alerts/tx_futures_alert.py:201",
       "stock_no  @ radar/alerts/ipo_calendar_alert.py:114",
@@ -75,13 +80,13 @@
       "trading_session  @ radar/analysis/institutional_positioning.py:255",
       "trigger_id  @ app.py:947",
       "tw_symbols  @ app.py:3760",
-      "tz  @ scripts/setup_cronjob_org.py:118",
+      "tz  @ scripts/punctual_scheduler.py:55",
       "update_id  @ scripts/tg_callback_listener.py:290",
       "us_symbols  @ app.py:3759",
       "user_count_limit  @ radar/core/system_health.py:198",
       "user_id  @ Claude outputs/order_bridge.py:750",
       "valuation_label  @ radar/analysis/entry_evaluator.py:333",
-      "workflow  @ scripts/setup_cronjob_org.py:119",
+      "workflow  @ scripts/punctual_scheduler.py:107",
       "workflow_dispatch  @ scripts/test_schedule_guard.py:79",
       "workflows  @ scripts/setup_cronjob_org.py:150",
       "平均報酬  @ scripts/test_dashboard_ui.py:209",

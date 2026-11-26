@@ -1,0 +1,51 @@
+name: Punctual Scheduler
+
+# 在 GitHub Actions 裡常駐的準時排程器 —— 取代 cron-job.org, 不需要任何個人 token。
+# 一輪跑約 5h45m: 到了 scripts/punctual_slots.json 的每個時間點, 用 GITHUB_TOKEN 觸發對應 workflow
+# (workflow_dispatch 幾乎立即開跑, 不像 schedule: 會延遲 4~7 小時)。
+# 開跑時先觸發一個新的自己排隊 (同 concurrency 組只會有 1 個執行 + 1 個排隊),
+# 本輪結束時下一輪立刻接手 → 全天不中斷。
+# 下面的 schedule 只是「斷鏈後自動重啟」的保險 (延遲也沒關係); push 到 main 改了排程相關檔案時也會立刻重啟。
+
+concurrency:
+  group: punctual-scheduler
+  cancel-in-progress: false
+
+on:
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: '啟動原因 (chain = 上一輪接力; manual = 手動啟動)'
+        required: false
+        default: 'manual'
+      after:
+        description: '上一輪負責到的時間 (ISO, 接力時自動帶入, 手動啟動留空)'
+        required: false
+        default: ''
+  schedule:
+    - cron: '41 */3 * * *'   # 斷鏈保險: 每 3 小時嘗試一次 (已有在跑的就排隊等接手)
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/punctual_scheduler.py'
+      - 'scripts/punctual_slots.json'
+      - '.github/workflows/punctual_scheduler.yml'
+
+permissions:
+  actions: write     # 觸發其他 workflow 與下一輪的自己
+  contents: read
+
+jobs:
+  scheduler:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Run punctual scheduler
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SCHEDULER_AFTER: ${{ github.event.inputs.after }}
+        run: python scripts/punctual_scheduler.py --run-minutes 345

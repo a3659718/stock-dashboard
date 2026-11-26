@@ -174,6 +174,14 @@ def notify_stale_skip(slot: str, reason: str) -> None:
         from radar.core import push_dedup as _pd
         if _pd.was_claimed_recently(slot, window_min=960):
             return  # 準時觸發已經推過, 這次被擋的只是重複的 cron 備援
+        # 休市日準時觸發本來就不會推 (所以沒有 claim) → 不是故障, 不提醒
+        try:
+            from radar.core import holiday_check as _hc
+            _mkt = "US" if slot.startswith("us_") else "TW"
+            if _hc.is_market_closed_today(_mkt, today=intended_market_date(_mkt)):
+                return
+        except Exception as _he:
+            print(f"[schedule_guard] holiday check for notice failed (照常提醒): {_he}", flush=True)
         if _pd.was_claimed_recently(_NOTICE_KEY, window_min=20 * 60):
             return  # 今天已經通知過
         from radar.notify import notifier
@@ -182,8 +190,8 @@ def notify_stale_skip(slot: str, reason: str) -> None:
         msg = (f"⏰ <b>推播延遲提醒</b>\n"
                f"「{_html.escape(label)}」因 GitHub 排程延遲而過時，今天未送出。\n"
                f"<i>{_html.escape(reason[:160])}</i>\n\n"
-               f"準時觸發 (cron-job.org) 似乎沒有在運作：請確認 job 是否啟用、GitHub token 是否過期 / "
-               f"Actions 權限為 Read and write，再執行 scripts/setup_cronjob_org.ps1。\n"
+               f"準時觸發似乎沒有在運作：請到 GitHub → Actions → Punctual Scheduler 確認有一個執行中的 run，"
+               f"沒有的話按 Run workflow 啟動 (用 cron-job.org 的話，確認 job 啟用、token 未過期)。\n"
                f"(本提醒每天最多一則)")
         ok, info = notifier.send_message(msg, disable_notification=True, count_as_push=False)
         if ok:

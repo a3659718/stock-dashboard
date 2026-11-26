@@ -22,3 +22,5 @@ pandas_market_calendars>=4.4.0,<6.0.0
 # 導致「安裝好相依套件」之後, Windows 上這個鎖其實還是裝不到、悄悄退化成無鎖
 # 模式 (程式碼有 try/except 接住不會噴錯, 所以完全不會被發現) — 補上讓保護生效。
 portalocker>=2.7.0,<3.0.0
+# zoneinfo 在 Windows 沒有系統時區資料庫, 需要這個套件 (schedule_guard / punctual_scheduler 用)
+tzdata>=2024.1

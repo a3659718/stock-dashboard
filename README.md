@@ -142,17 +142,35 @@ GitHub 官方說明排程在高負載時可能延遲或跳過，調 cron 分鐘�
 
 ### 這次的處理
 
-1. **外部準時觸發（真正的解法）**：由 cron-job.org 在準點呼叫 GitHub API 的 `workflow_dispatch`，
-   這條路徑幾乎立即開跑。運算與 secrets 仍全部在 GitHub，cron-job.org 只負責「按鈴」，電腦不用開。
+1. **準時觸發（真正的解法）**：在準點呼叫 GitHub API 的 `workflow_dispatch`，這條路徑幾乎立即開跑。
+   預設用下面的「GitHub 內建準時排程器」，不需要任何外部服務或個人 token；cron-job.org 為備選。
 2. **遲到守衛 `radar/core/schedule_guard.py`**：GitHub cron 觸發的 run 若遲到超過該推播的容忍值
-   （例如盤前 40 分、開盤 60 分），就**不推送已過時的內容**，避免收盤後才收到「盤前買進」。
-   盤後總結、心跳、週報等晚到仍有價值的不擋；手動 / 外部觸發一律放行。
-   要關閉：repo → Settings → Variables → 新增 `STALE_GUARD` = `0`。
-3. **去重窗 5 小時 → 16 小時**：外部觸發準時推完後，6 小時後才到的 GitHub cron 不會再推一次。
+   （例如盤前 40 分、開盤 60 分，盤前 / 晨報另有 09:00 絕對截止），就**不推送已過時的內容**，
+   避免收盤後才收到「盤前買進」。盤後總結、心跳、週報等晚到仍有價值的不擋；準時 / 手動觸發一律放行。
+   被擋下且準時觸發沒有先推過時，每天會收到一則靜音的「⏰ 推播延遲提醒」。
+   要關閉守衛：repo → Settings → Variables → 新增 `STALE_GUARD` = `0`。
+3. **去重窗 5 小時 → 16 小時**：準時觸發推完後，數小時後才到的 GitHub cron 不會再推一次。
 4. **快取整個 Python 環境**：命中時跳過 `pip install`，每次 run 省 40 ~ 90 秒。
 5. **Telegram 429 限流**：照 Telegram 回應的 `retry_after` 等待後重送（上限 30 秒），不再 1、2 秒就放棄。
 
-### 設定 cron-job.org（一次，約 10 分鐘）
+### GitHub 內建準時排程器（預設，不需設定）
+
+`.github/workflows/punctual_scheduler.yml` + `scripts/punctual_scheduler.py`：
+
+- 一個常駐在 GitHub Actions 的 workflow，每輪約 5 小時 45 分。到了 `scripts/punctual_slots.json`
+  的每個時間點，就用 GitHub 自動提供的 `GITHUB_TOKEN` 觸發對應的 workflow。
+- 開跑時先觸發「下一輪的自己」排隊，本輪結束時下一輪立刻接手，全天不中斷；
+  接手時只補上一輪沒做到的時間點，不會重複觸發。
+- 斷鏈保險：每 3 小時有一條 `schedule:` 嘗試重啟（延遲也沒關係）；push 到 `main` 改了排程相關檔案也會立刻重啟。
+- 查看狀態：GitHub → **Actions → Punctual Scheduler**，應該永遠有一個「執行中」的 run，
+  log 會列出本輪的觸發計畫與每次觸發結果。若沒有在跑，按 **Run workflow** 手動啟動一次即可。
+- 本機預覽觸發計畫：`python scripts/punctual_scheduler.py --plan-hours 24`
+
+> 注意：這個排程器會 24 小時佔用一個 GitHub Actions runner。公開 repo 的 Actions 不收費，但 GitHub 的
+> 使用條款不鼓勵把 Actions 當長駐服務使用，有被限制的風險；若被限制，改用下面的 cron-job.org。
+> 兩者同時開著也不會重複推播（每天一次的推播有去重），只是盤中監控會多跑一次。
+
+### 備選：cron-job.org（一次，約 10 分鐘）
 
 1. **GitHub Fine-grained PAT**：GitHub → Settings → Developer settings → Fine-grained tokens →
    Repository access 只選 `stock-dashboard` → Permissions：**Actions = Read and write**。
@@ -267,6 +285,11 @@ python -m unittest discover -s scripts -p test_dashboard_ui.py   # 真實 Stream
 ---
 
 ## 更新紀錄
+
+### 2026-11-27
+- **GitHub 內建準時排程器**（`punctual_scheduler.yml`）：不需 cron-job.org 或個人 token，接力常駐、準點觸發全部
+  18 個時間點（含盤中監控）。cron-job.org 改為備選。
+- 遲到被擋下的推播每天發一則靜音提醒（休市日不提醒）；`tzdata` 加入 requirements（Windows 時區資料）。
 
 ### 2026-11-06
 - **架構化**：98 個平鋪模組搬進 `radar/` 套件（core / data / notify / analysis / screeners / alerts / ui）。
