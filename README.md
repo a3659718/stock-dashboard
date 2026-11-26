@@ -186,6 +186,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\setup_cronjob_org.ps
 > 盤中監控只在開盤時段內才動作，延遲後落在收盤後 → 盤中警報幾乎全部失效。
 >
 > **GitHub token 到期**後所有 job 會失敗（cron-job.org 會寄信通知），重新產生 token 再跑一次上面的腳本即可。
+>
+> **怎麼知道準時觸發壞了**：時效性推播因 GitHub 延遲被擋下、且準時觸發沒有先推過時，會收到一則靜音的
+> 「⏰ 推播延遲提醒」（每天最多一則）。收到它就代表 cron-job.org 沒在運作（token 過期 / 權限不對 / job 被停用）。
+>
+> **GitHub 60 天規則**：公開 repo 超過 60 天沒有任何 commit，GitHub 會自動停用所有 `schedule:` 排程
+> （備援 cron 全停，準時觸發不受影響）。到 Actions 頁面按「Enable workflow」即可恢復。
 
 > 備案：若不想用第三方服務，`scripts/register_punctual_tasks.ps1` 可註冊到 Windows 工作排程器
 > （需要電腦開機）。

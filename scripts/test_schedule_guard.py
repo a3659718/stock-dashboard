@@ -36,6 +36,33 @@ class ScheduleGuardTests(unittest.TestCase):
         self.assertTrue(g.cron_matches("*/15 * * * *", U(2026, 11, 6, 3, 45)))
 
 
+class StaleNoticeTests(unittest.TestCase):
+    """遲到被擋時每天一則靜音提醒; 準時觸發已推過的 slot 不提醒。"""
+
+    def _run(self, claimed: set):
+        from unittest.mock import patch
+        from radar.core import push_dedup
+        from radar.notify import notifier
+        state = set(claimed)
+        with patch.object(push_dedup, "was_claimed_recently", side_effect=lambda s, window_min=0: s in state), \
+             patch.object(push_dedup, "force_claim", side_effect=lambda s: state.add(s)), \
+             patch.object(notifier, "send_message", return_value=(True, "ok")) as send:
+            g.notify_stale_skip("pre_market_815", "GitHub 排程延遲 400 分鐘")
+            g.notify_stale_skip("tw_open", "GitHub 排程延遲 300 分鐘")
+        return send
+
+    def test_notice_once_per_day(self):
+        send = self._run(set())
+        self.assertEqual(send.call_count, 1)                       # 第二個被擋的 slot 不再重複通知
+        self.assertTrue(send.call_args.kwargs["disable_notification"])
+        self.assertFalse(send.call_args.kwargs["count_as_push"])
+        self.assertIn("盤前 08:15", send.call_args.args[0])
+
+    def test_no_notice_when_punctual_already_pushed(self):
+        send = self._run({"pre_market_815", "tw_open"})
+        send.assert_not_called()
+
+
 class PunctualSlotsTests(unittest.TestCase):
     """準時觸發表 (scripts/punctual_slots.json) 必須對得上 workflow 的 workflow_dispatch 輸入。"""
 

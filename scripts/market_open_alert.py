@@ -421,6 +421,7 @@ def main() -> int:
     _stale = _sg.check_stale(market)
     if _stale:
         print(f"::warning::[schedule_guard] {_stale}", flush=True)
+        _sg.notify_stale_skip(market, _stale)
         return 0
 
     # === 排程去重守衛 (cron drift 防重複) ===

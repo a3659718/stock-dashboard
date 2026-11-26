@@ -436,6 +436,7 @@ def main():
     _stale = _sg.check_stale("morning_brief")
     if _stale:
         print(f"::warning::[morning_brief] {_stale}", flush=True)
+        _sg.notify_stale_skip("morning_brief", _stale)
         return 0
 
     # === 排程去重守衛 ===

@@ -153,3 +153,41 @@ def check_stale(slot: str, now_utc: Optional[dt.datetime] = None,
     except Exception as e:  # 守衛本身出錯絕不能擋推播
         print(f"[schedule_guard] check failed (non-fatal, 照常執行): {e}", flush=True)
         return None
+
+
+_SLOT_LABEL = {
+    "pre_market_815": "盤前 08:15", "pre_market_830": "盤前 08:30", "morning_brief": "08:00 晨報",
+    "tw_open": "台股開盤", "tw_mid": "台股中盤", "us_emerging": "美股新興突破",
+    "us_buy_picks": "美股盤前 BUY", "us_open": "美股開盤", "us_mid": "美股中盤",
+}
+_NOTICE_KEY = "stale_skip_notice"
+
+
+def notify_stale_skip(slot: str, reason: str) -> None:
+    """時效性推播因 cron 遲到被擋下時, 每天最多發一則「靜音」通知, 讓使用者知道漏了什麼。
+
+    Bug fix (2026-11): 遲到守衛擋下過時內容是對的, 但完全靜默 —— 準時觸發沒設好 / token 過期時,
+    使用者連續兩週收不到晨報、盤前、開盤推播, Telegram 上卻沒有任何異常訊號。
+    同一 slot 已被準時觸發推過 (這次只是晚到的 cron 備援) → 不通知。
+    """
+    try:
+        from radar.core import push_dedup as _pd
+        if _pd.was_claimed_recently(slot, window_min=960):
+            return  # 準時觸發已經推過, 這次被擋的只是重複的 cron 備援
+        if _pd.was_claimed_recently(_NOTICE_KEY, window_min=20 * 60):
+            return  # 今天已經通知過
+        from radar.notify import notifier
+        import html as _html
+        label = _SLOT_LABEL.get(slot, slot)
+        msg = (f"⏰ <b>推播延遲提醒</b>\n"
+               f"「{_html.escape(label)}」因 GitHub 排程延遲而過時，今天未送出。\n"
+               f"<i>{_html.escape(reason[:160])}</i>\n\n"
+               f"準時觸發 (cron-job.org) 似乎沒有在運作：請確認 job 是否啟用、GitHub token 是否過期 / "
+               f"Actions 權限為 Read and write，再執行 scripts/setup_cronjob_org.ps1。\n"
+               f"(本提醒每天最多一則)")
+        ok, info = notifier.send_message(msg, disable_notification=True, count_as_push=False)
+        if ok:
+            _pd.force_claim(_NOTICE_KEY)
+        print(f"[schedule_guard] stale notice sent ok={ok} {info}", flush=True)
+    except Exception as e:
+        print(f"[schedule_guard] stale notice failed (non-fatal): {e}", flush=True)
