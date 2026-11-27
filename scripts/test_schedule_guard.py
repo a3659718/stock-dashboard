@@ -62,6 +62,34 @@ class StaleNoticeTests(unittest.TestCase):
         send = self._run({"pre_market_815", "tw_open"})
         send.assert_not_called()
 
+    def test_no_notice_when_punctual_ran_without_pushing(self):
+        # 準時 run 有跑但沒內容可推 (沒有 push claim) → 排程器正常, 不該提醒
+        send = self._run({"punctual_ran:pre_market_815", "punctual_ran:tw_open"})
+        send.assert_not_called()
+
+    def test_no_notice_for_slot_outside_punctual_schedule(self):
+        # 2026-11-27 實際誤報: 已停用的 07:32 morning_recap cron 遲到 342 分 → 發了「準時觸發沒在運作」
+        from unittest.mock import patch
+        from radar.notify import notifier
+        with patch.object(notifier, "send_message", return_value=(True, "ok")) as send:
+            g.notify_stale_skip("morning_recap", "GitHub 排程延遲 342 分鐘")
+        send.assert_not_called()
+        self.assertNotIn("morning_recap", g.STALE_LIMIT_MIN)
+
+    def test_record_punctual_run_only_for_punctual_dispatch(self):
+        from unittest.mock import patch
+        from radar.core import push_dedup
+        with patch.object(push_dedup, "force_claim") as fc:
+            g.record_punctual_run("tw_open", {"GITHUB_EVENT_NAME": "schedule"})
+            g.record_punctual_run("tw_open", {"GITHUB_EVENT_NAME": "workflow_dispatch", "DISPATCH_SOURCE": "manual"})
+            fc.assert_not_called()
+            g.record_punctual_run("tw_open", {"GITHUB_EVENT_NAME": "workflow_dispatch", "DISPATCH_SOURCE": "punctual"})
+            fc.assert_called_once_with("punctual_ran:tw_open")
+
+    def test_every_guarded_slot_is_in_punctual_schedule(self):
+        # 有遲到守衛的 slot 都要有準時觸發, 否則守衛只會讓它永遠不推
+        self.assertTrue(set(g.STALE_LIMIT_MIN) <= g._punctual_slot_names())
+
 
 class PunctualSlotsTests(unittest.TestCase):
     """準時觸發表 (scripts/punctual_slots.json) 必須對得上 workflow 的 workflow_dispatch 輸入。"""

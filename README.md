@@ -147,7 +147,8 @@ GitHub 官方說明排程在高負載時可能延遲或跳過，調 cron 分鐘�
 2. **遲到守衛 `radar/core/schedule_guard.py`**：GitHub cron 觸發的 run 若遲到超過該推播的容忍值
    （例如盤前 40 分、開盤 60 分，盤前 / 晨報另有 09:00 絕對截止），就**不推送已過時的內容**，
    避免收盤後才收到「盤前買進」。盤後總結、心跳、週報等晚到仍有價值的不擋；準時 / 手動觸發一律放行。
-   被擋下且準時觸發沒有先推過時，每天會收到一則靜音的「⏰ 推播延遲提醒」。
+   被擋下且準時觸發當天沒有跑到時，每天會收到一則靜音的「⏰ 推播延遲提醒」
+   （準時 run 有跑但沒內容可推、或該 slot 不在準時排程內，都不會提醒）。
    要關閉守衛：repo → Settings → Variables → 新增 `STALE_GUARD` = `0`。
 3. **去重窗 5 小時 → 16 小時**：準時觸發推完後，數小時後才到的 GitHub cron 不會再推一次。
 4. **快取整個 Python 環境**：命中時跳過 `pip install`，每次 run 省 40 ~ 90 秒。
@@ -206,7 +207,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\setup_cronjob_org.ps
 > **GitHub token 到期**後所有 job 會失敗（cron-job.org 會寄信通知），重新產生 token 再跑一次上面的腳本即可。
 >
 > **怎麼知道準時觸發壞了**：時效性推播因 GitHub 延遲被擋下、且準時觸發沒有先推過時，會收到一則靜音的
-> 「⏰ 推播延遲提醒」（每天最多一則）。收到它就代表 cron-job.org 沒在運作（token 過期 / 權限不對 / job 被停用）。
+> 「⏰ 推播延遲提醒」（每天最多一則）。收到它就代表準時觸發沒在運作：先看 Actions → Punctual Scheduler
+> 有沒有執行中的 run；用 cron-job.org 的話再檢查 token 過期 / 權限不對 / job 被停用。
 >
 > **GitHub 60 天規則**：公開 repo 超過 60 天沒有任何 commit，GitHub 會自動停用所有 `schedule:` 排程
 > （備援 cron 全停，準時觸發不受影響）。到 Actions 頁面按「Enable workflow」即可恢復。
@@ -290,6 +292,8 @@ python -m unittest discover -s scripts -p test_dashboard_ui.py   # 真實 Stream
 - **GitHub 內建準時排程器**（`punctual_scheduler.yml`）：不需 cron-job.org 或個人 token，接力常駐、準點觸發全部
   18 個時間點（含盤中監控）。cron-job.org 改為備選。
 - 遲到被擋下的推播每天發一則靜音提醒（休市日不提醒）；`tzdata` 加入 requirements（Windows 時區資料）。
+- **修正誤報的「推播延遲提醒」**：已停用的 07:32 `morning_recap` cron 遲到 342 分被擋下時，誤報「準時觸發沒在運作」。
+  移除該 cron 與其守衛；只有準時排程內的 slot 才提醒；準時 run 有跑但沒內容可推（例如沒有符合條件的股票）也不再誤報。
 
 ### 2026-11-06
 - **架構化**：98 個平鋪模組搬進 `radar/` 套件（core / data / notify / analysis / screeners / alerts / ui）。

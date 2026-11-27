@@ -2,7 +2,7 @@
   "counts": {
     "claim_rollback": 7,
     "cron_coverage": 0,
-    "orphan_keys": 75
+    "orphan_keys": 74
   },
   "items": {
     "claim_rollback": [
@@ -19,7 +19,6 @@
       "ALL  @ radar/core/pick_review.py:243",
       "Adj Close  @ radar/analysis/policy_regime.py:153",
       "CRONJOB_API_KEY  @ scripts/setup_cronjob_org.py:123",
-      "DISPATCH_SOURCE  @ scripts/market_open_alert.py:438",
       "ForeignInvestmentShareRatio  @ radar/analysis/stock_deep_analyzer.py:297",
       "GH_DISPATCH_TOKEN  @ scripts/setup_cronjob_org.py:136",
       "GITHUB_REF_NAME  @ scripts/punctual_scheduler.py:165",
@@ -41,7 +40,7 @@
       "change  @ radar/alerts/analyst_insider_alert.py:109",
       "chat  @ scripts/tg_callback_listener.py:254",
       "clean_energy_grid  @ scripts/test_policy_regime.py:34",
-      "company  @ scripts/market_open_alert.py:1440",
+      "company  @ scripts/market_open_alert.py:1442",
       "count_as_push  @ scripts/test_schedule_guard.py:58",
       "dates  @ Claude outputs/order_bridge.py:134",
       "db_path  @ Claude outputs/order_bridge.py:115",
@@ -55,7 +54,7 @@
       "last_year_revenue  @ radar/analysis/stock_deep_analyzer.py:555",
       "listing_date  @ radar/alerts/ipo_calendar_alert.py:110",
       "main_broker_net_pct  @ radar/analysis/entry_evaluator.py:484",
-      "options  @ scripts/test_schedule_guard.py:83",
+      "options  @ scripts/test_schedule_guard.py:111",
       "ownership  @ radar/screeners/us_screener.py:385",
       "password  @ Claude outputs/order_bridge.py:751",
       "path  @ scripts/setup_cronjob_org.py:150",
@@ -67,8 +66,8 @@
       "scores  @ radar/analysis/ai_confidence_scorer.py:92",
       "sector_type  @ radar/notify/notifier.py:2677",
       "send_message  @ scripts/test_tg_regressions.py:37",
-      "slot  @ scripts/test_punctual_scheduler.py:72",
-      "slots  @ scripts/punctual_scheduler.py:41",
+      "slot  @ radar/core/schedule_guard.py:176",
+      "slots  @ radar/core/schedule_guard.py:174",
       "source_link  @ radar/data/event_sources.py:144",
       "spot_price  @ radar/alerts/tx_futures_alert.py:201",
       "stock_no  @ radar/alerts/ipo_calendar_alert.py:114",
@@ -87,7 +86,7 @@
       "user_id  @ Claude outputs/order_bridge.py:750",
       "valuation_label  @ radar/analysis/entry_evaluator.py:333",
       "workflow  @ scripts/punctual_scheduler.py:107",
-      "workflow_dispatch  @ scripts/test_schedule_guard.py:79",
+      "workflow_dispatch  @ scripts/test_schedule_guard.py:107",
       "workflows  @ scripts/setup_cronjob_org.py:150",
       "平均報酬  @ scripts/test_dashboard_ui.py:209",
       "總命中筆數  @ scripts/test_dashboard_ui.py:208"

@@ -423,6 +423,8 @@ def main() -> int:
         print(f"::warning::[schedule_guard] {_stale}", flush=True)
         _sg.notify_stale_skip(market, _stale)
         return 0
+    if market != "monitor":
+        _sg.record_punctual_run(market)  # 準時 run 有跑到 (不論有沒有推), 給延遲提醒判斷用
 
     # === 排程去重守衛 (cron drift 防重複) ===
     # 一天只該推一次的 slot (tw_open / us_close / morning_recap …) 若因 cron drift

@@ -26,7 +26,7 @@ STALE_LIMIT_MIN = {
     "pre_market_815": 40,    # 08:17 → 08:57 前送到才趕得上 09:00 開盤
     "pre_market_830": 30,    # 08:33 → 09:03
     "morning_brief": 55,     # 08:02 → 08:57
-    "morning_recap": 90,     # 07:32 → 09:02
+    # morning_recap 已併入 08:00 晨報 (no-op, cron 已移除), 不再列管
     "tw_open": 60,           # 09:32 → 10:32
     "tw_mid": 90,            # 11:02 → 12:32 (13:30 收盤前)
     "us_emerging": 150,      # 美股開盤前 ~2.5hr → 開盤前
@@ -161,6 +161,39 @@ _SLOT_LABEL = {
     "us_buy_picks": "美股盤前 BUY", "us_open": "美股開盤", "us_mid": "美股中盤",
 }
 _NOTICE_KEY = "stale_skip_notice"
+_RAN_PREFIX = "punctual_ran:"
+
+
+def _punctual_slot_names() -> set:
+    """scripts/punctual_slots.json 裡由準時排程器負責的 slot (用 inputs 的 market/slot 名稱)。"""
+    try:
+        import json
+        from pathlib import Path
+        p = Path(__file__).resolve().parents[2] / "scripts" / "punctual_slots.json"
+        out = set()
+        for s in json.loads(p.read_text(encoding="utf-8"))["slots"]:
+            inp = s.get("inputs") or {}
+            out.add(inp.get("slot") or inp.get("market") or s["name"])
+        return out
+    except Exception as e:
+        print(f"[schedule_guard] read punctual_slots.json failed: {e}", flush=True)
+        return set()
+
+
+def record_punctual_run(slot: str, env: Optional[dict] = None) -> None:
+    """準時觸發 (DISPATCH_SOURCE=punctual) 的 run 一開跑就登記「有準時跑到」(不論最後有沒有推)。
+
+    為什麼: 準時 run 可能合理地不推 (沒有符合條件的股票、資料源掛掉…) → 不會留下 push claim,
+    之後遲到的 cron 備援被守衛擋下時就誤判「準時觸發沒在運作」而發提醒。
+    """
+    env = os.environ if env is None else env
+    if env.get("GITHUB_EVENT_NAME") != "workflow_dispatch" or env.get("DISPATCH_SOURCE") != "punctual":
+        return
+    try:
+        from radar.core import push_dedup as _pd
+        _pd.force_claim(_RAN_PREFIX + slot)
+    except Exception as e:
+        print(f"[schedule_guard] record_punctual_run failed (non-fatal): {e}", flush=True)
 
 
 def notify_stale_skip(slot: str, reason: str) -> None:
@@ -171,9 +204,16 @@ def notify_stale_skip(slot: str, reason: str) -> None:
     同一 slot 已被準時觸發推過 (這次只是晚到的 cron 備援) → 不通知。
     """
     try:
+        # Bug fix (2026-11-27): 不在準時排程裡的 slot (例如已停用的 07:32 morning_recap)
+        # 本來就不會有準時 run → 每天都誤報「準時觸發沒在運作」。這種只記 log 不提醒。
+        if slot not in _punctual_slot_names():
+            print(f"[schedule_guard] '{slot}' 不在準時排程內, 不發延遲提醒", flush=True)
+            return
         from radar.core import push_dedup as _pd
         if _pd.was_claimed_recently(slot, window_min=960):
             return  # 準時觸發已經推過, 這次被擋的只是重複的 cron 備援
+        if _pd.was_claimed_recently(_RAN_PREFIX + slot, window_min=960):
+            return  # 準時 run 有跑 (只是那次沒有內容可推), 排程器正常
         # 休市日準時觸發本來就不會推 (所以沒有 claim) → 不是故障, 不提醒
         try:
             from radar.core import holiday_check as _hc

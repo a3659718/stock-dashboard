@@ -438,6 +438,7 @@ def main():
         print(f"::warning::[morning_brief] {_stale}", flush=True)
         _sg.notify_stale_skip("morning_brief", _stale)
         return 0
+    _sg.record_punctual_run("morning_brief")  # 準時 run 有跑到 (不論有沒有推), 給延遲提醒判斷用
 
     # === 排程去重守衛 ===
     # 為什麼晨報也需要: GitHub Actions 的 cron 排隊延遲不可控 (常 1~2 小時),
