@@ -73,7 +73,7 @@ def _claim_main_now(market: str) -> None:
     try:
         from radar.core import push_dedup as _pdc
         if _pdc.should_guard(market) and not _RUN_FLAGS.get("claimed"):
-            _pdc.force_claim(market)
+            _pdc.claim_day(market)
             _RUN_FLAGS["claimed"] = True
             print(f"[push_dedup] '{market}' 主推播已送達 → 立即登記 claim", flush=True)
     except Exception as _e:
@@ -455,9 +455,11 @@ def main() -> int:
             if _is_manual:
                 print(f"[push_dedup] 手動 / 準時觸發 '{market}' — 不被去重擋; 送達後才登記 claim",
                       flush=True)
-            if (not _is_manual) and _pd.was_claimed_recently(market, window_min=_DEDUP_WINDOW_MIN):
+            # 2026-11-27: 改成「同一個交易日」才算重複 (見 push_dedup.claimed_for_day);
+            # 原本 16 小時窗會讓昨天晚到的 cron 擋掉今天的準時推播。
+            if (not _is_manual) and _pd.claimed_for_day(market):
                 # 唯讀檢查 — 前面已經有一次「成功推出去」的 run, 這次是重複觸發
-                print(f"[push_dedup] '{market}' 稍早已成功推播過, 本次跳過。", flush=True)
+                print(f"[push_dedup] '{_pd.day_key(market)}' 已成功推播過, 本次跳過。", flush=True)
                 return 0
             if True:
                 # 還沒人推過 (或手動觸發) → 這次去跑。等真的送出成功了才登記 claim,
@@ -479,7 +481,7 @@ def main() -> int:
                                   f"備援 cron 仍可補推", flush=True)
                             return
                         if getattr(notifier, "SEND_OK_COUNT", 0) > _b:
-                            _pd.force_claim(_m)
+                            _pd.claim_day(_m)
                             print(f"[push_dedup] '{_m}' 本次有成功推播 → 登記 claim", flush=True)
                         else:
                             print(f"[push_dedup] '{_m}' 本次一封都沒推出去 → 不登記, "

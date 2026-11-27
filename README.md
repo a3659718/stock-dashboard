@@ -309,6 +309,9 @@ python -m unittest discover -s scripts -p test_dashboard_ui.py   # 真實 Stream
   例如 Dashboard 週一早上被當成週末。美股相關（財報、IPO、8-K、美股開盤日）用美東日期。
 - 新聞警報：同一則新聞同時命中持倉與主清單時，一定保留持倉版本（會響鈴），不再看哪個執行緒先跑完。
 - GitHub Actions 升到 Node 24 版本（checkout v5、setup-python v6、cache v5），消除 Node 20 淘汰警告。
+- **修正：盤後總結被「昨天晚到的 cron」擋掉**。11-26 的 15:03 收盤 cron 被 GitHub 延遲到 11-27 01:33 才跑並推播，
+  去重用的是 16 小時時間窗 → 11-27 15:00 準時那次被當成「已推過」而跳過，當天盤後總結沒送。
+  去重改成以「交易日」為單位（`收盤@2026-11-27`；美股用美東日期），昨天的晚到推播只會擋昨天。
 
 ### 2026-11-06
 - **架構化**：98 個平鋪模組搬進 `radar/` 套件（core / data / notify / analysis / screeners / alerts / ui）。

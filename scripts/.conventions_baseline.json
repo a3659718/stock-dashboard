@@ -39,7 +39,7 @@
       "change  @ radar/alerts/analyst_insider_alert.py:111",
       "chat  @ scripts/tg_callback_listener.py:254",
       "clean_energy_grid  @ scripts/test_policy_regime.py:34",
-      "company  @ scripts/market_open_alert.py:1443",
+      "company  @ scripts/market_open_alert.py:1445",
       "count_as_push  @ scripts/test_schedule_guard.py:58",
       "dates  @ Claude outputs/order_bridge.py:134",
       "db_path  @ Claude outputs/order_bridge.py:115",

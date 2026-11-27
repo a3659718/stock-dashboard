@@ -168,6 +168,58 @@ def reset(slot: Optional[str] = None) -> None:
         print(f"[push_dedup] reset fail: {e}", flush=True)
 
 
+# ---------------------------------------------------------------------------
+# 以「交易日」為單位的去重 (2026-11-27 修)
+# ---------------------------------------------------------------------------
+# Bug: 原本只用「16 小時時間窗」判斷是否推過。11-26 的 15:03 tw_close cron 被 GitHub 延遲
+# 10.5 小時, 11-27 01:33 才跑 (tw_close 晚到仍有價值, 沒有遲到守衛) → 推了昨天的盤後並登記
+# claim → 11-27 15:00 準時觸發只隔 13.5 小時, 被當成「已推過」跳過 → 當天盤後總結整封遺失。
+# 修法: claim 的 key 帶上「這次 run 負責的交易日」(cron run 用排定時間的當地日期, 準時 / 手動
+# 用現在的當地日期; 美股 slot 用美東日期)。昨天的晚到 run 只會擋昨天, 不會擋今天。
+_DAY_WINDOW_MIN = 24 * 60
+
+
+def _slot_market(slot: str) -> str:
+    return "US" if str(slot).startswith("us_") else "TW"
+
+
+def run_market_date(slot: str):
+    """這次 run 負責的交易日 (date)。"""
+    mkt = _slot_market(slot)
+    try:
+        from radar.core import schedule_guard as _sg
+        d = _sg.intended_market_date(mkt)
+        if d is not None:
+            return d
+    except Exception as e:
+        print(f"[push_dedup] intended_market_date 失敗, 改用現在日期: {e}", flush=True)
+    from radar.core import clock as _clock
+    return _clock.market_today(mkt)
+
+
+def day_key(slot: str, market_date=None) -> str:
+    d = market_date or run_market_date(slot)
+    return f"{slot}@{d.isoformat()}"
+
+
+def claimed_for_day(slot: str, market_date=None) -> bool:
+    """這個 slot 在「這次 run 負責的交易日」是否已成功推過。"""
+    try:
+        return was_claimed_recently(day_key(slot, market_date), window_min=_DAY_WINDOW_MIN)
+    except Exception as e:
+        print(f"[push_dedup] claimed_for_day({slot}) 失敗, fail-open 照送: {e}", flush=True)
+        return False
+
+
+def claim_day(slot: str, market_date=None) -> None:
+    """登記「這個交易日已推過」; 同時更新不帶日期的舊 key (延遲提醒等仍用它判斷近期是否推過)。"""
+    force_claim(slot)
+    try:
+        force_claim(day_key(slot, market_date))
+    except Exception as e:
+        print(f"[push_dedup] claim_day({slot}) 失敗 (non-fatal): {e}", flush=True)
+
+
 # 一天會跑很多次、本來就不該 dedup 的 slot (caller 可參考)
 MULTI_RUN_SLOTS = frozenset({"monitor"})
 

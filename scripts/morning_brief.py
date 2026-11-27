@@ -458,7 +458,7 @@ def main():
             # Bug fix: 原本在「送出前」就 force_claim → 準時觸發那次若組稿 / 送出失敗,
             # 晚到的 cron 備援會被擋掉, 當天沒有晨報。送成功後下面才 claim (原本就有)。
             print("[morning_brief] 手動 / 準時觸發 — 不被去重擋; 送達後才登記 claim", flush=True)
-        elif _pd.was_claimed_recently(_slot, window_min=DEDUP_WINDOW_MIN):
+        elif _pd.claimed_for_day(_slot):  # 同一個交易日才算重複 (2026-11-27 修, 見 push_dedup)
             # 唯讀檢查。注意「已成功推過」才算數 —— claim 是在下面送出成功後才登記的,
             # 若 08:02 那班在組稿階段就掛了, 這裡不會被擋, 08:13 / 08:27 的備援 cron
             # 仍然補得上。 (若在這裡就先 claim, 備援等於被自己廢掉。)
@@ -478,7 +478,7 @@ def main():
         # 推成功了才登記 claim → 備援 cron 之後才會被擋掉
         try:
             from radar.core import push_dedup as _pd2
-            _pd2.force_claim("morning_brief")
+            _pd2.claim_day("morning_brief")
         except Exception as _ce:
             print(f"[morning_brief] claim 登記失敗 (non-fatal): {_ce}", flush=True)
         return 0
