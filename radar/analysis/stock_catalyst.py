@@ -21,6 +21,7 @@ from typing import Dict, List, Optional
 import pandas as pd
 import streamlit as st
 
+from radar.core import clock
 from radar.data import data_sources as ds
 
 
@@ -123,7 +124,7 @@ def fetch_news_for_stock(stock_id: str, market: str = "TW", max_items: int = 8,
     items: List[Dict] = []
 
     if market == "TW":
-        today = dt.date.today()
+        today = clock.tpe_today()  # 台股 FinMind 新聞區間 (#16)
         end = today.strftime("%Y-%m-%d")
         start = (today - dt.timedelta(days=days)).strftime("%Y-%m-%d")
         # 1) FinMind TaiwanStockNews
@@ -157,7 +158,7 @@ def fetch_news_for_stock(stock_id: str, market: str = "TW", max_items: int = 8,
                         ppt = it.get("providerPublishTime")
                         if ppt:
                             try:
-                                ts = dt.datetime.fromtimestamp(int(ppt)).strftime("%Y-%m-%d")
+                                ts = clock.tpe_date_from_ts(int(ppt)).strftime("%Y-%m-%d")  # 發布日以台北日期顯示 (#16)
                             except Exception:
                                 pass
                         items.append({
@@ -179,7 +180,7 @@ def fetch_news_for_stock(stock_id: str, market: str = "TW", max_items: int = 8,
         ppt = it.get("providerPublishTime")
         if ppt:
             try:
-                ts = dt.datetime.fromtimestamp(int(ppt)).strftime("%Y-%m-%d")
+                ts = clock.tpe_date_from_ts(int(ppt)).strftime("%Y-%m-%d")  # 發布日以台北日期顯示 (#16)
             except Exception:
                 pass
         items.append({

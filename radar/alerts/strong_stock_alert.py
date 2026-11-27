@@ -129,13 +129,12 @@ def _stock_strength_metrics(stock_id: str) -> Optional[Dict]:
         prev_close = float(prev_bars["Close"].iloc[-1]) if not prev_bars.empty else today_open
         # 今日漲幅 (對昨收)
         today_pct = (current / prev_close - 1) * 100 if prev_close > 0 else 0
-        # 量比 (今日累計 / 過去 5 日平均當日量)
-        if not prev_bars.empty:
-            prev_daily = prev_bars.groupby("_d")["Volume"].sum()
-            avg_daily_vol = float(prev_daily.tail(5).mean()) if len(prev_daily) >= 1 else 0
-        else:
-            avg_daily_vol = 0
-        vol_ratio = today_vol / avg_daily_vol if avg_daily_vol > 0 else 0
+        # 量比 (時間校正): 今日累計 ÷ 前幾日「同一時鐘時間」的累計量平均
+        # Bug fix (audit #2): 原本是 今日盤中累計 ÷ 過去 5 日「整天」平均量, 開盤 30 分鐘
+        # 正常步調的股票也只有 0.1~0.3 → 下面 vr<0.8 / ≥1.5 門檻幾乎只放行爆量 5 倍的股票。
+        # 現在 1.0 = 以這個時間點來說是正常量; 收盤後等同整日量比。
+        from radar.data import intraday_volume as _iv
+        vol_ratio = _iv.intraday_volume_ratio(df, market="TW", lookback_days=5) or 0
         return {
             "stock_id": stock_id,
             "current": round(current, 2),
@@ -268,7 +267,7 @@ def check_and_push_if_surge() -> Optional[Dict]:
         from radar.core import watchlist_store
         state = watchlist_store.load_monitor_state()
         ssa = state.setdefault("strong_stock_alert", {})
-        today_str = dt.date.today().strftime("%Y-%m-%d")
+        today_str = (dt.datetime.utcnow() + dt.timedelta(hours=8)).date().strftime("%Y-%m-%d")
         sent_today = ssa.get(today_str, [])
         trigger_key = surge.get("trigger_key") or surge.get("trigger", "")  # 穩定 key, 不含即時漲幅 (原本每 tick 都不同 → 大漲日每 30 分重推)
         if trigger_key in sent_today:
@@ -278,7 +277,7 @@ def check_and_push_if_surge() -> Optional[Dict]:
         #          會 NameError(被外層 except 吞), 害成功的推播被記成失敗且未去重 → 下個 tick 重複推.
         sent_today = []
         ssa = {}
-        today_str = dt.date.today().strftime("%Y-%m-%d")
+        today_str = (dt.datetime.utcnow() + dt.timedelta(hours=8)).date().strftime("%Y-%m-%d")
         trigger_key = surge.get("trigger_key") or surge.get("trigger", "")  # 穩定 key, 不含即時漲幅 (原本每 tick 都不同 → 大漲日每 30 分重推)
         state = None
 
@@ -533,7 +532,7 @@ def check_and_push_intraday_strong() -> Optional[Dict]:
         from radar.core import watchlist_store
         state = watchlist_store.load_monitor_state()
         isa = state.setdefault("intraday_strong_alert", {})
-        today_str = dt.date.today().strftime("%Y-%m-%d")
+        today_str = (dt.datetime.utcnow() + dt.timedelta(hours=8)).date().strftime("%Y-%m-%d")
         today_data = isa.setdefault(today_str, {"count": 0, "last_ts": None})
         # daily cap
         if today_data.get("count", 0) >= INTRADAY_STRONG_DAILY_CAP:

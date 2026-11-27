@@ -20,6 +20,7 @@ import re
 import time
 from typing import Dict, List, Optional
 
+from radar.core import clock
 from radar.data import data_sources as ds
 
 try:
@@ -290,7 +291,10 @@ def _earnings_in_days(symbol: str) -> Optional[int]:
         print("[theme_analyzer] " + symbol + " earnings convert failed: " + str(e), flush=True)
         return None
 
-    today = dt.date.today()
+    # 財報日依掛牌市場算 (#16): 台股代號用台北日期, 其餘 (美股) 用美東日期
+    _sym = str(symbol).upper()
+    _is_tw = _sym.endswith((".TW", ".TWO")) or _sym.isdigit()
+    today = clock.tpe_today() if _is_tw else clock.et_today()
     delta = (d - today).days
     if delta < -30 or delta > 365:
         return None

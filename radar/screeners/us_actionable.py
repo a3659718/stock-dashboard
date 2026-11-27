@@ -15,6 +15,7 @@ from typing import Dict, List, Optional
 from functools import lru_cache
 
 from radar.data import data_sources as ds
+from radar.core import clock
 
 
 # Sector ETF mapping (給 sector strength 用)
@@ -93,7 +94,7 @@ def _add_earnings_guard(pick: Dict, fund: Dict) -> None:
         import datetime as dt
         ed_str = str(ed)[:10]
         ed_date = dt.datetime.strptime(ed_str, "%Y-%m-%d").date()
-        days_to = (ed_date - dt.date.today()).days
+        days_to = (ed_date - clock.et_today()).days  # 美股財報日: 美東日期 (#16)
         if 0 <= days_to <= 3:
             pick.setdefault("warnings", []).append(
                 f"⚠️ 財報 {ed_str} ({days_to} 天內), 進場跳空風險高"

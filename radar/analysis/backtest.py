@@ -7,6 +7,12 @@ backtest.py
   - 對每個命中的股票，算 +5d / +10d / +20d 的後續漲跌幅
   - 彙整勝率、平均報酬、最大跌幅
 
+進場規則 = 隔日開盤進場 (2026-11-27 修正, audit #1)：
+  - 訊號用 T (含) 以前的日線算；T 日收盤後才知道訊號, 所以不能用 T 日收盤價進場。
+  - 進場價 = T+1 開盤 (開盤缺失 / 0 才退回 T+1 收盤；沒有 T+1 K 棒則跳過該訊號)。
+  - r{N}d = T+N 收盤 / 進場價 - 1 (持有天數從 T+1 起算)；max_high_20d / max_low_20d 也從進場後算。
+  - ⚠️ 2026-11-27 之前跑出來的勝率 / 報酬是「T 日收盤進場」, 與現在的結果不可直接比較。
+
 只回測 daily-only 條件 (純價量計算的)，避開法人/融資融券 (要每天打 API 太貴)：
   - break_ma             突破月/季線
   - volume_burst         量爆
@@ -24,6 +30,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
+from radar.analysis.backtest_upside import ENTRY_RULE, _next_open_entry
 from radar.data import data_sources as ds
 from radar.screeners import tw_screener as tw
 
@@ -56,26 +63,39 @@ def _run_one_condition(cond: str, daily_slice: pd.DataFrame, params: tw.TWParams
 
 def _forward_returns(daily_for_stock: pd.DataFrame, as_of: pd.Timestamp,
                       horizons=(5, 10, 20)) -> Dict[str, float]:
-    """以 as_of 那天的收盤為基準，算 +N 天的報酬 (%)."""
+    """訊號日 = as_of (T)；以 T+1 開盤為進場價 (隔日開盤進場)，算持有 N 天 (T+1 起算) 的報酬 (%).
+
+    舊版用 T 日收盤當基準 — 訊號是 T 日收盤後才算得出來, 實盤不可能用 T 收盤成交 → 報酬 / 勝率被高估。
+    T 日沒有 K 棒 (停牌 / 資料缺) 或沒有 T+1 K 棒 → 回傳 {} (呼叫端跳過)。
+    """
     base_row = daily_for_stock[daily_for_stock["date"] == as_of]
     if base_row.empty:
         return {}
-    base_close = float(base_row["close"].iloc[0])
-    if base_close <= 0:
+    signal_close = float(base_row["close"].iloc[0])
+    after = daily_for_stock[daily_for_stock["date"] > as_of].sort_values("date").reset_index(drop=True)
+    entry = _next_open_entry(after)
+    if entry is None:
         return {}
-    after = daily_for_stock[daily_for_stock["date"] > as_of].sort_values("date")
-    out = {}
+    entry_date, entry_price, entry_basis = entry
+    out = {
+        "signal_close": round(signal_close, 2),
+        "entry_date": entry_date.date(),
+        "entry_price": round(entry_price, 2),
+        "entry_basis": entry_basis,
+    }
     for h in horizons:
         if len(after) >= h:
             future_close = float(after.iloc[h - 1]["close"])
-            out[f"r{h}d"] = (future_close / base_close - 1) * 100
+            out[f"r{h}d"] = (future_close / entry_price - 1) * 100
         else:
             out[f"r{h}d"] = None
-    # 期間內最大 drawdown / 最大上漲
-    if not after.empty:
-        within = after.head(20)
-        out["max_high_20d"] = (within["high"].max() / base_close - 1) * 100 if "high" in within else None
-        out["max_low_20d"] = (within["low"].min() / base_close - 1) * 100 if "low" in within else None
+    # 期間內最大 drawdown / 最大上漲 — 只看進場之後的 K 棒
+    # (開盤進場: T+1 整根都在進場後; 退回收盤進場: T+1 的高低點在進場前, 跳過)
+    path_start = 0 if entry_basis == "open" else 1
+    within = after.iloc[path_start:20]
+    if not within.empty:
+        out["max_high_20d"] = (within["high"].max() / entry_price - 1) * 100 if "high" in within else None
+        out["max_low_20d"] = (within["low"].min() / entry_price - 1) * 100 if "low" in within else None
     return out
 
 
@@ -89,7 +109,7 @@ def run_backtest(stock_universe: List[str], conditions: List[str],
     - days_back: 回測 N 個交易日
     """
     params = params or tw.TWParams()
-    today = dt.date.today()
+    today = (dt.datetime.utcnow() + dt.timedelta(hours=8)).date()
     end = today.strftime("%Y-%m-%d")
     # 多抓 50 天緩衝以利 MA60 計算
     start = (today - dt.timedelta(days=days_back + 150)).strftime("%Y-%m-%d")
@@ -128,6 +148,8 @@ def run_backtest(stock_universe: List[str], conditions: List[str],
                 if sid not in by_stock:
                     continue
                 fwd = _forward_returns(by_stock[sid], pd.Timestamp(as_of))
+                if not fwd:
+                    continue  # 沒有 T 日 / T+1 K 棒 → 實盤無法進場, 不計入命中
                 rows.append({
                     "as_of": pd.Timestamp(as_of).date(),
                     "stock_id": sid,
@@ -158,6 +180,7 @@ def run_backtest(stock_universe: List[str], conditions: List[str],
             summary_rows.append({
                 "condition": tw.CONDITION_LABELS.get(cond, cond),
                 "horizon": f"+{h}d",
+                "進場方式": ENTRY_RULE,
                 "命中次數": len(valid),
                 "勝率%": round(float((valid > 0).mean() * 100), 1),
                 "平均%": round(float(valid.mean()), 2),
@@ -172,6 +195,7 @@ def run_backtest(stock_universe: List[str], conditions: List[str],
         "summary": summary,
         "as_of_range": (eligible[0], eligible[-1]),
         "n_trading_days": len(eligible),
+        "entry_rule": ENTRY_RULE,
     }
 
 
@@ -179,7 +203,7 @@ def run_combo_backtest(stock_universe: List[str], conditions: List[str],
                        days_back: int = 60, params: tw.TWParams | None = None) -> dict:
     """組合回測：要求多個條件同時命中才算。"""
     params = params or tw.TWParams()
-    today = dt.date.today()
+    today = (dt.datetime.utcnow() + dt.timedelta(hours=8)).date()
     end = today.strftime("%Y-%m-%d")
     start = (today - dt.timedelta(days=days_back + 150)).strftime("%Y-%m-%d")
 
@@ -209,6 +233,8 @@ def run_combo_backtest(stock_universe: List[str], conditions: List[str],
             if sid not in by_stock:
                 continue
             fwd = _forward_returns(by_stock[sid], pd.Timestamp(as_of))
+            if not fwd:
+                continue  # 沒有 T 日 / T+1 K 棒 → 不計入
             rows.append({"as_of": pd.Timestamp(as_of).date(), "stock_id": sid, **fwd})
 
     if not rows:
@@ -223,6 +249,7 @@ def run_combo_backtest(stock_universe: List[str], conditions: List[str],
         summary_rows.append({
             "組合": " + ".join(tw.CONDITION_LABELS.get(c, c) for c in conditions),
             "horizon": f"+{h}d",
+            "進場方式": ENTRY_RULE,
             "命中次數": len(valid),
             "勝率%": round(float((valid > 0).mean() * 100), 1),
             "平均%": round(float(valid.mean()), 2),
@@ -230,4 +257,4 @@ def run_combo_backtest(stock_universe: List[str], conditions: List[str],
             "最大漲%": round(float(valid.max()), 2),
             "最大跌%": round(float(valid.min()), 2),
         })
-    return {"raw": df, "summary": pd.DataFrame(summary_rows)}
+    return {"raw": df, "summary": pd.DataFrame(summary_rows), "entry_rule": ENTRY_RULE}

@@ -16,6 +16,7 @@ from typing import Dict, List, Optional, Tuple
 import pandas as pd
 import streamlit as st
 
+from radar.core import clock
 from radar.data import data_sources as ds
 from radar.screeners import tw_screener as tw
 
@@ -347,7 +348,7 @@ def build_prompt(stock_meta: Dict, daily: pd.DataFrame, ind: pd.DataFrame,
 # ---------------------------------------------------------------------------
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_stock_news(stock_id: str, days: int = 14) -> pd.DataFrame:
-    today = dt.date.today()
+    today = clock.tpe_today()  # FinMind 台股新聞查詢區間用台北日期 (#16)
     end = today.strftime("%Y-%m-%d")
     start = (today - dt.timedelta(days=days)).strftime("%Y-%m-%d")
     try:

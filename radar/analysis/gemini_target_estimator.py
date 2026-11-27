@@ -21,6 +21,7 @@ Usage:
 from __future__ import annotations
 
 import datetime as dt
+from radar.core import clock
 import json
 import os
 import re
@@ -84,7 +85,7 @@ def estimate_target(symbol: str, current_price: float,
 
     回傳 {target_3m, target_6m, confidence, reasoning, bull_target, bear_target}
     """
-    today_str = dt.date.today().isoformat()
+    today_str = clock.tpe_today().isoformat()  # 快取 key 每日換日以台北日期為準 (#16)
     key = (symbol.upper(), today_str)
     cached = _cache_get(key)
     if cached is not None:

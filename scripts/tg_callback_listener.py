@@ -157,7 +157,7 @@ def _handle_sl(market: str, sid: str):
     # 使用者在 TG 按了「設停損」、收到確認訊息, 之後真的跌破卻永遠不會有警報。
     # 改成寫進 holdings_tracker 讀得到的位置, 並補上它需要的欄位。
     try:
-        from radar.core import watchlist_store; import datetime as _dt
+        from radar.core import watchlist_store; from radar.core import clock as _clock
         st = watchlist_store.load_monitor_state() or {}
         tracker = st.setdefault("holdings_tracker", {})
         sl_map = tracker.setdefault("stop_loss", {})
@@ -167,7 +167,7 @@ def _handle_sl(market: str, sid: str):
             # holdings_tracker 讀的欄位
             "stop_loss": stop,
             "name": _prev.get("name", ""),
-            "set_date": _dt.date.today().strftime("%Y-%m-%d"),
+            "set_date": _clock.tpe_today_str(),  # 與 holdings_tracker 同基準 (#16)
             # Bug fix (2026-09-07): holdings_tracker.check_stop_loss_breaches() 的
             # 一日一次去重完全靠這兩個欄位, 而 update_stop_loss_state() 有特地保留它們。
             # 這條 TG 按鈕路徑漏抄 -> 使用者在收到停損警報後按「設停損」, fired 紀錄被
@@ -176,7 +176,7 @@ def _handle_sl(market: str, sid: str):
             "near_stop_fired_date": _prev.get("near_stop_fired_date", ""),
             # 保留原本的診斷欄位, 不影響讀取端
             "market": market, "ref_price": price, "stop": stop, "pct": STOP_PCT,
-            "ts": _dt.datetime.utcnow().isoformat(timespec="seconds") + "Z",
+            "ts": _clock.utc_now().strftime("%Y-%m-%dT%H:%M:%SZ"),
             "source": "tg_button",
         }
         tracker["stop_loss"] = sl_map

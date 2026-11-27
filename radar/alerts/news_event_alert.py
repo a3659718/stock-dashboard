@@ -233,6 +233,7 @@ def _scan_news_for_symbol(item: Dict, alerted_hashes: Set[str]) -> List[Dict]:
     market = item["market"]
     tag = item["tag"]
     out = []
+    local_seen: Set[str] = set()
     try:
         # === 1. 多來源彙整 ===
         news = []
@@ -287,12 +288,17 @@ def _scan_news_for_symbol(item: Dict, alerted_hashes: Set[str]) -> List[Dict]:
             #   標題 hash 擋「同新聞多來源用字略異」; URL hash 擋「同一篇文章(同小圖)不同標題」。
             h_hash = _headline_hash(title)
             link_hash = _link_hash(link)
+            # Bug fix (#18): alerted_hashes 是多執行緒共用的, 原本這裡直接 add →「先掃到的執行緒贏」,
+            # 持倉 (hold, 會響鈴) 的同一則新聞常被主清單 (main) 版本搶走。現在對共用集合只讀,
+            # 同檔內用 local set 去重; 跨檔重複交給 check_news_events 排序後 (hold 優先) 的批次去重。
             if (h_hash and h_hash in alerted_hashes) or (link_hash and link_hash in alerted_hashes):
                 continue
+            if (h_hash and h_hash in local_seen) or (link_hash and link_hash in local_seen):
+                continue
             if h_hash:
-                alerted_hashes.add(h_hash)
+                local_seen.add(h_hash)
             if link_hash:
-                alerted_hashes.add(link_hash)
+                local_seen.add(link_hash)
             alert_d = {
                 "symbol": sym,
                 "market": market,
@@ -322,7 +328,7 @@ def check_news_events() -> List[Dict]:
 
     state = watchlist_store.load_monitor_state()
     ne_state = state.setdefault("news_event_alert", {})
-    today_str = dt.date.today().strftime("%Y-%m-%d")
+    today_str = (dt.datetime.utcnow() + dt.timedelta(hours=8)).strftime("%Y-%m-%d")  # 台北日期 (#16)
     now_utc = dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)
 
     # 跨日: 保留近 3 天已推過的 hash (見 _roll_day)
@@ -351,7 +357,7 @@ def check_news_events() -> List[Dict]:
     # 並行掃 (Yahoo News 每檔 ~1-2s, 30 檔 ~5s with 8 workers)
     from concurrent.futures import ThreadPoolExecutor, as_completed
     with ThreadPoolExecutor(max_workers=2) as ex:  # 每檔掃 4 來源, workers=2 避免 Yahoo 429
-        futs = {ex.submit(_scan_news_for_symbol, it, alerted_hashes): it
+        futs = {ex.submit(_scan_news_for_symbol, it, frozenset(alerted_hashes)): it
                 for it in universe}
         for fut in as_completed(futs):
             try:
@@ -494,7 +500,7 @@ def mark_alerts_sent(alerts: List[Dict]) -> None:
     try:
         state = watchlist_store.load_monitor_state()
         ne_state = state.setdefault("news_event_alert", {})
-        today_str = dt.date.today().strftime("%Y-%m-%d")
+        today_str = (dt.datetime.utcnow() + dt.timedelta(hours=8)).strftime("%Y-%m-%d")  # 台北日期 (#16)
         _roll_day(ne_state, today_str)
         alerted = set(ne_state.get("alerted") or [])
         alerted_at = ne_state.get("alerted_at") or {}

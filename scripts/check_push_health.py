@@ -69,8 +69,8 @@ def main():
 
     print("\n=== Phase 5: 寄一封測試訊息到 TG ===")
     if notifier.is_configured():
-        import datetime as dt
-        test_msg = f"🔧 <b>健康檢查測試</b>\n<i>{dt.datetime.now().strftime('%Y-%m-%d %H:%M')}</i>\n\n推播管道正常 ✓"
+        from radar.core import clock
+        test_msg = f"🔧 <b>健康檢查測試</b>\n<i>{clock.tpe_now().strftime('%Y-%m-%d %H:%M')} TPE</i>\n\n推播管道正常 ✓"
         chk("notifier.send_message()", lambda: notifier.send_message(test_msg)[0])
     else:
         print("  ⊘ TG 未設定, 跳過")

@@ -23,6 +23,7 @@ from __future__ import annotations
 import datetime as dt
 from typing import Dict, List
 
+from radar.core import clock
 from radar.core import watchlist_store
 
 
@@ -89,8 +90,9 @@ def _fetch_insider_transactions(symbol: str, days_back: int = 30) -> List[Dict]:
         token = ds.get_finnhub_token()
         if not token:
             return []
-        end = dt.date.today().strftime("%Y-%m-%d")
-        start = (dt.date.today() - dt.timedelta(days=days_back)).strftime("%Y-%m-%d")
+        _today_et = clock.et_today()  # Form 4 揭露日是美東日期 (#16)
+        end = _today_et.strftime("%Y-%m-%d")
+        start = (_today_et - dt.timedelta(days=days_back)).strftime("%Y-%m-%d")
         r = requests.get("https://finnhub.io/api/v1/stock/insider-transactions",
                           params={"symbol": symbol, "from": start, "to": end, "token": token},
                           timeout=10)
@@ -159,7 +161,7 @@ def _prune_keys(keys) -> set:
     注意: 真正寫回 state 的是 mark_alerts_sent(), 所以 prune 必須在那裡也做一次,
     否則只在 check 的記憶體內生效 → 持久化的 alerted 會無限累積。
     """
-    cut = (dt.date.today() - dt.timedelta(days=_KEY_RETENTION_DAYS)).strftime("%Y-%m-%d")
+    cut = (clock.et_today() - dt.timedelta(days=_KEY_RETENTION_DAYS)).strftime("%Y-%m-%d")
     out = set()
     for k in (keys or []):
         parts = str(k).split(":")
@@ -172,7 +174,7 @@ def check_analyst_insider() -> List[Dict]:
     """整合掃描. 回 alert list (含 analyst + insider 2 種類型)."""
     state = watchlist_store.load_monitor_state()
     ai_state = state.setdefault("analyst_insider_alert", {})
-    today_str = dt.date.today().strftime("%Y-%m-%d")
+    today_str = clock.tpe_today_str()
     # Bug fix: 原本去重表每天 clear(), 但 insider 的資料窗是「過去 30 天」, analyst 更是
     # 月資料 → 三週前那筆 CEO 買進每天都還在窗內、每天的 alerted 又是空的, 於是會連推
     # 約 30 個交易日 (而且 insider 是 Tier 1 響鈴)。改成跨日保留, 只 prune 超過
@@ -239,7 +241,7 @@ def mark_alerts_sent(alerts: List[Dict]) -> None:
         state = watchlist_store.load_monitor_state()
         ai = state.setdefault("analyst_insider_alert", {})
         # 不再按日清空 (見 check_analyst_insider 的 Bug fix): key 已含揭露日 / 月份。
-        ai["date"] = dt.date.today().strftime("%Y-%m-%d")
+        ai["date"] = clock.tpe_today_str()
         # 寫回時一併 prune — 這裡是唯一真正持久化 alerted 的地方。
         a_set = _prune_keys(ai.get("alerted"))
         for a in alerts:

@@ -25,6 +25,7 @@ from typing import Dict, List, Optional
 import pandas as pd
 import streamlit as st
 
+from radar.core import clock
 from radar.data import data_sources as ds
 
 
@@ -208,7 +209,8 @@ def save_prediction(prediction: Dict) -> Dict:
     if prediction.get("error"):
         return {"ok": False, "msg": prediction["error"]}
 
-    today = (prediction.get("today") or dt.date.today())
+    today = (prediction.get("today")
+             or clock.market_today(prediction.get("market", "TW")))  # #16: 依市場取日期
     if isinstance(today, dt.date):
         today_str = today.strftime("%Y-%m-%d")
     else:
@@ -338,7 +340,6 @@ def evaluate_pending_predictions(symbol_for_market: Optional[Dict] = None) -> in
 
     # 直接轉 list of dict，pandas 不會插手 dtype
     records = df.to_dict("records")
-    today = dt.date.today()
     updates = 0
 
     for rec in records:
@@ -356,10 +357,11 @@ def evaluate_pending_predictions(symbol_for_market: Optional[Dict] = None) -> in
             pred_date = dt.datetime.strptime(pred_date_str, "%Y-%m-%d").date()
         except Exception:
             continue
-        if pred_date >= today:
+        market_str = str(rec.get("market", "TW"))
+        # 該市場「今天」的預測還不能驗證 (#16: US 用美東日期, TW 用台北日期)
+        if pred_date >= clock.market_today(market_str):
             continue
 
-        market_str = str(rec.get("market", "TW"))
         symbol = symbol_for_market.get(market_str, "^TWII")
         actual = _actual_day_pattern(symbol, pred_date)
         if not actual:
@@ -416,7 +418,7 @@ def accuracy_stats(market: str = "TW", lookback_days: int = 30) -> Dict:
     if df.empty:
         return {}
     df["date"] = pd.to_datetime(df["date"], errors="coerce")
-    cutoff = pd.Timestamp(dt.date.today() - dt.timedelta(days=lookback_days))
+    cutoff = pd.Timestamp(clock.market_today(market) - dt.timedelta(days=lookback_days))
     df = df[df["date"] >= cutoff]
     if df.empty:
         return {}

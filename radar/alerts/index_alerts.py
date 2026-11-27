@@ -34,6 +34,7 @@ from __future__ import annotations
 import datetime as dt
 from typing import Dict, List, Optional
 
+from radar.core import clock
 from radar.data import data_sources as ds
 from radar.core import watchlist_store
 
@@ -66,9 +67,14 @@ INDEX_CONFIG = {
 # ---------------------------------------------------------------------------
 # 各市場交易時段判斷 (避免閉市時抓 stale data 觸發假警報)
 # ---------------------------------------------------------------------------
+def _market_today_str(country: Optional[str]) -> str:
+    """該市場的交易日 'YYYY-MM-DD' (#16): US → 美東日期, 其餘 (TW/JP/KR) → 台北日期。"""
+    return clock.market_today(country or "TW").strftime("%Y-%m-%d")
+
+
 def _is_us_in_dst(today: Optional[dt.date] = None) -> bool:
     """美國 DST: 3 月第 2 週日 ~ 11 月第 1 週日."""
-    today = today or dt.date.today()
+    today = today or clock.et_today()  # 美國 DST 以美東日期判斷 (#16)
     year = today.year
     # 3 月第 2 週日
     mar1 = dt.date(year, 3, 1)
@@ -213,7 +219,8 @@ def _fetch_intraday_anchor_data(symbol: str) -> Optional[Dict]:
         df["_dt"] = pd.to_datetime(df[date_col], utc=True)
         df["_d"] = df["_dt"].dt.date
         today = df["_d"].max()
-        sys_today = dt.date.today()
+        # 刻意 UTC (#16): 上面 _d 是 utc=True 換算的 UTC 日期, 這裡要同一基準比較
+        sys_today = clock.utc_now().date()
         # stale check: yfinance 最新日期距 server today >= 1 天 → 跳
         if (sys_today - today).days >= 1:
             return None
@@ -778,7 +785,8 @@ def check_intraday_reversal() -> List[Dict]:
     """
     state = watchlist_store.load_monitor_state()
     rev_state = state.setdefault("intraday_reversal", {})
-    today_str = dt.date.today().strftime("%Y-%m-%d")
+    # 跨日 key 改在迴圈內依 country 取 (#16): US 用美東日期, TW/JP/KR 用台北日期。
+    # 各市場盤中時段內, 該市場日期 == UTC 日期 → 上線當天不會重推/漏推。
     now_utc = dt.datetime.now(dt.timezone.utc)
 
     # 假日檢查
@@ -840,6 +848,7 @@ def check_intraday_reversal() -> List[Dict]:
             })
 
         # 跨日 reset
+        today_str = _market_today_str(country)
         sym_state = rev_state.setdefault(sym, {})
         if sym_state.get("date") != today_str:
             sym_state.clear()
@@ -1153,7 +1162,7 @@ def check_weak_open_alerts() -> List[Dict]:
     """
     state = watchlist_store.load_monitor_state()
     wo_state = state.setdefault("weak_open", {})
-    today_str = dt.date.today().strftime("%Y-%m-%d")
+    # 跨日 key 改在迴圈內依 country 取 (#16), 見 check_intraday_reversal
 
     closed_markets: set = set()
     try:
@@ -1199,6 +1208,7 @@ def check_weak_open_alerts() -> List[Dict]:
         low_from_open = (today_low / today_open - 1) * 100
 
         # 跨日 reset
+        today_str = _market_today_str(country)
         sym_state = wo_state.setdefault(sym, {})
         if sym_state.get("date") != today_str:
             sym_state.clear()
@@ -1321,7 +1331,7 @@ def _fetch_systemic_snapshot(symbol: str) -> Optional[Dict]:
     任一失敗 → 回 None.
 
     NOTE [Bug #6 已知限制 — 時區邊界]:
-    本函式用 `dt.date.today()` (= server 本地日期, 在 GH Actions = UTC) 跟 yfinance
+    本函式用 `clock.utc_now().date()` (#16 刻意保留 UTC 基準) 跟 yfinance
     回傳的 latest_d 比對「是否為今天」. 對 TW (UTC+8) 跟 US (UTC-4/-5) 而言, UTC 跨日
     的 1-2 小時內可能誤判. 實務上 monitor cron `*/15` 一天 96 次, 即使誤判跨日邊界
     幾個 tick, 也會在 session 真正開始後正確判斷, 不會造成 silent 失敗.
@@ -1342,7 +1352,7 @@ def _fetch_systemic_snapshot(symbol: str) -> Optional[Dict]:
         df_d["_d"] = pd.to_datetime(df_d[date_col_d]).dt.date
         df_d = df_d.sort_values("_d")
         latest_d = df_d["_d"].iloc[-1]
-        sys_today = dt.date.today()
+        sys_today = clock.utc_now().date()  # 刻意 UTC: 寬鬆過期判斷, 見上方 Bug #6 NOTE
         # daily 已過期 → 跳 (盤前 / 假日 / yfinance 延遲)
         if (sys_today - latest_d).days >= 2:
             return None
@@ -1362,7 +1372,7 @@ def _fetch_systemic_snapshot(symbol: str) -> Optional[Dict]:
             df_i["_dt"] = pd.to_datetime(df_i[date_col_i])
             df_i["_d"] = df_i["_dt"].dt.date
             today_in_intraday = df_i["_d"].max()
-            sys_today = dt.date.today()
+            sys_today = clock.utc_now().date()  # 刻意 UTC: 同上 Bug #6 NOTE
             if (sys_today - today_in_intraday).days < 1:
                 today_bars = df_i[df_i["_d"] == today_in_intraday].sort_values("_dt")
                 if not today_bars.empty:
@@ -1430,7 +1440,9 @@ def check_systemic_crash() -> Optional[Dict]:
     # 載 state — 共用 monitor_state.json
     state = watchlist_store.load_monitor_state()
     crash_state = state.setdefault("systemic_crash_alerts", {})
-    today_str = dt.date.today().strftime("%Y-%m-%d")
+    # 刻意 UTC 日期 (#16): 這裡有「跨市場全域每日上限」(total_today), 需要單一換日點。
+    # UTC 00:00 落在美股收盤與亞股開盤之間; 改台北日期會在 16:00 UTC (美股盤中) 換日。
+    today_str = clock.utc_now().strftime("%Y-%m-%d")
     now_utc = dt.datetime.now(dt.timezone.utc)
 
     # 跨日重置: 全部 symbol 都把舊日的 state 清掉
@@ -1632,7 +1644,7 @@ def _fetch_index_today_open_and_current(symbol: str) -> Optional[Dict]:
             df_d = df_d.copy()
             date_col_d = "Date" if "Date" in df_d.columns else df_d.columns[0]
             latest_d = pd.to_datetime(df_d[date_col_d].iloc[-1]).date()
-            sys_today = dt.date.today()
+            sys_today = clock.utc_now().date()  # 刻意 UTC: 寬鬆過期判斷 (#16 保留原行為)
             if (sys_today - latest_d).days >= 1:
                 return None
             today_open = float(df_d["Open"].iloc[-1])
@@ -1648,7 +1660,7 @@ def _fetch_index_today_open_and_current(symbol: str) -> Optional[Dict]:
     df["_d"] = df["_dt"].dt.date
     today = df["_d"].max()
 
-    sys_today = dt.date.today()
+    sys_today = clock.utc_now().date()  # 刻意 UTC: 寬鬆過期判斷 (#16 保留原行為)
     if (sys_today - today).days >= 1:
         return None
 
@@ -1677,11 +1689,11 @@ def check_index_alerts() -> List[Dict]:
     except Exception:
         pass
 
-    today_str = dt.date.today().strftime("%Y-%m-%d")
     alerts: List[Dict] = []
 
     for sym, cfg in INDEX_CONFIG.items():
         country = cfg.get("country")
+        today_str = _market_today_str(country)  # 依市場取交易日 (#16), 盤中與 UTC 日期一致
         if country in closed_markets:
             continue
         if not _is_market_in_session(country):

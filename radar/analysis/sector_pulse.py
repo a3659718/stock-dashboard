@@ -132,8 +132,11 @@ def _fetch_intraday_metrics_cached(stock_ids_tuple: tuple, market_map_tuple: tup
             prev = float(close.iloc[-2])
             chg = (last / prev - 1) * 100 if prev else None
             amp = (float(high.iloc[-1]) - float(low.iloc[-1])) / prev * 100 if prev else None
-            avg5 = vol.iloc[-6:-1].mean() if len(vol) >= 6 else None
-            vol_ratio = float(vol.iloc[-1] / avg5) if avg5 and avg5 > 0 else None
+            # 量比 (audit #2 修正, 2026-11-27): 盤中改成「今日量 ÷ 這個時間點的正常累計量」
+            # (1.0 = 正常), 原本 ÷ 5 日平均整日量 → 開盤 30 分正常量只有 ~0.2。
+            # 最後一根不是今天 (暫停交易 / 假日) 或已收盤 → 等同原本的整日量比。
+            from radar.data import intraday_volume as _iv
+            vol_ratio = _iv.daily_volume_ratio(df, market="TW", lookback_days=5)
             r5 = (last / float(close.iloc[-6]) - 1) * 100 if len(close) >= 6 else None
 
             rows.append({

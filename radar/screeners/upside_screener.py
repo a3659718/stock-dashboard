@@ -52,6 +52,7 @@ from typing import Dict, List, Optional
 import numpy as np
 import pandas as pd
 
+from radar.core import clock
 from radar.analysis import chip_analyzer
 from radar.data import data_sources as ds
 from radar.analysis import indicators as ind
@@ -142,7 +143,7 @@ def _fetch_one_full(stock_id: str, days_daily: int = 400) -> Dict:
     的高低點 —— 而這些是三類篩選的硬門檻, 也是推播直接印出的「距 52w 低 +X%」文字。
     M5: 在 return 中附上實際最新交易日 (last_date), 給 caller 算真正的 data_date.
     """
-    today = dt.date.today()
+    today = clock.tpe_today()  # 台股 FinMind 區間 (#16)
     end = today.strftime("%Y-%m-%d")
     start = (today - dt.timedelta(days=days_daily)).strftime("%Y-%m-%d")
     daily = ds._finmind_get_one("TaiwanStockPrice", stock_id, start, end)
@@ -786,7 +787,7 @@ def _run_upside_screen_impl(market: str = "all", max_stocks: int = DEFAULT_MAX_S
         except Exception:
             pass
     if data_date is None:
-        data_date = dt.date.today().strftime("%Y-%m-%d")
+        data_date = clock.tpe_today_str()  # 顯示用台北日期 (#16)
 
     _p("完成!", 100)
     return {

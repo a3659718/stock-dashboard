@@ -42,32 +42,51 @@ except Exception:
     st = _NoOp()  # type: ignore
 
 
-# FinMind dataset 名稱 (可能隨版本變, 加 fallback list)
-_LARGE_HOLDER_DATASETS = [
-    "TaiwanStockShareholding",
-    "TaiwanStockShareholdingClassChart",
-]
-_LENDING_DATASETS = [
-    "TaiwanStockSecuritiesLending",
-    "TaiwanStockShortSaleAndPurchase",
-]
-_BROKER_DATASETS = [
-    "TaiwanStockTradingDailyReport",  # 券商分點日報 (大檔)
-    "TaiwanStockBranchByStock",
-    "TaiwanStockMainForce",
-]
+# FinMind dataset (2026-11-27 依 FinMind 文件與第三輪實測修正):
+#   原本的名單全錯 → 三個指標從來沒有產生過數值 (永遠回 {}):
+#   - TaiwanStockShareholding 是「外資持股」, 沒有持股分級欄位; ClassChart 不存在。
+#     千張大戶要用 TaiwanStockHoldingSharesPer (集保股權分散表, 每週, 需 FinMind 付費等級)。
+#   - TaiwanStockSecuritiesLending 是逐筆借券成交, 沒有餘額欄位 (第三輪已在 smart_money_stealth 確認)。
+#     借券賣出餘額要用 TaiwanDailyShortSaleBalances.SBLShortSalesCurrentDayBalance (免費等級可用)。
+#   - 券商分點 TaiwanStockTradingDailyReport (付費等級) 欄位是 securities_trader / buy / sell (單位: 股)。
+_LARGE_HOLDER_DATASET = "TaiwanStockHoldingSharesPer"
+_LENDING_DATASET = "TaiwanDailyShortSaleBalances"
+_BROKER_DATASET = "TaiwanStockTradingDailyReport"
+_BROKER_API = "https://api.finmindtrade.com/api/v4/taiwan_stock_trading_daily_report"
+
+# 付費等級才能用的 dataset: 第一次回「權限不足」就整個 process 停用, 不再每檔浪費一次 API 額度
+_UNAVAILABLE: set = set()
 
 
-def _try_fetch(datasets: list, stock_id: str, start: str, end: str) -> pd.DataFrame:
-    """嘗試多個 dataset 名稱, 第一個有資料的就回."""
-    for ds_name in datasets:
-        try:
-            df = ds._finmind_get_one(ds_name, stock_id, start, end)
-            if not df.empty:
-                return df
-        except Exception:
-            continue
-    return pd.DataFrame()
+def _is_permission_error(msg: str) -> bool:
+    m = (msg or "").lower()
+    return any(k in m for k in ("402", "403", "your level", "sponsor", "permission", "權限", "付費", "upgrade"))
+
+
+def _fetch(dataset: str, stock_id: str, start: str, end: str) -> pd.DataFrame:
+    if dataset in _UNAVAILABLE:
+        return pd.DataFrame()
+    try:
+        return ds._finmind_get(dataset, data_id=stock_id, start_date=start, end_date=end)
+    except Exception as e:
+        if _is_permission_error(str(e)):
+            _UNAVAILABLE.add(dataset)
+            print(f"[chip_advanced] {dataset} 需要 FinMind 付費等級 (本次執行停用此指標): {str(e)[:120]}",
+                  flush=True)
+        else:
+            print(f"[chip_advanced] {dataset} {stock_id} fail: {str(e)[:120]}", flush=True)
+        return pd.DataFrame()
+
+
+def _level_lower_bound(level) -> Optional[int]:
+    """集保持股分級字串 → 下限股數。例: '1-999'→1, '1,000-5,000'→1000, 'more than 1,000,001'→1000001,
+    '1,000,001以上'→1000001; 'total' / '差異數調整' → None。"""
+    import re
+    nums = [int(x.replace(",", "")) for x in re.findall(r"\d[\d,]*", str(level))]
+    return nums[0] if nums else None
+
+
+_LARGE_HOLDER_MIN_SHARES = 1_000_001   # 千張 = 1,000 張 × 1,000 股; 集保最高級距為「1,000,001 股以上」
 
 
 # ---------------------------------------------------------------------------
@@ -86,14 +105,13 @@ def fetch_large_holders_change(stock_id: str, days: int = 30) -> Dict:
     today = (dt.datetime.utcnow() + dt.timedelta(hours=8)).date()
     end = today.strftime("%Y-%m-%d")
     start = (today - dt.timedelta(days=days + 5)).strftime("%Y-%m-%d")
-    df = _try_fetch(_LARGE_HOLDER_DATASETS, stock_id, start, end)
+    df = _fetch(_LARGE_HOLDER_DATASET, stock_id, start, end)
     if df.empty:
         return {}
     try:
         df["date"] = pd.to_datetime(df["date"])
         df = df.sort_values("date")
-        # 找 "≥ 1000 張" 持股比例欄位 (FinMind 欄位名稱不一)
-        # 常見: HoldingSharesLevel = "1000 ~ 99999999" / "1,000-50,000" 等
+        # HoldingSharesLevel 是「股數」級距 (不是張數): '1,000-5,000' 是 1~5 張的散戶。
         level_col = None
         for c in ["HoldingSharesLevel", "HoldingShares", "ShareholdingLevel"]:
             if c in df.columns:
@@ -106,9 +124,11 @@ def fetch_large_holders_change(stock_id: str, days: int = 30) -> Dict:
                 break
         if not level_col or not pct_col:
             return {}
-        # 篩出大戶級別 (含 "1000" 或 "1,000" 字串)
-        is_large = df[level_col].astype(str).str.contains("1000|1,000|>1000|≥1000", regex=True)
-        large_df = df[is_large]
+        # Bug fix: 原本用字串含 "1000|1,000" 篩選 → 會把「1,000-5,000 股」(1~5 張散戶) 也算成大戶。
+        # 改成解析級距下限, 只取 ≥ 1,000,001 股 (千張以上) 的級距。
+        _lb = df[level_col].map(_level_lower_bound)
+        large_df = df[_lb.notna() & (_lb >= _LARGE_HOLDER_MIN_SHARES)].copy()
+        large_df[pct_col] = pd.to_numeric(large_df[pct_col], errors="coerce")
         if large_df.empty:
             return {}
         # 取最新與最舊各一日
@@ -152,16 +172,15 @@ def fetch_securities_lending(stock_id: str, days: int = 10) -> Dict:
     today = (dt.datetime.utcnow() + dt.timedelta(hours=8)).date()
     end = today.strftime("%Y-%m-%d")
     start = (today - dt.timedelta(days=days + 5)).strftime("%Y-%m-%d")
-    df = _try_fetch(_LENDING_DATASETS, stock_id, start, end)
+    df = _fetch(_LENDING_DATASET, stock_id, start, end)
     if df.empty:
         return {}
     try:
         df["date"] = pd.to_datetime(df["date"])
         df = df.sort_values("date")
-        # 借券餘額欄位 (FinMind 變動大)
+        # 借券賣出餘額 (股)。舊欄位名保留當後備。
         bal_col = None
-        for c in ["SecuritiesLendingBalance", "LendingBalance", "balance",
-                  "shortBalance", "ShortSaleBalance"]:
+        for c in ["SBLShortSalesCurrentDayBalance", "SecuritiesLendingBalance", "LendingBalance"]:
             if c in df.columns:
                 bal_col = c
                 break
@@ -204,6 +223,43 @@ _MAIN_FORCE_BROKERS = {
 }
 
 
+def _fetch_broker_report(stock_id: str, today: dt.date, days: int) -> pd.DataFrame:
+    """券商分點日報: FinMind 這個資料集是「一次一天」的專用 endpoint (data_id + date)。
+    先試一般 /data 區間查詢, 沒資料再逐日打專用 endpoint (最多往回 days+3 個日曆日)。"""
+    if _BROKER_DATASET in _UNAVAILABLE:
+        return pd.DataFrame()
+    start = (today - dt.timedelta(days=days + 3)).strftime("%Y-%m-%d")
+    df = _fetch(_BROKER_DATASET, stock_id, start, today.strftime("%Y-%m-%d"))
+    if not df.empty or _BROKER_DATASET in _UNAVAILABLE:
+        return df
+    try:
+        import requests
+        token = ds.get_finmind_token()
+        if not token:
+            return pd.DataFrame()
+        frames, d = [], today
+        for _ in range(days + 3):
+            if d.weekday() < 5:
+                r = requests.get(_BROKER_API, params={"data_id": stock_id, "date": d.isoformat(),
+                                                      "token": token}, timeout=30)
+                if r.status_code != 200:
+                    if r.status_code in (402, 403) or _is_permission_error(r.text[:200]):
+                        _UNAVAILABLE.add(_BROKER_DATASET)
+                        print(f"[chip_advanced] 券商分點需要 FinMind 付費等級 (本次執行停用): "
+                              f"HTTP {r.status_code}", flush=True)
+                    return pd.DataFrame()
+                rows = (r.json() or {}).get("data") or []
+                if rows:
+                    frames.append(pd.DataFrame(rows))
+                    if len(frames) >= days:
+                        break
+            d -= dt.timedelta(days=1)
+        return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+    except Exception as e:
+        print(f"[chip_advanced] broker report {stock_id} fail: {e}", flush=True)
+        return pd.DataFrame()
+
+
 @st.cache_data(ttl=900, show_spinner=False)
 def fetch_main_broker_flow(stock_id: str, days: int = 5) -> Dict:
     """抓近 N 天主力券商買賣超.
@@ -214,15 +270,13 @@ def fetch_main_broker_flow(stock_id: str, days: int = 5) -> Dict:
     # Bug fix: dt.date.today() 是伺服器本地/UTC 日期, 台北 00:00-07:59 這段 UTC
     # 還是「前一天」, 會讓抓取區間整段偏移一天。改用 TPE (UTC+8) 日期。
     today = (dt.datetime.utcnow() + dt.timedelta(hours=8)).date()
-    end = today.strftime("%Y-%m-%d")
-    start = (today - dt.timedelta(days=days + 3)).strftime("%Y-%m-%d")
-    df = _try_fetch(_BROKER_DATASETS, stock_id, start, end)
+    df = _fetch_broker_report(stock_id, today, days)
     if df.empty:
         return {}
     try:
-        # 欄位名常見: BrokerName / broker / SecuritiesTrader; net / buy-sell
+        # 實際欄位: securities_trader / securities_trader_id / price / buy / sell (股)
         broker_col = None
-        for c in ["BrokerName", "broker", "SecuritiesTrader", "BranchName"]:
+        for c in ["securities_trader", "BrokerName", "broker", "SecuritiesTrader", "BranchName"]:
             if c in df.columns:
                 broker_col = c
                 break
@@ -233,8 +287,9 @@ def fetch_main_broker_flow(stock_id: str, days: int = 5) -> Dict:
                 break
         # Fallback: 用 buy - sell 算
         if not net_col and "buy" in df.columns and "sell" in df.columns:
-            df["_net"] = pd.to_numeric(df["buy"], errors="coerce").fillna(0) - \
-                          pd.to_numeric(df["sell"], errors="coerce").fillna(0)
+            # buy / sell 單位是「股」, 下游門檻 (500 / 1000 張) 用張 → 除 1000
+            df["_net"] = (pd.to_numeric(df["buy"], errors="coerce").fillna(0) -
+                          pd.to_numeric(df["sell"], errors="coerce").fillna(0)) / 1000.0
             net_col = "_net"
         if not broker_col or not net_col:
             return {}

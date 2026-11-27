@@ -62,7 +62,7 @@ def _classify_quadrant(this_w, last_w, median_this, median_last):
 
 
 def compute_sector_rotation(market: str = "US") -> Dict:
-    import datetime as dt
+    from radar.core import clock  # ts 用台北時間 (#16; 原本 naive now() 在雲端是 UTC)
     sectors = US_SECTOR_ETF if market == "US" else TW_SECTOR_ETF
     matrix = []
     for etf, name in sectors.items():
@@ -83,7 +83,7 @@ def compute_sector_rotation(market: str = "US") -> Dict:
 
     valid = [m for m in matrix if m["this_week_pct"] is not None and m["last_week_pct"] is not None]
     if not valid:
-        return {"ts": dt.datetime.now().isoformat(), "market": market, "matrix": matrix,
+        return {"ts": clock.tpe_now().isoformat(timespec="seconds"), "market": market, "matrix": matrix,
                 "quadrants": {"leading": [], "improving": [], "weakening": [], "lagging": []},
                 "err": "無有效 ETF 資料"}
 
@@ -101,7 +101,7 @@ def compute_sector_rotation(market: str = "US") -> Dict:
         quadrants[k].sort(key=lambda x: x["this_week_pct"], reverse=True)
 
     return {
-        "ts": dt.datetime.now().isoformat(), "market": market,
+        "ts": clock.tpe_now().isoformat(timespec="seconds"), "market": market,
         # 0.0% 是合法值, 不能用 `or` (原本平盤的板塊被排到所有下跌板塊後面)
         "matrix": sorted(matrix, key=lambda x: (x.get("this_week_pct")
                                                  if x.get("this_week_pct") is not None else -999),

@@ -21,6 +21,7 @@ from __future__ import annotations
 import datetime as dt
 from typing import Dict, List, Optional
 
+from radar.core import clock
 from radar.data import data_sources as ds
 from radar.core import watchlist_store
 
@@ -168,7 +169,7 @@ def check_watchlist_alerts() -> List[Dict]:
 
     state = watchlist_store.load_monitor_state()
     wl_state = state.setdefault("watchlist_alerts", {})
-    today_str = dt.date.today().strftime("%Y-%m-%d")
+    # 跨日 key 改在迴圈內依個股 market 取 (#16): US → 美東日期, TW → 台北日期
 
     # 假日 / 市場時段檢查 — 避免閉市時抓 stale daily data 觸發假警報
     # (例: 美股盤中對 TW 股, 5m 線無資料會 fall back 到 daily,
@@ -214,7 +215,8 @@ def check_watchlist_alerts() -> List[Dict]:
 
         sid_state = wl_state.setdefault(sid, {})
 
-        # 跨日重置
+        # 跨日重置 (只在該市場盤中才走到這裡, 此時市場日期 == UTC 日期, 換基準不會重推)
+        today_str = clock.market_today(market).strftime("%Y-%m-%d")
         if sid_state.get("date") != today_str:
             sid_state.clear()
             sid_state["date"] = today_str

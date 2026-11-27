@@ -18,6 +18,7 @@ from __future__ import annotations
 import datetime as dt
 from typing import Dict, List, Optional
 
+from radar.core import clock
 from radar.data import data_sources as ds
 from radar.core import watchlist_store
 
@@ -146,7 +147,7 @@ def _extract_module_status(monitor_state: Dict) -> List[Dict]:
                 today_count = len(cv)
         # 對 nested per-symbol state 估今日 count
         elif isinstance(sub, dict):
-            today_str = dt.date.today().strftime("%Y-%m-%d")
+            today_str = clock.tpe_today_str()  # 診斷用 (#16); 美股/UTC 換日的 state 在台北早上可能少算
             cnt = 0
             for v in sub.values():
                 if isinstance(v, dict) and v.get("date") == today_str:

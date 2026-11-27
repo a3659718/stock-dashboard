@@ -219,6 +219,9 @@ def _shrink_to_fit(state: Dict, blob: str) -> str:
     都遠大於單格 5 萬字上限。一旦超過, Sheets 寫入失敗但讀取仍成功 → 去重表 / 每日上限凍結在
     舊值 → 推播洗版。寧可少留一點歷史, 也要讓去重狀態寫得進去。
     裁切順序: push_history → cron_runs → 已驗收 signals (舊的先) → 未驗收 signals (舊的先)。
+    註 (2026-11): signals 平常已改存獨立的 "signals" worksheet (見 load_signal_records), blob 裡
+    只剩「signals sheet 不可用時的 fallback 寫入」, 下次 sheet 可用時會被搬走; 這裡的裁切保留
+    給那種情況與舊資料。
     """
     def _size() -> int:
         return len(json.dumps(state, ensure_ascii=False, separators=(",", ":")))
@@ -516,7 +519,7 @@ def add_to_watchlist(stock_id: str, name: str = "", market: str = "TW",
             "name": name,
             "market": market.upper(),
             "entry_price": entry_price,
-            "added_date": dt.date.today().strftime("%Y-%m-%d"),
+            "added_date": (dt.datetime.utcnow() + dt.timedelta(hours=8)).date().strftime("%Y-%m-%d"),
         })
     return save_watchlist(items)
 
@@ -677,10 +680,428 @@ def save_monitor_state(state: Dict, immediate: bool = False) -> None:
 
 
 # ---------------------------------------------------------------------------
+# 訊號紀錄獨立 worksheet (2026-11)
+# ---------------------------------------------------------------------------
+# 背景: signal_tracker 的紀錄原本放在 monitor_state["signals"], 跟去重表 / 每日上限擠在同一個
+# 儲存格 (A1, 上限 5 萬字)。_shrink_to_fit 為了讓去重狀態寫得進去會先砍舊 signals →
+# 去重沒事, 但準確率統計的歷史被默默截斷。改成一筆訊號一列, 存在獨立的 "signals" worksheet:
+#   - 寫入只用 append_rows (一批一次 API call), 從不整張覆寫 → 併發 runner 各自 append 的列
+#     都會留下。同一筆訊號的「更新」(驗收結果) 也是 append 一列新版本。
+#   - 讀取時以 signal_key (predicted_at|signal_type|stock_id = record_signal 的去重 key) 去重:
+#     已驗收 > 已放棄 (_no_data) > 未驗收; 同級取 updated_at 較新者, 再同取較後面的列。
+#     → 兩個 runner 同時記同一檔 (uuid 不同) 也只算一筆; 舊版本列被新版本蓋過。
+#   - 偶爾 (重複版本太多 / 有超過保留期限的舊列) 做一次 compaction: 持 lease 後把「讀取當下」
+#     的範圍改寫成去重 + 裁期限後的結果, 再 delete_rows 掉多出的尾巴。讀取之後別人 append 的
+#     列都在原範圍之後 (表格保持連續, 中間不留空白列), 不會被蓋掉也不會被刪。
+#   - 舊 blob 的 signals: 每個 process 第一次成功讀到 signals sheet 時搬一次 (只搬 sheet 沒有、
+#     或 sheet 版本較舊的), 搬成功才把 blob 的 signals 設成 [] (之後 signal_tracker 不再寫 blob)。
+#     搬到一半失敗 → blob 不清, 下次再搬; 重搬的列讀取時會被去重 → idempotent。
+#   - 任何一步失敗 (沒 credentials / 額度 / 網路) → 回 None / False, signal_tracker 退回舊的
+#     blob 模式, 絕不讓推播 run 掛掉。
+SIGNAL_SHEET_NAME = "signals"
+SIGNAL_COLS = [
+    "key", "id", "signal_type", "stock_id", "name", "predicted_at", "predicted_price",
+    "expected_direction", "evaluate_after_days", "evaluate_at", "actual_price",
+    "actual_date", "actual_pct", "hit", "extras", "updated_at",
+]
+_SIG_FLOAT_COLS = ("predicted_price", "actual_price", "actual_pct")
+SIGNAL_RETENTION_DAYS = 730          # 保留 ~2 年 (以 predicted_at 計)
+_SIG_COMPACT_GRACE_DAYS = 30         # 最舊的列超過保留期限再 30 天才觸發 → 約每月清一次, 不是每次跑
+_SIG_COMPACT_MIN_DUP = 200           # 重複版本列數 > max(200, 有效筆數/2) 才觸發
+_SIG_LEASE_CELL = "Q1"               # 資料欄 A..P 之外的一格, 放 compaction lease
+_SIG_LEASE_TTL_SEC = 600
+_SIG_LEASE_SETTLE_SEC = 2.0          # 寫 lease 後等一下再讀回確認 (後寫的人贏, 先寫的放棄)
+_SIG_CACHE_TTL_SEC = 60              # 唯讀查詢 (一封推播會叫好幾次 accuracy_summary) 共用快取
+_SIG_APPEND_CHUNK = 1000
+_SIG_WS = None                       # 本 process 快取的 worksheet (省掉每次 authorize + open)
+_SIG_WS_FAIL_TS = 0.0
+_SIG_CACHE: Optional[tuple] = None   # (monotonic ts, [records])
+_SIG_HEADER: Optional[List[str]] = None
+_SIG_MIGRATED = False
+
+
+def _reset_signal_sheet_cache() -> None:
+    """清掉本 process 的 signals sheet 快取 (測試 / 長時間執行的 Streamlit 用)."""
+    global _SIG_WS, _SIG_WS_FAIL_TS, _SIG_CACHE, _SIG_HEADER, _SIG_MIGRATED
+    _SIG_WS = None
+    _SIG_WS_FAIL_TS = 0.0
+    _SIG_CACHE = None
+    _SIG_HEADER = None
+    _SIG_MIGRATED = False
+
+
+def signal_key(r: Dict) -> str:
+    """訊號的穩定 key — 跟 record_signal 的去重條件一致 (同日 + 同 signal_type + 同 stock_id)."""
+    pa = str(r.get("predicted_at") or "")
+    st_ = str(r.get("signal_type") or "")
+    sid = str(r.get("stock_id") or "")
+    if pa and st_ and sid:
+        return f"{pa}|{st_}|{sid}"
+    return f"id:{r.get('id') or ''}"
+
+
+def _sig_rank(r: Dict) -> int:
+    if r.get("hit") is not None:
+        return 2
+    if (r.get("extras") or {}).get("_no_data"):
+        return 1
+    return 0
+
+
+def _dedupe_signals(records: List[Dict]) -> List[Dict]:
+    """依 signal_key 去重 (records 依列順序), 保留第一次出現的順序."""
+    best: Dict[str, tuple] = {}
+    order: List[str] = []
+    for i, r in enumerate(records):
+        if not isinstance(r, dict):
+            continue
+        k = signal_key(r)
+        score = (_sig_rank(r), str(r.get("updated_at") or ""), i)
+        cur = best.get(k)
+        if cur is None:
+            order.append(k)
+            best[k] = (score, r)
+        elif score > cur[0]:
+            best[k] = (score, r)
+    return [best[k][1] for k in order]
+
+
+def _col_letter(n: int) -> str:
+    return chr(ord("A") + n - 1)
+
+
+def _tpe_today() -> dt.date:
+    return (dt.datetime.utcnow() + dt.timedelta(hours=8)).date()
+
+
+def _sig_to_row(r: Dict, header: List[str]) -> List[str]:
+    """一筆紀錄 → 一列 (全部存成字串, 以 RAW 寫入: 0050 不會掉前導零、日期不會被轉格式、
+    小數點不受試算表地區設定影響)。"""
+    vals: Dict[str, str] = {}
+    for c in SIGNAL_COLS:
+        if c == "key":
+            v = signal_key(r)
+        elif c == "extras":
+            v = json.dumps(r.get("extras") or {}, ensure_ascii=False,
+                           separators=(",", ":"), default=str)
+        elif c == "hit":
+            h = r.get("hit")
+            v = "" if h is None else ("TRUE" if h else "FALSE")
+        else:
+            x = r.get(c)
+            v = "" if x is None else str(x)
+        vals[c] = v
+    return [vals.get(h, "") for h in header]
+
+
+def _row_to_sig(row: List, idx: Dict[str, int]) -> Optional[Dict]:
+    def _get(c: str) -> str:
+        i = idx.get(c)
+        return str(row[i]).strip() if i is not None and i < len(row) else ""
+
+    r: Dict = {}
+    for c in SIGNAL_COLS:
+        if c == "key":
+            continue
+        v = _get(c)
+        if c in _SIG_FLOAT_COLS:
+            try:
+                r[c] = float(v) if v else None
+            except ValueError:
+                r[c] = None
+        elif c == "evaluate_after_days":
+            try:
+                r[c] = int(float(v)) if v else 1
+            except ValueError:
+                r[c] = 1
+        elif c == "hit":
+            r[c] = True if v.upper() == "TRUE" else (False if v.upper() == "FALSE" else None)
+        elif c == "extras":
+            try:
+                ex = json.loads(v) if v else {}
+            except ValueError:
+                ex = {}
+            r[c] = ex if isinstance(ex, dict) else {}
+        elif c == "actual_date":
+            r[c] = v or None
+        elif c == "expected_direction":
+            r[c] = v or "up"
+        else:
+            r[c] = v
+    if not (r.get("signal_type") or r.get("id")):
+        return None
+    return r
+
+
+def _parse_signal_values(values: List[List]) -> tuple:
+    """get_all_values() 的結果 → (寫入用 header, [records 依列順序])."""
+    if values and any(str(c).strip() == "signal_type" for c in values[0]):
+        header = [str(c).strip() for c in values[0]]
+        data = values[1:]
+    else:
+        # 沒有 header (理論上不會發生, 例如當初寫 header 失敗) → 當作預設欄位順序
+        header = list(SIGNAL_COLS)
+        data = values
+    idx = {h: i for i, h in enumerate(header) if h in SIGNAL_COLS}
+    write_header = [h if h in SIGNAL_COLS else "" for h in header]
+    while write_header and not write_header[-1]:
+        write_header.pop()  # 去掉尾端非資料欄 (例如 Q1 的 lease)
+    out: List[Dict] = []
+    for row in data:
+        if not any(str(c).strip() for c in row):
+            continue
+        r = _row_to_sig(row, idx)
+        if r is not None:
+            out.append(r)
+    return (write_header or list(SIGNAL_COLS)), out
+
+
+def _get_signal_sheet():
+    """signals worksheet (沒有就建立); 失敗回 None, 60 秒內不重試 (避免每次查詢都撞額度)."""
+    global _SIG_WS, _SIG_WS_FAIL_TS
+    import time as _time
+    if _SIG_WS is not None:
+        return _SIG_WS
+    if _SIG_WS_FAIL_TS and _time.monotonic() - _SIG_WS_FAIL_TS < 60:
+        return None
+    sheet = _get_sheet(SIGNAL_SHEET_NAME, rows=1000, cols=len(SIGNAL_COLS) + 1)  # +1 = lease 欄
+    if sheet is None:
+        _SIG_WS_FAIL_TS = _time.monotonic()
+        return None
+    _SIG_WS = sheet
+    return sheet
+
+
+def _read_signal_values(sheet) -> Optional[List[List]]:
+    """讀整張 signals 表; 跟 _read_persisted_raw 一樣退避重試 3 次, 全失敗回 None (= 不確定)."""
+    import time as _time
+    last_err = None
+    for attempt in range(3):
+        try:
+            return sheet.get_all_values() or []
+        except Exception as e:
+            last_err = e
+            if attempt < 2:
+                _time.sleep(1 + attempt)
+    print(f"[watchlist_store] 讀取 signals sheet 失敗 → 退回 blob 模式: {last_err}", flush=True)
+    return None
+
+
+def _append_signal_rows(sheet, header: List[str], records: List[Dict], stamp: bool = True) -> bool:
+    """append (不覆寫) 一批紀錄。stamp=True 時把 updated_at 設成現在 (UTC ISO)。"""
+    import time as _time
+    now = dt.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S")
+    rows = []
+    for r in records:
+        if stamp:
+            r["updated_at"] = now
+        rows.append(_sig_to_row(r, header))
+    for i in range(0, len(rows), _SIG_APPEND_CHUNK):
+        chunk = rows[i:i + _SIG_APPEND_CHUNK]
+        last_err = None
+        for attempt in range(2):
+            try:
+                # INSERT_ROWS + table_range=A1: 一律插在表格尾端之後, 不會蓋到任何既有列。
+                # (重試若造成重複列也無妨 — 讀取時會依 signal_key 去重)
+                sheet.append_rows(chunk, value_input_option="RAW",
+                                  insert_data_option="INSERT_ROWS", table_range="A1")
+                last_err = None
+                break
+            except Exception as e:
+                last_err = e
+                if attempt == 0:
+                    _time.sleep(1)
+        if last_err is not None:
+            print(f"[watchlist_store] signals append 失敗: {last_err}", flush=True)
+            return False
+    return True
+
+
+def _migrate_legacy_signals(sheet, header: List[str], records: List[Dict]) -> tuple:
+    """把舊 blob (monitor_state["signals"]) 搬進 signals sheet, 每個 process 只做一次。
+
+    回 (合併後的 records, 是否有 append 新列)。
+    """
+    global _SIG_MIGRATED
+    try:
+        state = load_monitor_state()
+    except Exception as e:
+        print(f"[watchlist_store] signals 搬移: 讀 monitor_state 失敗, 下次再搬: {e}", flush=True)
+        return records, False
+    legacy = state.get("signals") if isinstance(state, dict) else None
+    if not isinstance(legacy, list) or not legacy:
+        _SIG_MIGRATED = True
+        return records, False
+    best = {signal_key(r): r for r in records}
+    to_add = []
+    for r in legacy:
+        if not isinstance(r, dict) or not (r.get("signal_type") or r.get("id")):
+            continue
+        cur = best.get(signal_key(r))
+        if cur is None or _sig_rank(r) > _sig_rank(cur):
+            to_add.append(copy.deepcopy(r))
+    if to_add and not _append_signal_rows(sheet, header, to_add, stamp=False):
+        print(f"[watchlist_store] signals 搬移失敗 → blob 保留, 下次再搬", flush=True)
+        return _dedupe_signals(records + to_add), False  # 這次 run 的統計仍看得到舊紀錄
+    # 搬完 (或本來就都在 sheet 上) → 清掉 blob 的 signals。save 只會寫這個改過的 key;
+    # 若 _flush_state 讀不回 Sheets 而略過寫入, blob 沒清掉 → 下個 process 再試一次 (到時
+    # to_add 為空, 只做清除)。
+    state["signals"] = []
+    try:
+        save_monitor_state(state)
+    except Exception as e:
+        print(f"[watchlist_store] signals 搬移: 清 blob 失敗 (下次再清): {e}", flush=True)
+    _SIG_MIGRATED = True
+    print(f"[watchlist_store] signals 搬移: blob {len(legacy)} 筆 → sheet 新增 {len(to_add)} 列",
+          flush=True)
+    return _dedupe_signals(records + to_add), bool(to_add)
+
+
+def _acquire_compact_lease(sheet) -> Optional[str]:
+    """簡易 lease: 先看有沒有未過期的 lease, 沒有就寫自己的, 等一下再讀回, 還是自己才算拿到。"""
+    import time as _time
+    import uuid as _uuid
+    try:
+        cur = str(sheet.acell(_SIG_LEASE_CELL).value or "")
+        if cur:
+            try:
+                ts = dt.datetime.strptime(cur.split("|", 1)[0], "%Y-%m-%dT%H:%M:%S")
+                if (dt.datetime.utcnow() - ts).total_seconds() < _SIG_LEASE_TTL_SEC:
+                    return None
+            except ValueError:
+                print(f"[watchlist_store] signals lease 格式不明, 視為過期: {cur!r}", flush=True)
+        token = f"{dt.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S')}|{_uuid.uuid4().hex[:8]}"
+        sheet.update_acell(_SIG_LEASE_CELL, token)
+        _time.sleep(_SIG_LEASE_SETTLE_SEC)
+        if str(sheet.acell(_SIG_LEASE_CELL).value or "") != token:
+            return None
+        return token
+    except Exception as e:
+        print(f"[watchlist_store] signals compaction lease 失敗, 這次不整理: {e}", flush=True)
+        return None
+
+
+def _maybe_compact_signals(sheet, values: List[List], n_rows: int,
+                            records: List[Dict]) -> List[Dict]:
+    """偶爾整理 signals sheet: 去掉被新版本蓋過的舊列 + 保留期限外的紀錄。"""
+    live = len(records)
+    today = _tpe_today()
+    cutoff = (today - dt.timedelta(days=SIGNAL_RETENTION_DAYS)).strftime("%Y-%m-%d")
+    trigger_old = (today - dt.timedelta(days=SIGNAL_RETENTION_DAYS + _SIG_COMPACT_GRACE_DAYS)
+                   ).strftime("%Y-%m-%d")
+    oldest = min((str(r.get("predicted_at")) for r in records if r.get("predicted_at")), default="")
+    dup = n_rows - live
+    if not ((oldest and oldest < trigger_old) or dup > max(_SIG_COMPACT_MIN_DUP, live // 2)):
+        return records
+    token = _acquire_compact_lease(sheet)
+    if not token:
+        return records
+    try:
+        keep = [r for r in records
+                if not r.get("predicted_at") or str(r.get("predicted_at")) >= cutoff]
+        hdr = list(SIGNAL_COLS)
+        rows = [hdr] + [_sig_to_row(r, hdr) for r in keep]
+        total = len(values)  # 讀取當下的列數 (含 header); 之後別人 append 的列都在它之後
+        width = len(hdr)
+        # 只改寫 1..len(rows), 再刪掉 len(rows)+1..total —— 全程表格連續、沒有空白列,
+        # 所以併發的 append (INSERT_ROWS, 接在表格尾端) 一定落在我們碰的範圍之外。
+        sheet.update(values=rows, range_name=f"A1:{_col_letter(width)}{len(rows)}")
+        if total > len(rows):
+            sheet.delete_rows(len(rows) + 1, total)
+        print(f"[watchlist_store] signals compaction: {n_rows} 列 → {len(keep)} 列 "
+              f"(重複版本 {dup}, 裁掉 {live - len(keep)} 筆超過 {SIGNAL_RETENTION_DAYS} 天)",
+              flush=True)
+        return keep
+    except Exception as e:
+        # 改寫到一半失敗: 最壞是殘留重複列 (讀取會去重), 下次再整理
+        print(f"[watchlist_store] signals compaction 失敗 (non-fatal): {e}", flush=True)
+        return records
+    finally:
+        try:
+            sheet.update_acell(_SIG_LEASE_CELL, "")
+        except Exception as e:
+            print(f"[watchlist_store] signals lease 釋放失敗 (會自然過期): {e}", flush=True)
+
+
+def load_signal_records(fresh: bool = False) -> Optional[List[Dict]]:
+    """從 signals sheet 讀全部訊號 (已去重)。sheet 不可用 / 讀取失敗 → None (呼叫端退回 blob)。
+
+    fresh=False: 60 秒內的快取可用 (唯讀查詢); fresh=True: 一定重讀 (read-modify-write 用),
+    且只有 fresh 讀取才會考慮 compaction。
+    """
+    global _SIG_CACHE, _SIG_HEADER
+    import time as _time
+    if not fresh and _SIG_CACHE is not None and _time.monotonic() - _SIG_CACHE[0] < _SIG_CACHE_TTL_SEC:
+        return [dict(r) for r in _SIG_CACHE[1]]
+    sheet = _get_signal_sheet()
+    if sheet is None:
+        return None
+    values = _read_signal_values(sheet)
+    if values is None:
+        return None
+    if not values:
+        # 全新 (剛建立) 的表 → 先寫 header; 寫不進去就當這次不可用
+        try:
+            sheet.update(values=[list(SIGNAL_COLS)],
+                         range_name=f"A1:{_col_letter(len(SIGNAL_COLS))}1")
+        except Exception as e:
+            print(f"[watchlist_store] signals sheet 寫 header 失敗 → 退回 blob 模式: {e}", flush=True)
+            return None
+        values = [list(SIGNAL_COLS)]
+    header, raw = _parse_signal_values(values)
+    _SIG_HEADER = header
+    records = _dedupe_signals(raw)
+    migrated_rows = False
+    if not _SIG_MIGRATED:
+        records, migrated_rows = _migrate_legacy_signals(sheet, header, records)
+    if fresh and not migrated_rows:
+        records = _maybe_compact_signals(sheet, values, len(raw), records)
+    _SIG_CACHE = (_time.monotonic(), records)
+    return [dict(r) for r in records]
+
+
+def append_signal_records(records: List[Dict]) -> bool:
+    """把新增 / 改過的紀錄 append 到 signals sheet (一次 API call 一批)。失敗回 False。"""
+    global _SIG_CACHE
+    recs = [copy.deepcopy(r) for r in (records or []) if isinstance(r, dict)]
+    if not recs:
+        return True
+    sheet = _get_signal_sheet()
+    if sheet is None:
+        return False
+    if not _append_signal_rows(sheet, _SIG_HEADER or list(SIGNAL_COLS), recs):
+        return False
+    if _SIG_CACHE is not None:
+        _SIG_CACHE = (_SIG_CACHE[0], _dedupe_signals(list(_SIG_CACHE[1]) + recs))
+    return True
+
+
+def clear_signal_records() -> Optional[int]:
+    """清空 signals sheet (只留 header), 回原本有效筆數; sheet 不可用回 None。"""
+    global _SIG_CACHE
+    sheet = _get_signal_sheet()
+    if sheet is None:
+        return None
+    values = _read_signal_values(sheet)
+    if values is None:
+        return None
+    n = len(_dedupe_signals(_parse_signal_values(values)[1]))
+    try:
+        sheet.clear()
+        sheet.update(values=[list(SIGNAL_COLS)],
+                     range_name=f"A1:{_col_letter(len(SIGNAL_COLS))}1")
+    except Exception as e:
+        print(f"[watchlist_store] signals sheet 清空失敗: {e}", flush=True)
+        return None
+    _SIG_CACHE = None
+    return n
+
+
+# ---------------------------------------------------------------------------
 # Google Sheets backend (optional)
 # ---------------------------------------------------------------------------
-def _get_sheet(name: str):
-    """取得 worksheet by name; 不存在則建立."""
+def _get_sheet(name: str, rows: int = 200, cols: int = 10):
+    """取得 worksheet by name; 不存在則建立 (rows/cols = 新建時的格線大小)."""
     try:
         import gspread  # type: ignore
         from google.oauth2.service_account import Credentials  # type: ignore
@@ -699,6 +1120,6 @@ def _get_sheet(name: str):
         try:
             return wb.worksheet(name)
         except Exception:
-            return wb.add_worksheet(title=name, rows=200, cols=10)
+            return wb.add_worksheet(title=name, rows=rows, cols=cols)
     except Exception:
         return None

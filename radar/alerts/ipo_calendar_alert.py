@@ -16,6 +16,7 @@ API:
 from __future__ import annotations
 
 import datetime as dt
+from radar.core import clock
 from datetime import timezone
 from typing import Dict, List, Optional
 
@@ -75,7 +76,7 @@ def _safe_finmind_data(dataset: str, days: int = 7) -> Optional[List[Dict]]:
         if not token:
             return None
         import requests
-        today = dt.date.today()
+        today = clock.tpe_today()  # 台股 IPO (FinMind) 用台北日期 (#16)
         end = (today + dt.timedelta(days=days)).strftime("%Y-%m-%d")
         start = (today - dt.timedelta(days=days)).strftime("%Y-%m-%d")
         url = "https://api.finmindtrade.com/api/v4/data"
@@ -103,7 +104,7 @@ def check_today_listing() -> List[Dict]:
             or _safe_finmind_data("TaiwanStockNewStock", days=3)
     if not rows:
         return []
-    today = dt.date.today()
+    today = clock.tpe_today()
     today_str = today.strftime("%Y-%m-%d")
     out = []
     for r in rows:
@@ -134,7 +135,7 @@ def check_us_ipos_next_week() -> List[Dict]:
             print("[ipo_us] no FINNHUB_TOKEN", flush=True)
             return []
         import requests
-        today = dt.date.today()
+        today = clock.et_today()  # 美股 IPO 週曆以美東日期算「下週」(#16)
         days_to_next_monday = (7 - today.weekday()) % 7 or 7
         next_monday = today + dt.timedelta(days=days_to_next_monday)
         next_sunday = next_monday + dt.timedelta(days=6)
@@ -220,7 +221,7 @@ def build_us_ipo_preview_msg() -> str:
         print("[ipo_us_preview] all IPOs evaluated as 'no', skip push", flush=True)
         return ""
 
-    today = dt.date.today()
+    today = clock.et_today()  # 美股 IPO 預告: 美東日期 (#16)
     days_to_mon = (7 - today.weekday()) % 7 or 7
     next_mon = today + dt.timedelta(days=days_to_mon)
     next_sun = next_mon + dt.timedelta(days=6)
@@ -280,7 +281,7 @@ def check_next_week_listings() -> List[Dict]:
             or _safe_finmind_data("TaiwanStockNewStock", days=14)
     if not rows:
         return []
-    today = dt.date.today()
+    today = clock.tpe_today()
     # 計算下週一 & 下週日
     # weekday: Mon=0, Sun=6. 今天若週五 (4), next_monday = today + (7-4) = today+3
     days_to_next_monday = (7 - today.weekday()) % 7
@@ -481,7 +482,7 @@ def build_today_listing_msg() -> str:
         return ""
 
     lines = ["⭐ <b>今日新股上市</b>"]
-    today = dt.date.today().strftime("%m/%d")
+    today = clock.tpe_today().strftime("%m/%d")
     lines.append(f"<i>{today} TPE | {len(candidates)}/{len(listings)} 檔值得關注</i>")
     lines.append("")
 
@@ -579,7 +580,7 @@ def build_next_week_preview_msg() -> str:
         print("[ipo_tw_preview] all IPOs evaluated as 'no', skip push", flush=True)
         return ""
 
-    today = dt.date.today()
+    today = clock.tpe_today()
     days_to_next_monday = (7 - today.weekday()) % 7 or 7
     next_monday = today + dt.timedelta(days=days_to_next_monday)
     next_sunday = next_monday + dt.timedelta(days=6)

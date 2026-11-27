@@ -18,6 +18,7 @@ from typing import Dict, List
 import pandas as pd
 import streamlit as st
 
+from radar.core import clock
 from radar.data import data_sources as ds
 from radar.analysis import sector_pulse
 from radar.screeners import tw_screener as tw
@@ -26,7 +27,7 @@ from radar.screeners import tw_screener as tw
 @st.cache_data(ttl=900, show_spinner=False)
 def fetch_taiwan_stock_news(stock_id: str, days: int = 14) -> pd.DataFrame:
     """FinMind 個股新聞 (若 dataset 不可用則回空)."""
-    today = dt.date.today()
+    today = clock.tpe_today()  # 台股 FinMind 區間 (#16)
     end = today.strftime("%Y-%m-%d")
     start = (today - dt.timedelta(days=days)).strftime("%Y-%m-%d")
     try:
@@ -167,7 +168,7 @@ def run_news_growth_picks(top_n: int = 10, themes_filter: List[str] = None) -> d
     diagnostic_lines.append(f"✅ Step 2: 配對熱門題材池 {len(candidates)} 檔候選")
 
     # Step 3: 抓日線
-    today = dt.date.today()
+    today = clock.tpe_today()  # 台股 FinMind 區間 (#16)
     end = today.strftime("%Y-%m-%d")
     start = (today - dt.timedelta(days=120)).strftime("%Y-%m-%d")
     daily_all = ds._fetch_universe(

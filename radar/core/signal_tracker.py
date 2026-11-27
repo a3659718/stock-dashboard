@@ -5,7 +5,8 @@ signal_tracker.py
 設計原則:
   - 對所有訊號類型 (catalyst / strong_sector_leader / next_day_breakout 等) 用同一個 schema
   - 「預測 → 實際」用 stock_id 對應, N 個「交易日」後驗證
-  - 紀錄存在 watchlist_store.monitor_state["signals"], 跨 cron persist
+  - 紀錄存在 Google Sheets 獨立的 "signals" worksheet (一筆一列, append-only, 讀取去重),
+    sheet 不可用時退回 watchlist_store.monitor_state["signals"] (舊 blob), 跨 cron persist
 
 Schema (一筆記錄):
 {
@@ -53,7 +54,7 @@ from radar.data import data_sources as ds
 
 
 _STATE_KEY = "signals"
-_MAX_RECORDS = 2000  # 防爆: 留最近 2000 筆
+_MAX_RECORDS = 2000  # 防爆: blob (fallback) 模式下留最近 2000 筆; signals sheet 模式改由保留天數控制
 
 # 命中門檻 (%). 使用者定義:「隔天收盤價高於推薦當下價就算有漲」→ 0.0
 # up   → actual_pct >  HIT_THRESHOLD_PCT
@@ -83,85 +84,202 @@ def _save_state(state: Dict) -> None:
         print(f"[signal_tracker] save failed: {e}", flush=True)
 
 
-def _mutate_signals_atomically(mutate_fn) -> int:
+# ---------------------------------------------------------------------------
+# 儲存後端 (2026-11): 優先用獨立的 signals worksheet (watchlist_store.load_signal_records),
+# 不可用 (沒 credentials / 額度 / 讀取失敗 / 被 stub 掉的舊版 watchlist_store) 才退回
+# monitor_state["signals"] blob —— 跟改版前的行為完全相同。
+# ---------------------------------------------------------------------------
+def _sheet_store():
+    """回傳支援 signals sheet 的 watchlist_store 模組; 不支援回 None."""
+    try:
+        from radar.core import watchlist_store
+    except Exception:
+        return None
+    if all(hasattr(watchlist_store, n) for n in ("load_signal_records", "append_signal_records")):
+        return watchlist_store
+    return None
+
+
+def _load_sheet_records(fresh: bool = False) -> Optional[List[Dict]]:
+    ws = _sheet_store()
+    if ws is None:
+        return None
+    try:
+        return ws.load_signal_records(fresh=fresh)
+    except Exception as e:
+        print(f"[signal_tracker] signals sheet 讀取失敗, 退回 blob: {e}", flush=True)
+        return None
+
+
+def _all_records() -> List[Dict]:
+    """唯讀用: sheet 可用就讀 sheet (60 秒快取), 否則讀 blob."""
+    recs = _load_sheet_records(fresh=False)
+    if recs is not None:
+        return recs
+    return list(_load_state().get(_STATE_KEY, []) or [])
+
+
+def _cap_legacy(records: List[Dict]) -> None:
+    """blob 模式的筆數上限 — 保留所有 pending (hit=None) + 最近的 validated."""
+    if len(records) > _MAX_RECORDS:
+        pending = [r for r in records if r.get("hit") is None]
+        validated = [r for r in records if r.get("hit") is not None]
+        keep_validated = max(0, _MAX_RECORDS - len(pending))
+        # Bug fix (2026-08): validated[-0:] 等於 validated[0:] → keep_validated 為 0 時
+        # 反而「全部保留」而不是保留 0 筆 (Python 負索引切片的經典陷阱)。
+        # pending 堆到 _MAX_RECORDS 時就會發生, records 從此無限成長,
+        # 而整包 JSON 每次都要寫進 Google Sheets 單一儲存格。
+        records[:] = pending + (validated[-keep_validated:] if keep_validated > 0 else [])
+
+
+def _legacy_upsert(changed: List[Dict]) -> None:
+    """signals sheet append 失敗時, 把變動寫回 blob (舊行為), 下次 sheet 可用時會被搬走."""
+    state = _load_state()
+    records = state.get(_STATE_KEY)
+    if not isinstance(records, list):
+        records = []
+    pos = {r.get("id"): i for i, r in enumerate(records) if isinstance(r, dict)}
+    for r in changed:
+        i = pos.get(r.get("id"))
+        if i is None:
+            records.append(r)
+        else:
+            records[i] = r
+    _cap_legacy(records)
+    state[_STATE_KEY] = records
+    _save_state(state)
+
+
+def _rmw_signals(mutate_fn, legacy_only: bool = False) -> int:
+    """一次 read → mutate → write (呼叫端負責鎖)."""
+    import json as _json
+    if not legacy_only:
+        records = _load_sheet_records(fresh=True)
+        if records is not None:
+            def _sig(r):
+                return _json.dumps(r, sort_keys=True, ensure_ascii=False, default=str)
+            before = {id(r): _sig(r) for r in records}
+            n_changed = mutate_fn(records)
+            if n_changed:
+                # 只 append 新增 / 改過的那幾筆 (一次 API call); 刪除不會發生 (reset_all 另外處理)
+                changed = [r for r in records if before.get(id(r)) != _sig(r)]
+                ws = _sheet_store()
+                if changed and not (ws is not None and ws.append_signal_records(changed)):
+                    print(f"[signal_tracker] signals sheet 寫入失敗 → {len(changed)} 筆暫存回 blob",
+                          flush=True)
+                    _legacy_upsert(changed)
+            return n_changed
+    # blob 模式 (舊行為)
+    state = _load_state()
+    records = state.setdefault(_STATE_KEY, [])
+    n_changed = mutate_fn(records)
+    if n_changed:
+        _cap_legacy(records)
+        state[_STATE_KEY] = records
+        _save_state(state)
+    return n_changed
+
+
+def _try_lock(lock_path: str):
+    """跨 process 排他鎖, 最多等 1 秒 (20 × 50ms)。回 (handle, kind); 拿不到鎖時 kind=None.
+
+    Linux / macOS: fcntl.flock (跟改版前完全相同)。
+    Windows: portalocker。Bug fix: 原本 portalocker.lock(fd, LOCK_EX) 傳的是 os.open 的
+    int fd, 但 portalocker 要的是 file object → 必定出錯被 except 吞掉 → Windows 上永遠
+    無鎖; 而且沒加 LOCK_NB, 真的鎖到時反而可能無限等。改成開 file object + LOCK_EX|LOCK_NB
+    重試; 沒裝 portalocker 時退回標準庫 msvcrt.locking。
+    """
+    import os, time
+    try:
+        import fcntl
+    except ImportError:
+        fcntl = None
+    if fcntl is not None:
+        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
+        for _ in range(20):
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return fd, "fcntl"
+            except BlockingIOError:
+                time.sleep(0.05)
+        return fd, None
+    fh = open(lock_path, "a+")
+    try:
+        import portalocker
+    except ImportError:
+        portalocker = None
+    last = None
+    for _ in range(20):
+        try:
+            if portalocker is not None:
+                portalocker.lock(fh, portalocker.LOCK_EX | portalocker.LOCK_NB)
+                return fh, "portalocker"
+            import msvcrt
+            fh.seek(0)
+            msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+            return fh, "msvcrt"
+        except Exception as e:  # 被別人鎖住: portalocker.LockException / msvcrt 的 OSError
+            last = e
+        time.sleep(0.05)
+    print(f"[signal_tracker] 1 秒內拿不到鎖, 無鎖執行: {last}", flush=True)
+    return fh, None
+
+
+def _release_lock(handle, kind) -> None:
+    if handle is None:
+        return
+    try:
+        if kind == "fcntl":
+            import fcntl
+            fcntl.flock(handle, fcntl.LOCK_UN)
+        elif kind == "portalocker":
+            import portalocker
+            portalocker.unlock(handle)
+        elif kind == "msvcrt":
+            import msvcrt
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+    except Exception as e:
+        print(f"[signal_tracker] 解鎖失敗: {e}", flush=True)
+    try:
+        if isinstance(handle, int):
+            import os
+            os.close(handle)
+        else:
+            handle.close()
+    except Exception as e:
+        print(f"[signal_tracker] 關閉 lock 檔失敗: {e}", flush=True)
+
+
+def _mutate_signals_atomically(mutate_fn, legacy_only: bool = False) -> int:
     """以 file-lock 保護的 read-modify-write, 防 cron + Streamlit 同時 lost update.
 
     `mutate_fn(records: list) -> int` 接 mutable list, return 變動的筆數. 函式內可
     直接修改 list (append / 改值) — 在持有 lock 期間做完 reload 就不會被覆蓋.
 
-    Lock 用 fcntl (Unix) 或 portalocker (Windows fallback). 失敗就 fall back 到
-    無 lock 模式 (不致 raise, 但有 race 風險).
+    Lock 用 fcntl (Unix) 或 portalocker / msvcrt (Windows). 拿不到就無鎖執行
+    (不致 raise, 但有 race 風險)。註: 這是「同一台機器」的鎖; 跨 GitHub Actions runner
+    的併發由 signals sheet 的 append-only + 讀取去重處理 (見 watchlist_store)。
     """
-    import os, time
     n_changed = 0
     try:
         from radar.core import watchlist_store
         lock_path = str(watchlist_store.MONITOR_STATE_FILE) + ".lock"
     except Exception:
         # 連 watchlist_store 都掛 — fall back 無鎖模式
-        state = _load_state()
-        records = state.setdefault(_STATE_KEY, [])
-        n_changed = mutate_fn(records)
-        if n_changed:
-            state[_STATE_KEY] = records
-            _save_state(state)
-        return n_changed
+        return _rmw_signals(mutate_fn, legacy_only)
 
-    # 嘗試開 lock file 並排他鎖定 (跨 process)
-    fd = None
-    locked = False
+    handle, kind = None, None
     try:
-        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
-        try:
-            import fcntl
-            for _ in range(20):  # 最多等 1 秒 (20 × 50ms)
-                try:
-                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    locked = True
-                    break
-                except BlockingIOError:
-                    time.sleep(0.05)
-        except ImportError:
-            # Windows: 用 portalocker (若沒裝就 skip lock, fall back race-prone)
-            try:
-                import portalocker
-                portalocker.lock(fd, portalocker.LOCK_EX)
-                locked = True
-            except Exception:
-                pass
-
+        handle, kind = _try_lock(lock_path)
         # 持有 lock 後再 read → mutate → save (atomic 區段)
-        state = _load_state()
-        records = state.setdefault(_STATE_KEY, [])
-        n_changed = mutate_fn(records)
-        if n_changed:
-            state[_STATE_KEY] = records
-            _save_state(state)
+        n_changed = _rmw_signals(mutate_fn, legacy_only)
     except Exception as e:
         print(f"[signal_tracker] _mutate_signals_atomically failed: {e}", flush=True)
         # fall back to non-locked
-        state = _load_state()
-        records = state.setdefault(_STATE_KEY, [])
-        n_changed = mutate_fn(records)
-        if n_changed:
-            state[_STATE_KEY] = records
-            _save_state(state)
+        n_changed = _rmw_signals(mutate_fn, legacy_only)
     finally:
-        if fd is not None:
-            try:
-                if locked:
-                    try:
-                        import fcntl
-                        fcntl.flock(fd, fcntl.LOCK_UN)
-                    except ImportError:
-                        try:
-                            import portalocker
-                            portalocker.unlock(fd)
-                        except Exception:
-                            pass
-                os.close(fd)
-            except Exception:
-                pass
+        _release_lock(handle, kind)
     return n_changed
 
 
@@ -191,50 +309,61 @@ def record_signal(signal_type: str, stock_id: str, name: str = "",
     """
     if not stock_id or not signal_type:
         return None
+    return _record_many([dict(
+        signal_type=signal_type, stock_id=stock_id, name=name,
+        predicted_price=predicted_price, expected_direction=expected_direction,
+        evaluate_after_days=evaluate_after_days, extras=extras,
+    )])[0]
+
+
+def _record_many(specs: List[Dict]) -> List[Optional[str]]:
+    """一次 read-modify-write 記多筆 (record_batch 用: N 檔只打 1 次讀 + 1 次 append,
+    不是每檔各打一次 Sheets API)。回每個 spec 對應的 record id (spec 無效為 None)。"""
     today = _today_str()
-    rec_id_holder = [None]  # closure 用
+    ids: List[Optional[str]] = [None] * len(specs)
 
     def _mutate(records: List[Dict]) -> int:
         # Dedup: 同一天 同一 stock_id + signal_type 只記一筆
+        existing = {}
         for r in records:
-            if (r.get("predicted_at") == today
-                    and r.get("signal_type") == signal_type
-                    and str(r.get("stock_id", "")) == str(stock_id)):
-                rec_id_holder[0] = r.get("id")
-                return 0  # 已存在 → 不變動
-
-        rec_id_holder[0] = str(uuid.uuid4())[:8]
-        rec = {
-            "id": rec_id_holder[0],
-            "signal_type": signal_type,
-            "stock_id": str(stock_id),
-            "name": str(name or ""),
-            "predicted_at": today,
-            "predicted_price": float(predicted_price) if predicted_price is not None else None,
-            "expected_direction": expected_direction,
-            "evaluate_after_days": int(evaluate_after_days),
-            "evaluate_at": _add_days(today, int(evaluate_after_days)),
-            "actual_price": None,
-            "actual_date": None,
-            "actual_pct": None,
-            "hit": None,
-            "extras": dict(extras or {}),
-        }
-        records.append(rec)
-        # Cap — 保留所有 pending (hit=None) + 最近的 validated
-        if len(records) > _MAX_RECORDS:
-            pending = [r for r in records if r.get("hit") is None]
-            validated = [r for r in records if r.get("hit") is not None]
-            keep_validated = max(0, _MAX_RECORDS - len(pending))
-            # Bug fix (2026-08): validated[-0:] 等於 validated[0:] → keep_validated 為 0 時
-            # 反而「全部保留」而不是保留 0 筆 (Python 負索引切片的經典陷阱)。
-            # pending 堆到 _MAX_RECORDS 時就會發生, records 從此無限成長,
-            # 而整包 JSON 每次都要寫進 Google Sheets 單一儲存格。
-            records[:] = pending + (validated[-keep_validated:] if keep_validated > 0 else [])
-        return 1
+            if r.get("predicted_at") == today:
+                existing.setdefault((r.get("signal_type"), str(r.get("stock_id", ""))), r.get("id"))
+        added = 0
+        for i, sp in enumerate(specs):
+            signal_type, stock_id = sp.get("signal_type"), sp.get("stock_id")
+            if not stock_id or not signal_type:
+                continue
+            k = (signal_type, str(stock_id))
+            if k in existing:
+                ids[i] = existing[k]  # 已存在 → 不變動
+                continue
+            rid = str(uuid.uuid4())[:8]
+            eval_days = int(sp.get("evaluate_after_days", 3))
+            predicted_price = sp.get("predicted_price")
+            records.append({
+                "id": rid,
+                "signal_type": signal_type,
+                "stock_id": str(stock_id),
+                "name": str(sp.get("name") or ""),
+                "predicted_at": today,
+                "predicted_price": float(predicted_price) if predicted_price is not None else None,
+                "expected_direction": sp.get("expected_direction", "up"),
+                "evaluate_after_days": eval_days,
+                "evaluate_at": _add_days(today, eval_days),
+                "actual_price": None,
+                "actual_date": None,
+                "actual_pct": None,
+                "hit": None,
+                "extras": dict(sp.get("extras") or {}),
+            })
+            existing[k] = rid
+            ids[i] = rid
+            added += 1
+        # 筆數上限 (blob 模式) 在 _rmw_signals 的 _cap_legacy 處理
+        return added
 
     _mutate_signals_atomically(_mutate)
-    return rec_id_holder[0]
+    return ids
 
 
 # ===========================================================================
@@ -418,8 +547,7 @@ def evaluate_pending() -> int:
     today = _today_str()
 
     # Phase 1: 先算出每筆要用哪個價 (這段沒鎖, 慢操作不卡 lock)
-    state_snap = _load_state()
-    records_snap: List[Dict] = state_snap.get(_STATE_KEY, []) or []
+    records_snap: List[Dict] = _all_records()
 
     # 需要抓行情的 (stock_id, market) — 依 pending 記錄去重, 並限流
     wanted: List[Tuple[str, str]] = []
@@ -507,14 +635,14 @@ def evaluate_pending() -> int:
 
 def pending_count() -> int:
     """還沒驗證的筆數 (排除已放棄的)."""
-    records = _load_state().get(_STATE_KEY, []) or []
+    records = _all_records()
     return sum(1 for r in records
                if r.get("hit") is None and not (r.get("extras") or {}).get("_no_data"))
 
 
 def load_records() -> List[Dict]:
     """回目前所有訊號紀錄 (唯讀用)."""
-    return list(_load_state().get(_STATE_KEY, []) or [])
+    return list(_all_records())
 
 
 def accuracy_summary(signal_type: Optional[str] = None,
@@ -644,7 +772,7 @@ def record_batch(signal_type: str, items: List[Dict],
     """
     if not items:
         return 0
-    added = 0
+    specs: List[Dict] = []
     for it in items:
         sid = str(it.get("stock_id") or it.get("symbol", "")).strip()
         if not sid:
@@ -661,7 +789,7 @@ def record_batch(signal_type: str, items: List[Dict],
         extras = {"market": str(market).upper(), "source": source or signal_type}
         if asof:
             extras["asof"] = asof
-        rid = record_signal(
+        specs.append(dict(
             signal_type=signal_type,
             stock_id=sid,
             name=name,
@@ -669,16 +797,26 @@ def record_batch(signal_type: str, items: List[Dict],
             expected_direction=expected_direction,
             evaluate_after_days=evaluate_after_days,
             extras=extras,
-        )
-        if rid:
-            added += 1
-    return added
+        ))
+    if not specs or not signal_type:
+        return 0
+    # 一次 read-modify-write 記整批 (原本逐檔 record_signal = 每檔一讀一寫)
+    return sum(1 for rid in _record_many(specs) if rid)
 
 
 def reset_all() -> int:
-    """清空所有訊號紀錄. 回原本筆數."""
+    """清空所有訊號紀錄 (signals sheet + blob). 回原本筆數."""
+    n_sheet = None
+    ws = _sheet_store()
+    if ws is not None and hasattr(ws, "clear_signal_records"):
+        try:
+            n_sheet = ws.clear_signal_records()
+        except Exception as e:
+            print(f"[signal_tracker] 清空 signals sheet 失敗: {e}", flush=True)
+
     def _mutate(records):
         n = len(records)
         records.clear()
         return n
-    return _mutate_signals_atomically(_mutate)
+    n_legacy = _mutate_signals_atomically(_mutate, legacy_only=True)
+    return n_sheet if n_sheet is not None else n_legacy

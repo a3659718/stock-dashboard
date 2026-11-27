@@ -62,6 +62,7 @@ def find_tw_laggards(min_theme_avg: float = 1.5,
         quotes = sector_pulse.fetch_intraday_metrics(members, market_map)
         if quotes.empty:
             continue
+        # 量比已在 sector_pulse 做時間校正 (audit #2; 1.0 = 這個時間點的正常量)
 
         # 落後股篩選
         threshold = avg - lag_threshold

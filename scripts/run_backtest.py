@@ -18,6 +18,11 @@ scripts/run_backtest.py
     python -m scripts.run_backtest --universe top30 --days 180 --out reports/bt.xlsx
 
 預設 universe "top30" = 大型權值 + 中型成長 + 部分小型題材的 30 檔組合.
+
+進場規則: 隔日開盤進場 (2026-11-27 修正, audit #1).
+  chip_provider 回傳的是「截至 T 日 (含)」的法人 / 融資融券資料, 這些在 T 日收盤後才公布,
+  所以 backtest_upside 一律以 T+1 開盤價進場 (見該模組 docstring)。
+  ⚠️ 2026-11-27 之前跑出的報告是「T 日收盤進場」, 勝率偏高, 不可與現在的結果直接比較。
 """
 from __future__ import annotations
 
@@ -55,7 +60,7 @@ TOP30 = {
 
 def fetch_prices(stock_ids, days: int) -> dict:
     """從 FinMind 抓 daily."""
-    today = dt.date.today()
+    today = (dt.datetime.utcnow() + dt.timedelta(hours=8)).date()
     start = (today - dt.timedelta(days=days + 80)).strftime("%Y-%m-%d")  # 留 80 天緩衝給 52w / MA60
     end = today.strftime("%Y-%m-%d")
     print(f"抓 {len(stock_ids)} 檔 daily ({start} ~ {end})…", flush=True)
@@ -82,9 +87,9 @@ def make_chip_provider(stock_ids):
 
     為了效率, 預先抓每檔股票 1 年的籌碼資料, 然後 query 時切片.
     """
-    print(f"預載 {len(stock_ids)} 檔籌碼資料 (歷史 90 天)…", flush=True)
+    print(f"預載 {len(stock_ids)} 檔籌碼資料 (歷史 365 天)…", flush=True)
     chip_cache = {}
-    today = dt.date.today()
+    today = (dt.datetime.utcnow() + dt.timedelta(hours=8)).date()
     for i, sid in enumerate(stock_ids, 1):
         try:
             # 抓 360 天的法人 / 融資融券 (回測期間需要不同日期切片)
@@ -110,7 +115,7 @@ def make_chip_provider(stock_ids):
             return None
         inst = cache["inst"]
         margin = cache["margin"]
-        # 切到 as_of 為止的 30 天視窗
+        # 切到 as_of 為止的 30 天視窗 (含 T 日 — T 日籌碼收盤後才公布, 所以回測端必須 T+1 開盤進場)
         cutoff = as_of - dt.timedelta(days=35)
         inst_slice = inst[(inst["date"] <= as_of) & (inst["date"] >= cutoff)] if not inst.empty else inst
         margin_slice = margin[(margin["date"] <= as_of) & (margin["date"] >= cutoff)] if not margin.empty else margin
@@ -171,9 +176,9 @@ def fetch_benchmark(days: int) -> pd.DataFrame:
     """抓 TWII (^TWII via yfinance, FinMind 也可)."""
     try:
         import yfinance as yf
-        today = dt.date.today()
+        today = (dt.datetime.utcnow() + dt.timedelta(hours=8)).date()
         start = today - dt.timedelta(days=days + 50)
-        df = yf.download("^TWII", start=start, end=today, progress=False, auto_adjust=False, threads=False)
+        df = yf.download("^TWII", start=start, end=today + dt.timedelta(days=1), progress=False, auto_adjust=False, threads=False)
         if df.empty:
             return pd.DataFrame()
         df = df.reset_index()
@@ -221,7 +226,8 @@ def main():
     end = all_dates[-25].strftime("%Y-%m-%d") if len(all_dates) > 25 else all_dates[-1].strftime("%Y-%m-%d")
     hold_days = [int(x) for x in args.hold_days.split(",")]
 
-    print(f"\n回測 {start} ~ {end}  ·  rescan_every={args.rescan_every}  ·  hold={hold_days}  ·  chip={chip_provider is not None}\n", flush=True)
+    print(f"\n回測 {start} ~ {end}  ·  rescan_every={args.rescan_every}  ·  hold={hold_days}  ·  "
+          f"chip={chip_provider is not None}  ·  進場={bt.ENTRY_RULE}\n", flush=True)
     result = bt.backtest(
         prices=prices, names=names,
         start_date=start, end_date=end,

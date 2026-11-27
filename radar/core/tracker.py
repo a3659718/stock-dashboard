@@ -25,6 +25,7 @@ from typing import Optional
 import pandas as pd
 import streamlit as st
 
+from radar.core import clock
 from radar.data import data_sources as ds
 
 LOCAL_CSV = "tracking_history.csv"  # 相對 app 根目錄
@@ -91,7 +92,7 @@ def save_snapshot(combined_df: pd.DataFrame, snapshot_date: Optional[str] = None
     if combined_df is None or combined_df.empty:
         return {"ok": False, "msg": "無資料"}
     if snapshot_date is None:
-        snapshot_date = dt.date.today().strftime("%Y-%m-%d")
+        snapshot_date = clock.tpe_today_str()  # 台股掃描 snapshot 以台北日期 (#16)
 
     rows = [_row_from_combined(r, snapshot_date) for _, r in combined_df.iterrows()]
     new_df = pd.DataFrame(rows, columns=SNAPSHOT_COLUMNS)
@@ -183,14 +184,14 @@ def evaluate_history_performance(history: pd.DataFrame, days_window: int = 30) -
         return pd.DataFrame()
     df = history.copy()
     df["snapshot_date"] = pd.to_datetime(df["snapshot_date"], errors="coerce")
-    cutoff = pd.Timestamp(dt.date.today() - dt.timedelta(days=days_window))
+    cutoff = pd.Timestamp(clock.tpe_today() - dt.timedelta(days=days_window))
     df = df[df["snapshot_date"] >= cutoff]
     if df.empty:
         return df
 
     # 為每個獨特 stock_id 抓最新價格 (一次抓一支)
     unique_ids = df["stock_id"].astype(str).unique().tolist()
-    today = dt.date.today()
+    today = clock.tpe_today()
     end = today.strftime("%Y-%m-%d")
     start = (today - dt.timedelta(days=days_window + 10)).strftime("%Y-%m-%d")
 

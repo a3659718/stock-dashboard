@@ -21,6 +21,7 @@ import datetime as dt
 import hashlib
 from typing import Dict, List
 
+from radar.core import clock
 from radar.core import watchlist_store
 
 
@@ -113,7 +114,8 @@ def check_trump_policy_news() -> List[Dict]:
     """
     state = watchlist_store.load_monitor_state()
     tp_state = state.setdefault("trump_policy_alert", {})
-    today_str = dt.date.today().strftime("%Y-%m-%d")
+    # 每日上限 key 用台北日期 (#16); 讀寫三處 (check / mark / unmark) 一致
+    today_str = clock.tpe_today_str()
     now_utc = dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)
 
     # cooldown — 統一用 last_sent_ts (mark_alerts_sent 寫的 key)
@@ -166,7 +168,9 @@ def check_trump_policy_news() -> List[Dict]:
             pub_date = ""
             if ts and isinstance(ts, (int, float)):
                 try:
-                    pub_ts = dt.datetime.fromtimestamp(int(ts))
+                    # 刻意 naive UTC (#16): 要跟下面的 now_utc (naive UTC) 相減; 原本 naive
+                    # fromtimestamp 用伺服器時區, 在本機 (台北) 跑會差 8 小時
+                    pub_ts = dt.datetime.fromtimestamp(int(ts), dt.timezone.utc).replace(tzinfo=None)
                     pub_date = pub_ts.strftime("%Y-%m-%d")
                 except Exception:
                     pass
@@ -237,7 +241,7 @@ def check_trump_policy_news() -> List[Dict]:
                 raw_date = n.get("date") or n.get("publish_date") or n.get("providerPublishTime")
                 if isinstance(raw_date, (int, float)):
                     try:
-                        pub_ts = dt.datetime.fromtimestamp(int(raw_date))
+                        pub_ts = dt.datetime.fromtimestamp(int(raw_date), dt.timezone.utc).replace(tzinfo=None)  # 刻意 naive UTC (#16)
                     except Exception:
                         pass
                 elif isinstance(raw_date, str) and raw_date:
@@ -632,7 +636,7 @@ def unmark_alerts_sent(alerts: List[Dict]) -> None:
         drop = {_hash_title(a.get("title", "")) for a in alerts}
         tpa["sent_hashes"] = [h for h in (tpa.get("sent_hashes") or []) if h not in drop]
         tpa.pop("last_sent_ts", None)
-        today = dt.date.today().strftime("%Y-%m-%d")
+        today = clock.tpe_today_str()
         daily = tpa.get("daily_count")
         if isinstance(daily, dict) and today in daily:
             daily[today] = max(0, int(daily.get(today, 0)) - len(alerts))
@@ -655,7 +659,7 @@ def mark_alerts_sent(alerts: List[Dict]) -> None:
                 sent.append(h)
         tpa["sent_hashes"] = sent[-200:]
         tpa["last_sent_ts"] = dt.datetime.now(dt.timezone.utc).isoformat()
-        today = dt.date.today().strftime("%Y-%m-%d")
+        today = clock.tpe_today_str()
         daily = tpa.setdefault("daily_count", {})
         if not isinstance(daily, dict):
             daily = {}

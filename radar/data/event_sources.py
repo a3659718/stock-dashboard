@@ -6,6 +6,7 @@ from typing import Dict, List, Optional
 
 import requests
 
+from radar.core import clock
 from radar.data import data_sources as ds
 
 
@@ -19,7 +20,7 @@ def fetch_finnhub_8k(symbol: str, days_back: int = 3) -> List[Dict]:
     token = ds.get_finnhub_token()
     if not token:
         return []
-    today = dt.date.today()
+    today = clock.et_today()  # SEC 8-K 申報日是美東日期 (#16)
     frm = (today - dt.timedelta(days=days_back)).strftime("%Y-%m-%d")
     to = today.strftime("%Y-%m-%d")
     url = "https://finnhub.io/api/v1/stock/filings"
@@ -63,7 +64,7 @@ def fetch_us_press_releases(symbol: str, days_back: int = 3) -> List[Dict]:
     token = ds.get_finnhub_token()
     if not token:
         return []
-    today = dt.date.today()
+    today = clock.et_today()  # 美股新聞稿以美東日期 (#16)
     frm = (today - dt.timedelta(days=days_back)).strftime("%Y-%m-%d")
     to = today.strftime("%Y-%m-%d")
     url = "https://finnhub.io/api/v1/press-releases"
@@ -88,7 +89,8 @@ def fetch_us_press_releases(symbol: str, days_back: int = 3) -> List[Dict]:
             if ts:
                 try:
                     if isinstance(ts, (int, float)):
-                        date_str = dt.datetime.fromtimestamp(int(ts)).strftime("%Y-%m-%d")
+                        # #16: 不用 naive fromtimestamp (伺服器時區), 明確換成美東日期
+                        date_str = clock.et_now(dt.datetime.fromtimestamp(int(ts), dt.timezone.utc)).strftime("%Y-%m-%d")
                     else:
                         date_str = str(ts)[:10]
                 except Exception:
@@ -120,7 +122,7 @@ def fetch_tw_major_announcements(stock_id: Optional[str] = None,
     token = ds.get_finmind_token()
     if not token:
         return []
-    today = dt.date.today()
+    today = clock.tpe_today()  # 台股重大訊息 (FinMind) 用台北日期 (#16)
     frm = (today - dt.timedelta(days=days_back)).strftime("%Y-%m-%d")
     url = "https://api.finmindtrade.com/api/v4/data"
     params = {

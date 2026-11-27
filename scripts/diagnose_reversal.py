@@ -52,6 +52,7 @@ except ImportError:
 from radar.alerts import index_alerts as ia
 from radar.data import data_sources as ds
 from radar.core import watchlist_store
+from radar.core import clock
 
 
 def diagnose_sym(sym: str = "^TWII") -> None:
@@ -69,7 +70,7 @@ def diagnose_sym(sym: str = "^TWII") -> None:
     snap = ia._fetch_intraday_anchor_data(sym)
     if not snap:
         print(f"❌ _fetch_intraday_anchor_data 回 None — 可能 yfinance 資料 stale 或假日")
-        print(f"   sys_today (UTC date): {dt.date.today()}")
+        print(f"   sys_today (UTC date): {clock.utc_now().date()}")  # 與 index_alerts stale check 同基準
         print(f"   提示: 用 fetch_yf_history('{sym}', period='2d', interval='5m') 看實際 bar")
         return
 
@@ -114,7 +115,7 @@ def diagnose_sym(sym: str = "^TWII") -> None:
         state = watchlist_store.load_monitor_state()
         rev_state = state.get("intraday_reversal", {})
         sym_state = rev_state.get(sym, {})
-        today_str = dt.date.today().strftime("%Y-%m-%d")
+        today_str = ia._market_today_str(cfg.get("country"))  # 與 check_intraday_reversal 同基準 (#16)
         if sym_state.get("date") != today_str:
             print()
             print("📦 monitor_state: 今日尚未有任何反轉記錄")

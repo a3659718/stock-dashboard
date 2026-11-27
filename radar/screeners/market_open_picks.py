@@ -275,6 +275,7 @@ def get_tw_open_picks(top_themes_n: int = 3, picks_per_theme: int = 3) -> Dict:
             continue
 
         df = df.copy()
+        # 量比已在 sector_pulse 做時間校正 (audit #2; 1.0 = 這個時間點的正常量)
         # 跨題材去重
         df = df[~df["stock_id"].isin(seen_sids)]
         df["score"] = df.apply(lambda r: _score_stock_momentum(r.to_dict()), axis=1)
@@ -698,14 +699,17 @@ def _us_stock_metrics(symbol: str) -> Optional[Dict]:
         return None
     try:
         close = df["Close"].astype(float)
-        vol = df["Volume"].astype(float)
         last = float(close.iloc[-1])
         prev = float(close.iloc[-2])
         chg = (last / prev - 1) * 100 if prev else 0
         five = (last / float(close.iloc[-6]) - 1) * 100 if len(close) >= 6 else None
         twenty = (last / float(close.iloc[-21]) - 1) * 100 if len(close) >= 21 else None
-        avg5_vol = vol.iloc[-6:-1].mean()
-        ratio = float(vol.iloc[-1] / avg5_vol) if avg5_vol > 0 else None
+        # 量比 (時間校正, audit #2): 盤中時最後一根日 K 是未完成的今天, 原本直接 ÷ 5 日
+        # 平均「整日」量 → 開盤 30 分鐘正常量也只有 ~0.12, _score_stock_momentum 的
+        # 1.2~3 加分區間永遠搆不到、反而 <0.8 全員扣分。改用美股日內量能曲線校正分母;
+        # 收盤後 / 盤前 (最後一根是完整交易日) 等同原本的整日量比。
+        from radar.data import intraday_volume as _iv
+        ratio = _iv.daily_volume_ratio(df, market="US", lookback_days=5)
         return {
             "symbol": symbol, "現價": round(last, 2),
             "今日%": round(chg, 2), "5日%": round(five, 2) if five is not None else None,

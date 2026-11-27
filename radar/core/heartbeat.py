@@ -12,6 +12,7 @@ heartbeat.py
 from __future__ import annotations
 
 import datetime as dt
+from radar.core import clock
 import os
 from typing import Dict, List, Optional, Tuple
 
@@ -109,7 +110,7 @@ def _check_etf_freshness() -> List[Dict]:
     except Exception:
         return []
 
-    today = dt.date.today()
+    today = clock.tpe_today()  # 台股主動式 ETF 資料日比對用台北日期 (#16)
     results = []
     for code, cfg in active_etf_monitor.ETF_CONFIG.items():
         entry = etf_state.get(code, {})

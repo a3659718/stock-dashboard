@@ -511,13 +511,14 @@ def main() -> int:
             print(f"=====================\n")
         elif market == "weekend_recap":
             # 只在 Sat / Sun fire
-            import datetime as _dt
-            if _dt.date.today().weekday() < 5:
+            from radar.core import clock as _clock
+            _tpe_d = _clock.tpe_today()  # 週末判斷以台北日期 (#16); 14:02 UTC 觸發時與 UTC 同日
+            if _tpe_d.weekday() < 5:
                 print(f"=== Weekend Recap Check ===")
-                print(f"今日 weekday ({_dt.date.today().strftime('%A')}), weekend_recap mode 跳過此次推播.")
+                print(f"今日 weekday ({_tpe_d.strftime('%A')}), weekend_recap mode 跳過此次推播.")
                 return 0
             print(f"=== Weekend Recap Check ===")
-            print(f"今日 weekend ({_dt.date.today().strftime('%A')}), 執行週末摘要推播")
+            print(f"今日 weekend ({_tpe_d.strftime('%A')}), 執行週末摘要推播")
             print(f"=====================\n")
         elif market == "holiday_news":
             # 反向邏輯: TW 開盤日才跳過 (其他正常推播會處理), 休市日才跑
@@ -779,8 +780,8 @@ def main() -> int:
     # === 💰 利率週期建議 (週一 us_open 推一次/週) ===
     if market == "us_open":
         try:
-            import datetime as _dt2
-            if _dt2.date.today().weekday() == 0:  # Monday only
+            from radar.core import clock as _clock
+            if _clock.et_today().weekday() == 0:  # Monday only (美股 session 以美東日期判斷, #16)
                 from radar.analysis import rate_cycle_advisor as _rc
                 cyc = _rc.detect_cycle()
                 if cyc.get("cycle") != "unknown":
@@ -820,8 +821,8 @@ def main() -> int:
     # === 🎲 投機股精選 (週三 us_open 推 1 次/週, 避免 cluttering) ===
     if market == "us_open":
         try:
-            import datetime as _dt3
-            if _dt3.date.today().weekday() == 2:  # Wednesday only
+            from radar.core import clock as _clock
+            if _clock.et_today().weekday() == 2:  # Wednesday only (美東日期, #16)
                 from radar.screeners import speculation_screener as _ss
                 spec_picks = _ss.compute_speculation_picks(top_n=10, min_score=60) or []
                 if spec_picks:
@@ -1537,8 +1538,9 @@ def main() -> int:
         # 週末重點摘要 (Sat/Sun 22:00 TPE) — 比 holiday_news 早 30 min
         # 觸發後設 state flag, holiday_news 30 min 後若 flag 是今天就 skip (dedup)
         print("Running weekend recap (Sat/Sun 22:00 TPE)...")
-        import datetime as _dt
-        today_str = _dt.date.today().strftime("%Y-%m-%d")
+        from radar.core import clock as _clock
+        # #16: 台北日期。weekend_recap (14:02 UTC) 寫、holiday_news (14:32 UTC) 讀, 兩者同一基準
+        today_str = _clock.tpe_today_str()
         try:
             data = market_open_picks.get_weekend_recap_summary()
             if data.get("next_week_outlook"):
@@ -1577,8 +1579,8 @@ def main() -> int:
         # I2-like dedup: 若今天 weekend_recap 已推, 跳過 holiday_news 避免雙推
         try:
             from radar.core import watchlist_store
-            import datetime as _dt
-            today_str = _dt.date.today().strftime("%Y-%m-%d")
+            from radar.core import clock as _clock
+            today_str = _clock.tpe_today_str()  # 與 weekend_recap 寫入端同基準 (#16)
             state = watchlist_store.load_monitor_state()
             last_recap = state.get("weekend_recap_last_fired")
             if last_recap == today_str:

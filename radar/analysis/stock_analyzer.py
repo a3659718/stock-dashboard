@@ -21,6 +21,7 @@ from typing import Dict, List, Tuple
 import pandas as pd
 import streamlit as st
 
+from radar.core import clock
 from radar.data import data_sources as ds
 from radar.screeners import tw_screener as tw
 
@@ -45,7 +46,7 @@ def fetch_stock_full(stock_id: str) -> dict:
 
 
 def _fetch_tw_full(stock_id: str) -> dict:
-    today = dt.date.today()
+    today = clock.tpe_today()  # 台股 FinMind 查詢區間 (#16)
     end = today.strftime("%Y-%m-%d")
     start_long = (today - dt.timedelta(days=200)).strftime("%Y-%m-%d")
     start_short = (today - dt.timedelta(days=40)).strftime("%Y-%m-%d")

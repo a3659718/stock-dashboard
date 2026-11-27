@@ -26,6 +26,7 @@ from __future__ import annotations
 import datetime as dt
 from typing import Dict, List, Optional
 
+from radar.core import clock
 from radar.data import data_sources as ds
 from radar.core import watchlist_store
 
@@ -41,7 +42,7 @@ def save_predictions(holdings_results: List[Dict]) -> int:
     tracker = state.setdefault("holdings_tracker", {})
     preds = tracker.setdefault("predictions", {})
 
-    today_str = dt.date.today().strftime("%Y-%m-%d")
+    today_str = clock.tpe_today_str()
     today_preds = preds.setdefault(today_str, {})
 
     saved = 0
@@ -65,7 +66,7 @@ def save_predictions(holdings_results: List[Dict]) -> int:
         saved += 1
 
     # 只保留最近 60 天 (避免無限長)
-    cutoff = (dt.date.today() - dt.timedelta(days=60)).strftime("%Y-%m-%d")
+    cutoff = (clock.tpe_today() - dt.timedelta(days=60)).strftime("%Y-%m-%d")
     for d in list(preds.keys()):
         if d < cutoff:
             del preds[d]
@@ -108,7 +109,7 @@ def evaluate_pending_predictions() -> int:
     tracker = state.setdefault("holdings_tracker", {})
     preds = tracker.setdefault("predictions", {})
 
-    today = dt.date.today()
+    today = clock.tpe_today()  # 台北日期 (#16); 呼叫端都在台股盤中/盤後
     today_str = today.strftime("%Y-%m-%d")
     validated = 0
 
@@ -165,7 +166,7 @@ def accuracy_summary(lookback_days: int = 30) -> Dict:
     tracker = state.setdefault("holdings_tracker", {})
     preds = tracker.get("predictions", {})
 
-    today = dt.date.today()
+    today = clock.tpe_today()  # 台北日期 (#16); 呼叫端都在台股盤中/盤後
     cutoff = (today - dt.timedelta(days=lookback_days)).strftime("%Y-%m-%d")
 
     total = 0
@@ -223,7 +224,7 @@ def update_stop_loss_state(holdings_results: List[Dict]) -> int:
     state = watchlist_store.load_monitor_state()
     tracker = state.setdefault("holdings_tracker", {})
     sl_state = tracker.setdefault("stop_loss", {})
-    today_str = dt.date.today().strftime("%Y-%m-%d")
+    today_str = clock.tpe_today_str()
     n = 0
     for h in holdings_results:
         sid = str(h.get("stock_id", ""))
@@ -270,7 +271,7 @@ def check_stop_loss_breaches() -> List[Dict]:
     state = watchlist_store.load_monitor_state()
     tracker = state.setdefault("holdings_tracker", {})
     sl_state = tracker.setdefault("stop_loss", {})
-    today_str = dt.date.today().strftime("%Y-%m-%d")
+    today_str = clock.tpe_today_str()
 
     alerts: List[Dict] = []
     for h in holdings:

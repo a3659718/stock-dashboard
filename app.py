@@ -433,7 +433,7 @@ def _should_send_once(key: str) -> bool:
     跨日會自動清空 (透過 _date 標記)。
     """
     state = _alert_dedup_state()
-    today = dt.date.today().isoformat()
+    today = (dt.datetime.utcnow() + dt.timedelta(hours=8)).date().isoformat()
 
     # 跨日自動清空
     if state.get("_date") != today:
@@ -1702,13 +1702,13 @@ with tab_tw:
                 _is_tw_closed = holiday_check.is_market_closed_today("TW")
             except Exception:
                 pass
-            if dt.date.today().weekday() >= 5:
+            if (dt.datetime.utcnow() + dt.timedelta(hours=8)).date().weekday() >= 5:
                 _is_tw_closed = True
             # 用戶選關: F&G + 台股情緒極值警報 TG 推播 (dashboard 仍會顯示)
             if False and not _is_tw_closed:
                 alert = notifier.fmt_tw_pulse_alert(tw_pulse)
                 if alert:
-                    today_key = dt.date.today().isoformat()
+                    today_key = (dt.datetime.utcnow() + dt.timedelta(hours=8)).date().isoformat()
                     direction = "low" if s <= 25 else "high"
                     dedup_key = f"tw_pulse_{today_key}_{direction}"
                     if _should_send_once(dedup_key):
@@ -2423,7 +2423,7 @@ with tab_pulse:
                         _is_tw_closed = holiday_check.is_market_closed_today("TW")
                     except Exception:
                         pass
-                    if dt.date.today().weekday() >= 5:
+                    if (dt.datetime.utcnow() + dt.timedelta(hours=8)).date().weekday() >= 5:
                         _is_tw_closed = True
 
                     top1 = sectors.iloc[0]
@@ -2431,7 +2431,7 @@ with tab_pulse:
                     if pd.isna(avg):
                         avg = 0.0
                     if not _is_tw_closed and avg >= 1.5:
-                        today_key = dt.date.today().isoformat()
+                        today_key = (dt.datetime.utcnow() + dt.timedelta(hours=8)).date().isoformat()
                         pulse_fp = f"strong_sector_{today_key}_{top1[first_col]}"
                         if _should_send_once(pulse_fp):
                             _themes_for_msg = st.session_state.get("themes", {}).get("themes")
@@ -3882,7 +3882,7 @@ with tab_track:
             st.caption(f"(歷史 CSV 暫時無法讀取: {_cse})")
         st.download_button(
             "💾 下載歷史 CSV", data=_csv_data,
-            file_name=f"tracking_history_{dt.date.today().strftime('%Y%m%d')}.csv",
+            file_name=f"tracking_history_{(dt.datetime.utcnow() + dt.timedelta(hours=8)).date().strftime('%Y%m%d')}.csv",
             use_container_width=True, key="track_download",
             disabled=(not _csv_data),
         )

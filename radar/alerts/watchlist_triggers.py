@@ -6,6 +6,7 @@ import datetime as dt
 import uuid
 from typing import Dict, List, Optional
 
+from radar.core import clock
 from radar.data import data_sources as ds
 
 
@@ -66,7 +67,7 @@ def add_trigger(stock_id: str, trigger_type: str, value: Optional[float] = None,
         "value": float(value) if value is not None else None,
         "fired_at": None,
         "armed": True,
-        "created_at": dt.date.today().strftime("%Y-%m-%d"),
+        "created_at": clock.tpe_today_str(),
     }
     state[_STATE_KEY] = triggers
     _save_state(state)

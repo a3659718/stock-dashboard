@@ -68,17 +68,14 @@ def _stock_weak_metrics(stock_id: str) -> Optional[Dict]:
         if today_bars.empty:
             return None
         current = float(today_bars["Close"].iloc[-1])
-        today_vol = float(today_bars["Volume"].sum())
         prev_close = float(prev_bars["Close"].iloc[-1]) if not prev_bars.empty else current
         today_pct = (current / prev_close - 1) * 100 if prev_close > 0 else 0
 
-        # 量比
-        if not prev_bars.empty:
-            prev_daily = prev_bars.groupby("_d")["Volume"].sum()
-            avg_daily_vol = float(prev_daily.tail(5).mean()) if len(prev_daily) >= 1 else 0
-        else:
-            avg_daily_vol = 0
-        vol_ratio = today_vol / avg_daily_vol if avg_daily_vol > 0 else 0
+        # 量比 (時間校正): 今日累計 ÷ 前幾日「同一時鐘時間」的累計量平均
+        # Bug fix (audit #2): 原本是 今日盤中累計 ÷ 過去 5 日「整天」平均量, 盤中永遠偏小,
+        # WEAK_MIN_VR=1.5 等於要求爆量好幾倍才算「放量下殺」。現在 1.0 = 這個時間點的正常量。
+        from radar.data import intraday_volume as _iv
+        vol_ratio = _iv.intraday_volume_ratio(df_i, market="TW", lookback_days=5) or 0
 
         # MA 跌破檢查
         closes = df["Close"].astype(float)
@@ -244,7 +241,7 @@ def check_and_push_intraday_weak() -> Optional[Dict]:
         from radar.core import watchlist_store
         state = watchlist_store.load_monitor_state()
         iwa = state.setdefault("intraday_weak_alert", {})
-        today_str = dt.date.today().strftime("%Y-%m-%d")
+        today_str = (dt.datetime.utcnow() + dt.timedelta(hours=8)).date().strftime("%Y-%m-%d")
         today_data = iwa.setdefault(today_str, {"count": 0, "last_ts": None})
         if today_data.get("count", 0) >= WEAK_DAILY_CAP:
             return {"triggered": False, "reason": "daily_cap_reached"}

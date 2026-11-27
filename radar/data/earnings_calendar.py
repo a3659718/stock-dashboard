@@ -25,6 +25,7 @@ from typing import Dict, List, Optional, Tuple
 import pandas as pd
 import streamlit as st
 
+from radar.core import clock
 from radar.data import data_sources as ds
 
 
@@ -75,7 +76,7 @@ def _next_tw_monthly_revenue(today: dt.date) -> Tuple[dt.date, str]:
 # ---------------------------------------------------------------------------
 @st.cache_data(ttl=86400, show_spinner=False)
 def _last_tw_quarterly(stock_id: str) -> Optional[dt.date]:
-    today = dt.date.today()
+    today = clock.tpe_today()  # 台股 FinMind 區間 (#16)
     start = (today - dt.timedelta(days=200)).strftime("%Y-%m-%d")
     end = today.strftime("%Y-%m-%d")
     try:
@@ -91,7 +92,7 @@ def _last_tw_quarterly(stock_id: str) -> Optional[dt.date]:
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def _last_tw_monthly_revenue(stock_id: str) -> Optional[Dict]:
-    today = dt.date.today()
+    today = clock.tpe_today()  # 台股 FinMind 區間 (#16)
     # Bug fix: 原本只抓 120 天 → 自算 YoY 時抓不到「一年前」那筆 → YoY 分支永遠失效.
     #          放寬到 400 天, 讓 fallback 自算 YoY 拿得到去年同月資料.
     start = (today - dt.timedelta(days=400)).strftime("%Y-%m-%d")
@@ -131,7 +132,7 @@ def _last_tw_monthly_revenue(stock_id: str) -> Optional[Dict]:
 @st.cache_data(ttl=86400, show_spinner=False)
 def _last_tw_investor_conference(stock_id: str) -> Optional[dt.date]:
     """從 TaiwanStockNews 找最近的法說會新聞."""
-    today = dt.date.today()
+    today = clock.tpe_today()  # 台股 FinMind 區間 (#16)
     start = (today - dt.timedelta(days=120)).strftime("%Y-%m-%d")
     end = today.strftime("%Y-%m-%d")
     try:
@@ -247,7 +248,8 @@ def get_stock_events(stock_id: str, market: str = "TW") -> Dict:
     """回傳 {last_*, next_*, sentiment, brief}.
     market: 'TW' or 'US'.
     """
-    today = dt.date.today()
+    # #16: 美股財報日用美東日期算「距今幾天」, 台股財報/營收截止日用台北日期
+    today = clock.market_today(market)
 
     if market == "US":
         info = _us_earnings_info(stock_id)

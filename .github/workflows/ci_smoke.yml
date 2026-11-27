@@ -17,8 +17,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.11'
       - name: py_compile 全專案 (語法/縮排)
@@ -31,15 +31,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.11'
       # 整個 Python 環境 (含已安裝套件) 一起快取: 命中時直接跳過 pip install,
       # 每次 run 省 40~90 秒 → 推播更快送出。requirements.txt 一改 key 就變, 自動重裝。
       - name: Cache Python environment
         id: pyenv-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ${{ env.pythonLocation }}
           key: pyenv-${{ runner.os }}-${{ env.pythonLocation }}-${{ hashFiles('requirements.txt') }}

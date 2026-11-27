@@ -28,6 +28,7 @@ from __future__ import annotations
 import datetime as dt
 from typing import Dict, List, Optional
 
+from radar.core import clock
 from radar.data import data_sources as ds
 from radar.core import watchlist_store
 from radar.core import holdings_store
@@ -201,7 +202,10 @@ def check_holdings_intraday_risk() -> List[Dict]:
 
     state = watchlist_store.load_monitor_state()
     hi_state = state.setdefault("holdings_intraday_alert", {})
-    today_str = dt.date.today().strftime("%Y-%m-%d")
+    # audit #16: 刻意用 UTC 日期當「交易日」分界。monitor 同時掃 TW+US 持倉,
+    # UTC 00:00 剛好落在美股收盤 (20/21 UTC) 與台股開盤 (01 UTC) 之間; 改成台北日期
+    # 會在 16:00 UTC (美股盤中) 換日 → 美股持倉同一盤中可能被推兩次。
+    today_str = clock.utc_now().strftime("%Y-%m-%d")
     now_utc = dt.datetime.now(dt.timezone.utc)
 
     # 跨日 reset
@@ -264,7 +268,7 @@ def mark_alerts_sent(alerts: List[Dict]) -> None:
     try:
         state = watchlist_store.load_monitor_state()
         hi_state = state.setdefault("holdings_intraday_alert", {})
-        today_str = dt.date.today().strftime("%Y-%m-%d")
+        today_str = clock.utc_now().strftime("%Y-%m-%d")  # 刻意 UTC, 見 check_holdings_intraday_risk
         if hi_state.get("date") != today_str:
             hi_state.clear()
             hi_state.update({"date": today_str, "stocks_alerted": [], "last_batch_at": None})

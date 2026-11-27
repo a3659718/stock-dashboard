@@ -12,6 +12,7 @@ holdings_store.py
 from __future__ import annotations
 
 import datetime as dt
+from radar.core import clock
 import json
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -161,7 +162,7 @@ def add_holding(stock_id: str, name: str = "", entry_price: Optional[float] = No
             "entry_price": entry_price,
             "shares": shares,
             "note": note,
-            "added_date": dt.date.today().isoformat(),
+            "added_date": clock.tpe_today().isoformat(),  # 使用者看到的日期 = 台北 (#16)
             "stop_price": stop_price,
         }
         if market:

@@ -19,6 +19,7 @@ import numpy as np
 import pandas as pd
 
 from radar.data import data_sources as ds
+from radar.core import clock
 from radar.analysis import indicators as ind
 from radar.analysis import theme_analyzer as theme
 # 長線目標價估算 (gemini 為選用 — 沒設 key 自動 skip)
@@ -613,7 +614,7 @@ def _run_impl(symbols: List[str], max_workers: int = 5,
             # Bug fix: 原本寫死 today() — 週末/假日/yfinance 卡住時會把昨天資料標成今天.
             #          改取實際抓到的最新 K 線日期眾數, 反映真正資料日.
             "data_date": (max(set(last_dates), key=last_dates.count)
-                          if last_dates else dt.date.today().strftime("%Y-%m-%d")),
+                          if last_dates else clock.et_today_str()),  # 美股資料日: 美東 (#16)
             "breakout_count": len(breakout),
             "acceleration_count": len(acceleration),
             "squeeze_count": len(squeeze),

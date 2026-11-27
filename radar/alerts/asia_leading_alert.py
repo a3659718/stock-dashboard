@@ -16,6 +16,7 @@ from __future__ import annotations
 import datetime as dt
 from typing import Dict, List
 
+from radar.core import clock
 from radar.core import watchlist_store
 
 
@@ -114,7 +115,7 @@ def check_asia_leading() -> List[Dict]:
 
     state = watchlist_store.load_monitor_state()
     al_state = state.setdefault("asia_leading_alert", {})
-    today_str = dt.date.today().strftime("%Y-%m-%d")
+    today_str = clock.tpe_today_str()  # 台股盤中才跑 (UTC 01-05 時台北/UTC 同日, 換基準無副作用)
     if al_state.get("date") != today_str:
         al_state.clear()
         al_state.update({"date": today_str, "alerted": []})
@@ -175,7 +176,7 @@ def mark_alerts_sent(alerts: List[Dict]) -> None:
     try:
         state = watchlist_store.load_monitor_state()
         al = state.setdefault("asia_leading_alert", {})
-        today_str = dt.date.today().strftime("%Y-%m-%d")
+        today_str = clock.tpe_today_str()
         if al.get("date") != today_str:
             al.clear()
             al.update({"date": today_str, "alerted": []})

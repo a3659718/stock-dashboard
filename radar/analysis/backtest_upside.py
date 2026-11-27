@@ -3,7 +3,13 @@ backtest_upside.py
 upside_screener 的 walk-forward 回測模組.
 
 設計重點:
-  - 避免 look-ahead bias: 在 "as of date T" 跑訊號時, 只用 T 以前的資料
+  - 避免 look-ahead bias: 在 "as of date T" 跑訊號時, 只用 T (含) 以前的資料
+  - 進場規則 = 隔日開盤進場 (2026-11-27 修正, audit #1):
+      訊號用到 T 日收盤 + T 日籌碼 (台股法人買賣超約 15:00-16:30 才公布, 晚於 13:30 收盤;
+      融資融券更晚), 所以「T 日收盤價進場」實盤做不到 → 舊版勝率被高估。
+      現在一律以 T+1 開盤價進場 (開盤價缺失 / 0 才退回 T+1 收盤; 沒有 T+1 K 棒則跳過該訊號),
+      持有天數從 T+1 起算 (ret_5d = T+5 收盤 / T+1 開盤), 期間高低點 / 目標停損觸發也從進場後起算。
+  - ⚠️ 2026-11-27 之前跑出來的回測數字是「T 日收盤進場」, 與現在的結果不可直接比較。
   - 支援可選的 chip_provider (callable) — 沒提供時跑「純技術面」回測
   - 對每個 pick 計算多個 holding period 的 forward return
   - 與大盤 (TWII / 自訂 benchmark) 比較算 alpha
@@ -29,12 +35,37 @@ upside_screener 的 walk-forward 回測模組.
 from __future__ import annotations
 
 import datetime as dt
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 
 from radar.analysis import indicators as ind
+
+
+# 進場規則說明 (給輸出 / UI 標籤用)
+ENTRY_RULE = "隔日開盤進場"
+
+
+def _next_open_entry(df_after: pd.DataFrame) -> Optional[Tuple[pd.Timestamp, float, str]]:
+    """由訊號日 T 之後的第一根 K 棒 (T+1) 決定進場價.
+
+    df_after: 該股 date > T 的日線, 必須已依日期升冪排序.
+    回傳 (entry_date, entry_price, basis):
+      basis = "open"  → T+1 開盤價 (正常情況)
+      basis = "close" → T+1 開盤價缺失 / <=0, 退回 T+1 收盤 (仍不含 T 日收盤後才知道的資訊)
+    沒有 T+1 K 棒, 或開盤 / 收盤都無效 → None (呼叫端應跳過此訊號)。
+    """
+    if df_after is None or df_after.empty:
+        return None
+    nxt = df_after.iloc[0]
+    o = pd.to_numeric(nxt["open"], errors="coerce") if "open" in df_after.columns else np.nan
+    if pd.notna(o) and float(o) > 0:
+        return pd.Timestamp(nxt["date"]), float(o), "open"
+    c = pd.to_numeric(nxt["close"], errors="coerce") if "close" in df_after.columns else np.nan
+    if pd.notna(c) and float(c) > 0:
+        return pd.Timestamp(nxt["date"]), float(c), "close"
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -232,6 +263,11 @@ def backtest(prices: Dict[str, pd.DataFrame],
     """
     chip_required = chip_provider is not None
     start_ts = pd.Timestamp(start_date)
+    # 先依日期排序: _compute_features_at 用 iloc[-1] 當「T 日」、df_after.iloc[0] 當 T+1,
+    # 輸入若沒排序, 兩者都可能指到別天 → 訊號 / 進場錯位。
+    prices = {sid: (df.sort_values("date").reset_index(drop=True)
+                    if df is not None and not df.empty else df)
+              for sid, df in prices.items()}
     end_ts = pd.Timestamp(end_date)
 
     # 找出 [start, end] 內所有交易日 (取最豐富的那檔股票)
@@ -257,31 +293,45 @@ def backtest(prices: Dict[str, pd.DataFrame],
                 sc = check_fn(f, chip_required)
                 if sc is None:
                     continue
-                # 計算 forward returns
-                entry_price = float(f["current"])
-                fwd = {}
+                # 計算 forward returns — 隔日開盤進場 (見模組 docstring)
+                # 舊版用 f["current"] (= T 日收盤) 當進場價, 但訊號用到 T 日收盤後才公布的籌碼 → look-ahead。
                 df_after = df[df["date"] > as_of].reset_index(drop=True)
+                entry = _next_open_entry(df_after)
+                if entry is None:
+                    # 訊號出在最後一根 K 棒 (沒有 T+1) → 實盤無法進場, 不計入
+                    continue
+                entry_date, entry_price, entry_basis = entry
+                # 開盤進場: T+1 整根 K 棒都在進場之後; 退回收盤進場時 T+1 的高低點發生在進場前, 要跳過
+                path_start = 0 if entry_basis == "open" else 1
+                fwd = {}
                 for hd in hold_days:
+                    # 持有天數從 T+1 起算: 第 hd 天 = df_after.iloc[hd - 1]
                     if len(df_after) >= hd:
                         exit_price = float(df_after.iloc[hd - 1]["close"])
                         fwd[f"ret_{hd}d"] = (exit_price / entry_price - 1) * 100
-                        # 期間最高/最低 (給 MAE / MFE 用)
-                        period = df_after.iloc[:hd]
-                        fwd[f"max_{hd}d"] = (float(period["high"].max()) / entry_price - 1) * 100
-                        fwd[f"min_{hd}d"] = (float(period["low"].min()) / entry_price - 1) * 100
+                        # 期間最高/最低 (給 MAE / MFE 用) — 只看進場之後的 K 棒
+                        period = df_after.iloc[path_start:hd]
+                        if period.empty:
+                            fwd[f"max_{hd}d"] = fwd[f"ret_{hd}d"]
+                            fwd[f"min_{hd}d"] = fwd[f"ret_{hd}d"]
+                        else:
+                            fwd[f"max_{hd}d"] = (float(period["high"].max()) / entry_price - 1) * 100
+                            fwd[f"min_{hd}d"] = (float(period["low"].min()) / entry_price - 1) * 100
                     else:
                         fwd[f"ret_{hd}d"] = None
                         fwd[f"max_{hd}d"] = None
                         fwd[f"min_{hd}d"] = None
 
                 # 是否觸碰 ATR 目標 / 停損
+                # target / stop 是 T 日收盤後用 T (含) 以前資料算出的價位 (= 實盤推播會給的價位), 不含未來資訊;
+                # 觸發檢查只看進場後的 K 棒, 天數同樣以 T+1 = 第 1 天計。
                 levels = f.get("levels") or {}
-                if levels and len(df_after) > 0:
+                if levels and len(df_after) > path_start:
                     target = levels.get("target")
                     stop = levels.get("stop")
                     hit_target_at = None
                     hit_stop_at = None
-                    for i, row in df_after.head(20).iterrows():
+                    for i, row in df_after.iloc[path_start:20].iterrows():
                         if target and not hit_target_at and float(row["high"]) >= target:
                             hit_target_at = i + 1
                         if stop and not hit_stop_at and float(row["low"]) <= stop:
@@ -294,7 +344,10 @@ def backtest(prices: Dict[str, pd.DataFrame],
                 rows.append({
                     "as_of": as_of, "stock_id": sid, "name": f["name"],
                     "category": cat, "score": sc,
-                    "entry_price": round(entry_price, 2),
+                    "signal_close": round(float(f["current"]), 2),   # T 日收盤 (訊號價, 非進場價)
+                    "entry_date": entry_date,
+                    "entry_price": round(entry_price, 2),            # T+1 開盤 (隔日開盤進場)
+                    "entry_basis": entry_basis,                      # "open" / "close" (開盤缺值退回收盤)
                     "pct_from_52w_high": round(f.get("pct_from_52w_high") or 0, 2),
                     "pct_from_52w_low": round(f.get("pct_from_52w_low") or 0, 2),
                     "rsi": round(f.get("rsi") or 0, 1),
@@ -314,10 +367,11 @@ def backtest(prices: Dict[str, pd.DataFrame],
         bench_returns_per_scan = {hd: [] for hd in hold_days}
         for as_of in rescan_dates:
             b_after = bdf[bdf["date"] > as_of].reset_index(drop=True)
-            entry = bdf[bdf["date"] <= as_of]
-            if entry.empty:
+            # 與個股一致: 大盤也用 T+1 開盤進場 (指數沒有 open 欄位 / 開盤為 0 時退回 T+1 收盤)
+            b_entry = _next_open_entry(b_after)
+            if b_entry is None:
                 continue
-            entry_p = float(entry.iloc[-1]["close"])
+            entry_p = b_entry[1]
             for hd in hold_days:
                 if len(b_after) >= hd:
                     r = (float(b_after.iloc[hd - 1]["close"]) / entry_p - 1) * 100
@@ -365,5 +419,6 @@ def backtest(prices: Dict[str, pd.DataFrame],
             "start": start_date, "end": end_date,
             "chip_required": chip_required,
             "hold_days": hold_days,
+            "entry_rule": ENTRY_RULE,
         }
     }

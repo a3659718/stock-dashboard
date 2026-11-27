@@ -2,7 +2,7 @@
   "counts": {
     "claim_rollback": 7,
     "cron_coverage": 0,
-    "orphan_keys": 74
+    "orphan_keys": 72
   },
   "items": {
     "claim_rollback": [
@@ -24,8 +24,7 @@
       "GITHUB_REF_NAME  @ scripts/punctual_scheduler.py:165",
       "GITHUB_REPOSITORY  @ scripts/punctual_scheduler.py:164",
       "GITHUB_TOKEN  @ scripts/punctual_scheduler.py:163",
-      "RS  @ radar/screeners/us_actionable.py:221",
-      "SBLShortSalesCurrentDayBalance  @ radar/analysis/smart_money_stealth.py:102",
+      "RS  @ radar/screeners/us_actionable.py:222",
       "SCHEDULER_AFTER  @ scripts/punctual_scheduler.py:170",
       "US_WATCHLIST  @ scripts/morning_brief.py:376",
       "_part_idx  @ radar/notify/notifier.py:292",
@@ -33,14 +32,14 @@
       "_split_tg_msg  @ scripts/test_tg_regressions.py:34",
       "_u16_len  @ scripts/test_tg_regressions.py:36",
       "alt_scenario  @ radar/analysis/daily_outlook_advisor.py:291",
-      "api_request_count  @ radar/core/system_health.py:197",
-      "api_request_limit  @ radar/core/system_health.py:198",
+      "api_request_count  @ radar/core/system_health.py:198",
+      "api_request_limit  @ radar/core/system_health.py:199",
       "bot_token  @ Claude outputs/order_bridge.py:200",
       "callback_query  @ scripts/tg_callback_listener.py:292",
-      "change  @ radar/alerts/analyst_insider_alert.py:109",
+      "change  @ radar/alerts/analyst_insider_alert.py:111",
       "chat  @ scripts/tg_callback_listener.py:254",
       "clean_energy_grid  @ scripts/test_policy_regime.py:34",
-      "company  @ scripts/market_open_alert.py:1442",
+      "company  @ scripts/market_open_alert.py:1443",
       "count_as_push  @ scripts/test_schedule_guard.py:58",
       "dates  @ Claude outputs/order_bridge.py:134",
       "db_path  @ Claude outputs/order_bridge.py:115",
@@ -52,13 +51,13 @@
       "jobs  @ scripts/setup_cronjob_org.py:103",
       "key_signals  @ radar/analysis/daily_outlook_advisor.py:302",
       "last_year_revenue  @ radar/analysis/stock_deep_analyzer.py:555",
-      "listing_date  @ radar/alerts/ipo_calendar_alert.py:110",
+      "listing_date  @ radar/alerts/ipo_calendar_alert.py:111",
       "main_broker_net_pct  @ radar/analysis/entry_evaluator.py:484",
       "options  @ scripts/test_schedule_guard.py:111",
       "ownership  @ radar/screeners/us_screener.py:385",
       "password  @ Claude outputs/order_bridge.py:751",
       "path  @ scripts/setup_cronjob_org.py:150",
-      "rate_5d  @ radar/screeners/us_upside_screener.py:230",
+      "rate_5d  @ radar/screeners/us_upside_screener.py:231",
       "result  @ scripts/tg_callback_listener.py:286",
       "rs_vs_market  @ app.py:3954",
       "scenario  @ radar/analysis/daily_outlook_advisor.py:288",
@@ -68,9 +67,9 @@
       "send_message  @ scripts/test_tg_regressions.py:37",
       "slot  @ radar/core/schedule_guard.py:176",
       "slots  @ radar/core/schedule_guard.py:174",
-      "source_link  @ radar/data/event_sources.py:144",
+      "source_link  @ radar/data/event_sources.py:146",
       "spot_price  @ radar/alerts/tx_futures_alert.py:201",
-      "stock_no  @ radar/alerts/ipo_calendar_alert.py:114",
+      "stock_no  @ radar/alerts/ipo_calendar_alert.py:115",
       "stop_loss_advice  @ radar/analysis/daily_outlook_advisor.py:317",
       "stop_pct  @ radar/notify/notifier.py:1386",
       "trade_action  @ radar/notify/notifier.py:3800",
@@ -79,10 +78,9 @@
       "trading_session  @ radar/analysis/institutional_positioning.py:255",
       "trigger_id  @ app.py:947",
       "tw_symbols  @ app.py:3760",
-      "tz  @ scripts/punctual_scheduler.py:55",
       "update_id  @ scripts/tg_callback_listener.py:290",
       "us_symbols  @ app.py:3759",
-      "user_count_limit  @ radar/core/system_health.py:198",
+      "user_count_limit  @ radar/core/system_health.py:199",
       "user_id  @ Claude outputs/order_bridge.py:750",
       "valuation_label  @ radar/analysis/entry_evaluator.py:333",
       "workflow  @ scripts/punctual_scheduler.py:107",
@@ -92,5 +90,5 @@
       "總命中筆數  @ scripts/test_dashboard_ui.py:208"
     ]
   },
-  "silent_except": 439
+  "silent_except": 437
 }

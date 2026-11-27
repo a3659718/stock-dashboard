@@ -42,7 +42,9 @@ def _today_tpe() -> dt.date:
     誤報「台股/美股今日休市」, 使用者可能因此以為當天不用看盤。
     改用這支 TPE 校正過的日期當預設值, 修掉這整個 root cause。
     """
-    return (dt.datetime.utcnow() + dt.timedelta(hours=8)).date()
+    # audit #16: 統一改用 radar.core.clock (同一套時區邏輯, 不再各自 +8h)
+    from radar.core import clock
+    return clock.tpe_today()
 
 
 def _today_et() -> dt.date:
@@ -60,16 +62,12 @@ def _today_et() -> dt.date:
     國定假日則是整組差一天: 感恩節前一天 (有交易) 被 skip, 感恩節當天 (休市) 反而
     推了一封「美股收盤分析」。
 
-    ET = UTC-4 (夏令) / UTC-5 (冬令)。DST 判斷沿用 index_alerts 那一套, 失敗時
-    用「3 月中 ~ 11 月初」粗略近似 (只影響切換週的邊界, 且該週美股本來就有開盤)。
+    ET = UTC-4 (夏令) / UTC-5 (冬令)。DST 由 clock.et_today() 透過 zoneinfo
+    (America/New_York) 處理; tzdata 不可用時 clock 內有「3 月第二個週日 ~ 11 月第一個週日」規則備援。
     """
-    now_utc = dt.datetime.utcnow()
-    try:
-        from radar.alerts import index_alerts
-        dst = bool(index_alerts._is_us_in_dst(now_utc.date()))
-    except Exception:
-        dst = 3 <= now_utc.month <= 10
-    return (now_utc - dt.timedelta(hours=4 if dst else 5)).date()
+    # audit #16: 改用 radar.core.clock.et_today() (zoneinfo, 精確處理 DST 切換當天)
+    from radar.core import clock
+    return clock.et_today()
 
 
 def _today_for_market(market: str) -> dt.date:
